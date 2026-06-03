@@ -1,0 +1,21 @@
+[package]
+name = "chine"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "A pure-Rust Spine 4.3 skeletal animation runtime (renderer-agnostic)."
+repository = "https://github.com/Oneiriq/chine"
+keywords = ["spine", "animation", "skeletal", "2d", "gamedev"]
+categories = ["game-development", "graphics"]
+
+[features]
+default = ["json"]
+# Load `.json` skeleton exports.
+json = ["dep:serde", "dep:serde_json"]
+# Load `.skel` binary skeleton exports.
+binary = []
+
+[dependencies]
+glam = "0.30"
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
