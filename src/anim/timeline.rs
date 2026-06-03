@@ -219,8 +219,9 @@ pub(crate) enum Timeline {
     Physics(ConstraintTimeline, PhysicsProperty),
     /// Physics constraint reset, fired on keyframe crossings.
     PhysicsReset(PhysicsResetTimeline),
-    /// Slot tint color (RGBA); the timeline's index is the slot.
-    SlotColor(ConstraintTimeline),
+    /// Slot tint color; the index is the slot, the flag whether alpha is keyed
+    /// (RGBA vs RGB).
+    SlotColor(ConstraintTimeline, bool),
     /// Slot attachment swap (stepped).
     Attachment(AttachmentTimeline),
     /// Slot draw order (stepped permutations).
@@ -255,7 +256,9 @@ impl Timeline {
                 apply_physics(t, *property, skeleton, time, alpha, from, add);
             }
             Timeline::PhysicsReset(t) => apply_physics_reset(t, skeleton, last_time, time),
-            Timeline::SlotColor(t) => apply_slot_color(t, skeleton, time, alpha, from, add),
+            Timeline::SlotColor(t, has_alpha) => {
+                apply_slot_color(t, *has_alpha, skeleton, time, alpha, from, add);
+            }
             Timeline::Attachment(t) => apply_attachment(t, skeleton, time, from),
             Timeline::DrawOrder(t) => apply_draw_order(t, skeleton, time),
         }
@@ -710,10 +713,11 @@ fn apply_physics_reset(t: &PhysicsResetTimeline, skel: &mut Skeleton, last_time:
     }
 }
 
-/// Slot color timeline: blends the slot's RGBA tint from its setup color toward
-/// the keyed colors. The timeline's index is the slot.
+/// Slot color timeline: blends the slot's RGB (and alpha when `has_alpha`) tint
+/// from its setup color toward the keyed colors. The index is the slot.
 fn apply_slot_color(
     t: &ConstraintTimeline,
+    has_alpha: bool,
     skel: &mut Skeleton,
     time: f32,
     alpha: f32,
@@ -725,12 +729,21 @@ fn apply_slot_color(
     };
     if time < t.curve.first_time() {
         match from {
-            MixFrom::Setup => slot.color = setup.color,
+            MixFrom::Setup => {
+                slot.color.r = setup.color.r;
+                slot.color.g = setup.color.g;
+                slot.color.b = setup.color.b;
+                if has_alpha {
+                    slot.color.a = setup.color.a;
+                }
+            }
             MixFrom::First => {
                 slot.color.r += (setup.color.r - slot.color.r) * alpha;
                 slot.color.g += (setup.color.g - slot.color.g) * alpha;
                 slot.color.b += (setup.color.b - slot.color.b) * alpha;
-                slot.color.a += (setup.color.a - slot.color.a) * alpha;
+                if has_alpha {
+                    slot.color.a += (setup.color.a - slot.color.a) * alpha;
+                }
             }
             MixFrom::Current => {}
         }
@@ -760,14 +773,16 @@ fn apply_slot_color(
         slot.color.b,
         setup.color.b,
     );
-    slot.color.a = absolute_value_with(
-        t.curve.value(time, 4),
-        alpha,
-        from,
-        add,
-        slot.color.a,
-        setup.color.a,
-    );
+    if has_alpha {
+        slot.color.a = absolute_value_with(
+            t.curve.value(time, 4),
+            alpha,
+            from,
+            add,
+            slot.color.a,
+            setup.color.a,
+        );
+    }
 }
 
 /// Slot attachment timeline: a stepped switch to the keyed attachment name.
