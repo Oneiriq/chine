@@ -28,6 +28,9 @@ pub struct TrackEntry {
     mix_time: f32,
     // The animation being mixed out of (the previous entry on this track).
     mixing_from: Option<Box<TrackEntry>>,
+    // The queued animation, and the track time at which it takes over.
+    next: Option<Box<TrackEntry>>,
+    delay: f32,
 }
 
 impl TrackEntry {
@@ -42,6 +45,8 @@ impl TrackEntry {
             mix_duration: 0.0,
             mix_time: 0.0,
             mixing_from: None,
+            next: None,
+            delay: 0.0,
         }
     }
 
@@ -151,12 +156,40 @@ impl AnimationState {
         if self.default_mix > 0.0 {
             if let Some(mut current) = self.tracks[track].take() {
                 current.mixing_from = None; // collapse any in-progress crossfade
+                current.next = None; // interrupt the queue
                 entry.mix_duration = self.default_mix;
                 entry.mixing_from = Some(Box::new(current));
             }
         }
         self.tracks[track] = Some(entry);
         self.tracks[track].as_mut().expect("just set")
+    }
+
+    /// Queue `animation` on track 0 after the current animation and any already
+    /// queued; it crossfades in over [`Self::default_mix`] as the previous one
+    /// ends.
+    pub fn add_animation(&mut self, animation: Arc<Animation>, looping: bool) {
+        self.add_animation_on(0, animation, looping);
+    }
+
+    /// Queue `animation` on `track` after the current animation and any already
+    /// queued. If the track is empty it plays immediately.
+    pub fn add_animation_on(&mut self, track: usize, animation: Arc<Animation>, looping: bool) {
+        let default_mix = self.default_mix;
+        while self.tracks.len() <= track {
+            self.tracks.push(None);
+        }
+        let entry = TrackEntry::new(animation, looping);
+        if let Some(current) = self.tracks[track].as_mut() {
+            let mut node = current;
+            while node.next.is_some() {
+                node = node.next.as_deref_mut().expect("checked some");
+            }
+            node.delay = (node.animation.duration() - default_mix).max(0.0);
+            node.next = Some(Box::new(entry));
+        } else {
+            self.tracks[track] = Some(entry);
+        }
     }
 
     /// Remove every track.
@@ -179,8 +212,12 @@ impl AnimationState {
 
     /// Advance every track by `delta` seconds.
     pub fn update(&mut self, delta: f32) {
-        for entry in self.tracks.iter_mut().flatten() {
-            entry.advance(delta);
+        let default_mix = self.default_mix;
+        for slot in &mut self.tracks {
+            if let Some(entry) = slot.as_mut() {
+                entry.advance(delta);
+            }
+            promote(slot, default_mix);
         }
     }
 
@@ -194,6 +231,26 @@ impl AnimationState {
             }
         }
     }
+}
+
+/// Promote a track's queued entry to current once the current entry reaches its
+/// delay, crossfading the previous current out over `default_mix`.
+fn promote(slot: &mut Option<TrackEntry>, default_mix: f32) {
+    let ready = slot
+        .as_ref()
+        .is_some_and(|c| c.next.is_some() && c.track_time >= c.delay);
+    if !ready {
+        return;
+    }
+    let mut current = slot.take().expect("checked some");
+    let mut next = current.next.take().expect("checked some");
+    current.mixing_from = None;
+    if default_mix > 0.0 {
+        next.mix_duration = default_mix;
+        next.mix_time = 0.0;
+        next.mixing_from = Some(Box::new(current));
+    }
+    *slot = Some(*next);
 }
 
 #[cfg(test)]
@@ -303,5 +360,39 @@ mod tests {
         // base 100, then blended halfway toward 20 -> 60.
         let r = sk.bone(0).unwrap().rotation;
         assert!((r - 60.0).abs() < 1e-3, "expected layered 60, got {r}");
+    }
+
+    #[test]
+    fn queued_animation_transitions_after_the_first() {
+        let mut sk = one_bone();
+        let mut state = AnimationState::new();
+        state.default_mix = 0.2;
+        // A holds rotation 0 for one second (duration 1).
+        let mut a = BoneTimeline::one_value(0, 2, 0);
+        a.set_frame1(0, 0.0, 0.0);
+        a.set_frame1(1, 1.0, 0.0);
+        state.set_animation(
+            Arc::new(Animation::new("a", 1.0, vec![Timeline::Rotate(a)])),
+            false,
+        );
+        // Queue B (holds rotation 90) to follow A.
+        state.add_animation(hold(90.0), false);
+
+        // Before A's delay (1.0 - 0.2 = 0.8), still on A.
+        state.update(0.5);
+        sk.set_bones_to_setup_pose();
+        state.apply(&mut sk);
+        assert!(
+            (sk.bone(0).unwrap().rotation - 0.0).abs() < 1e-3,
+            "should still be A"
+        );
+
+        // Cross the delay (promotes B), then finish the crossfade.
+        state.update(0.4);
+        state.update(0.3);
+        sk.set_bones_to_setup_pose();
+        state.apply(&mut sk);
+        let r = sk.bone(0).unwrap().rotation;
+        assert!((r - 90.0).abs() < 1e-3, "expected B (90), got {r}");
     }
 }
