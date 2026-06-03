@@ -182,6 +182,38 @@ impl Curve {
             _ => current + (if add { value } else { value + setup - current }) * alpha,
         }
     }
+
+    /// Value for an absolute property (replaces the setup value rather than
+    /// adding to it). Spine `getAbsoluteValue`.
+    pub(crate) fn absolute_value(
+        &self,
+        time: f32,
+        alpha: f32,
+        from: MixFrom,
+        add: bool,
+        current: f32,
+        setup: f32,
+    ) -> f32 {
+        if time < self.frames[0] {
+            return before_first_key(from, alpha, current, setup);
+        }
+        absolute_value_with(self.value(time, 1), alpha, from, add, current, setup)
+    }
+
+    /// Set a frame with `time` followed by one value per channel.
+    pub(crate) fn set_frame_n(&mut self, frame: usize, time: f32, values: &[f32]) {
+        let i = frame * self.entries;
+        self.frames[i] = time;
+        for (k, v) in values.iter().enumerate() {
+            self.frames[i + 1 + k] = *v;
+        }
+    }
+
+    /// The raw (stepped) value at `value_offset` in the frame containing `time`.
+    pub(crate) fn frame_value(&self, time: f32, value_offset: usize) -> f32 {
+        let i = search(&self.frames, time, self.entries);
+        self.frames[i + value_offset]
+    }
 }
 
 /// First frame start index (stride `step`) whose time is `<= time`. `time` must
@@ -204,6 +236,29 @@ fn before_first_key(from: MixFrom, alpha: f32, current: f32, setup: f32) -> f32 
         MixFrom::Setup => setup,
         MixFrom::First => current + (setup - current) * alpha,
         MixFrom::Current => current,
+    }
+}
+
+/// Mix a precomputed timeline `value` into an absolute property (the value
+/// replaces, rather than adds to, the base). Spine's `getAbsoluteValue`
+/// value-overload, used by the multi-channel constraint timelines.
+pub(crate) fn absolute_value_with(
+    value: f32,
+    alpha: f32,
+    from: MixFrom,
+    add: bool,
+    current: f32,
+    setup: f32,
+) -> f32 {
+    let base = if matches!(from, MixFrom::Setup) {
+        setup
+    } else {
+        current
+    };
+    if add {
+        base + value * alpha
+    } else {
+        base + (value - base) * alpha
     }
 }
 

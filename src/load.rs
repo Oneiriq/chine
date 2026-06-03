@@ -16,7 +16,7 @@ use std::sync::Arc;
 use glam::Vec2;
 use serde_json::Value;
 
-use crate::anim::{Animation, BoneTimeline, Timeline};
+use crate::anim::{Animation, BoneTimeline, ConstraintTimeline, Timeline};
 use crate::attach::{Attachment, MeshAttachment, MeshVertices, PathAttachment, RegionAttachment};
 use crate::constraint::ik::IkConstraintData;
 use crate::constraint::path::{PathConstraintData, PositionMode, RotateMode, SpacingMode};
@@ -300,6 +300,96 @@ fn parse_animation(name: &str, anim: &Value, data: &SkeletonData) -> Result<Anim
             }
         }
     }
+    if let Some(iks) = anim.get("ik").and_then(Value::as_object) {
+        for (cname, keys) in iks {
+            let Some(keys) = keys.as_array() else {
+                continue;
+            };
+            if keys.is_empty() {
+                continue;
+            }
+            let idx = data
+                .ik_constraints
+                .iter()
+                .position(|c| c.name == *cname)
+                .ok_or_else(|| LoadError::BadReference(cname.clone()))?;
+            let (tl, dur) = read_ik_timeline(keys, idx);
+            duration = duration.max(dur);
+            timelines.push(Timeline::Ik(tl));
+        }
+    }
+    if let Some(tcs) = anim.get("transform").and_then(Value::as_object) {
+        for (cname, keys) in tcs {
+            let Some(keys) = keys.as_array() else {
+                continue;
+            };
+            if keys.is_empty() {
+                continue;
+            }
+            let idx = data
+                .transform_constraints
+                .iter()
+                .position(|c| c.name == *cname)
+                .ok_or_else(|| LoadError::BadReference(cname.clone()))?;
+            let (tl, dur) = read_curve_timeline(
+                keys,
+                idx,
+                &[
+                    ("mixRotate", 1.0),
+                    ("mixX", 1.0),
+                    ("mixY", 1.0),
+                    ("mixScaleX", 1.0),
+                    ("mixScaleY", 1.0),
+                    ("mixShearY", 1.0),
+                ],
+            );
+            duration = duration.max(dur);
+            timelines.push(Timeline::TransformMix(tl));
+        }
+    }
+    if let Some(pcs) = anim.get("path").and_then(Value::as_object) {
+        for (cname, channels) in pcs {
+            let idx = data
+                .path_constraints
+                .iter()
+                .position(|c| c.name == *cname)
+                .ok_or_else(|| LoadError::BadReference(cname.clone()))?;
+            let Some(channels) = channels.as_object() else {
+                continue;
+            };
+            for (channel, keys) in channels {
+                let Some(keys) = keys.as_array() else {
+                    continue;
+                };
+                if keys.is_empty() {
+                    continue;
+                }
+                match channel.as_str() {
+                    "position" => {
+                        let (tl, dur) = read_curve_timeline(keys, idx, &[("position", 0.0)]);
+                        duration = duration.max(dur);
+                        timelines.push(Timeline::PathPosition(tl));
+                    }
+                    "spacing" => {
+                        let (tl, dur) = read_curve_timeline(keys, idx, &[("spacing", 0.0)]);
+                        duration = duration.max(dur);
+                        timelines.push(Timeline::PathSpacing(tl));
+                    }
+                    "mix" => {
+                        let (tl, dur) = read_curve_timeline(
+                            keys,
+                            idx,
+                            &[("mixRotate", 1.0), ("mixX", 1.0), ("mixY", 1.0)],
+                        );
+                        duration = duration.max(dur);
+                        timelines.push(Timeline::PathMix(tl));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
     Ok(Animation::new(name, duration, timelines))
 }
 
@@ -366,13 +456,85 @@ fn read_timeline2(
     (tl, duration)
 }
 
+/// A timeline whose curve interpolation the loader can configure (stepped or
+/// Bezier), implemented by bone and constraint timelines so [`read_curve`] works
+/// for both.
+trait CurveBuilder {
+    fn stepped(&mut self, frame: usize);
+    #[allow(clippy::too_many_arguments)]
+    fn bezier(
+        &mut self,
+        bezier: usize,
+        frame: usize,
+        value: usize,
+        time1: f32,
+        value1: f32,
+        cx1: f32,
+        cy1: f32,
+        cx2: f32,
+        cy2: f32,
+        time2: f32,
+        value2: f32,
+    );
+}
+
+impl CurveBuilder for BoneTimeline {
+    fn stepped(&mut self, frame: usize) {
+        self.set_stepped(frame);
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn bezier(
+        &mut self,
+        bezier: usize,
+        frame: usize,
+        value: usize,
+        time1: f32,
+        value1: f32,
+        cx1: f32,
+        cy1: f32,
+        cx2: f32,
+        cy2: f32,
+        time2: f32,
+        value2: f32,
+    ) {
+        self.set_bezier(
+            bezier, frame, value, time1, value1, cx1, cy1, cx2, cy2, time2, value2,
+        );
+    }
+}
+
+impl CurveBuilder for ConstraintTimeline {
+    fn stepped(&mut self, frame: usize) {
+        self.set_stepped(frame);
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn bezier(
+        &mut self,
+        bezier: usize,
+        frame: usize,
+        value: usize,
+        time1: f32,
+        value1: f32,
+        cx1: f32,
+        cy1: f32,
+        cx2: f32,
+        cy2: f32,
+        time2: f32,
+        value2: f32,
+    ) {
+        self.set_bezier(
+            bezier, frame, value, time1, value1, cx1, cy1, cx2, cy2, time2, value2,
+        );
+    }
+}
+
 /// Apply one keyframe's `curve` field (absent = linear, `"stepped"`, or a Bezier
 /// array; the array holds 4 floats per value channel at offset `value_ord * 4`).
 /// Mirrors Spine's `readCurve`.
 #[allow(clippy::too_many_arguments)]
 fn read_curve(
     curve: &Value,
-    tl: &mut BoneTimeline,
+    tl: &mut impl CurveBuilder,
     bezier: usize,
     frame: usize,
     value_ord: usize,
@@ -383,7 +545,7 @@ fn read_curve(
 ) -> usize {
     if let Some(s) = curve.as_str() {
         if s == "stepped" {
-            tl.set_stepped(frame);
+            tl.stepped(frame);
         }
         return bezier;
     }
@@ -392,7 +554,7 @@ fn read_curve(
     };
     let base = value_ord * 4;
     let at = |i: usize| arr.get(base + i).and_then(Value::as_f64).unwrap_or(0.0) as f32;
-    tl.set_bezier(
+    tl.bezier(
         bezier,
         frame,
         value_ord,
@@ -406,6 +568,84 @@ fn read_curve(
         value2,
     );
     bezier + 1
+}
+
+/// Read a generic N-channel constraint timeline (all channels Bezier-curved).
+/// `channels` is `(json field, default)` per channel.
+fn read_curve_timeline(
+    keys: &[Value],
+    constraint: usize,
+    channels: &[(&str, f32)],
+) -> (ConstraintTimeline, f32) {
+    let n = keys.len();
+    let nc = channels.len();
+    let mut tl = ConstraintTimeline::new(constraint, n, n * nc, nc + 1);
+    let mut bezier = 0;
+    let mut duration = 0.0_f32;
+    let mut frame = 0;
+    while frame < n {
+        let k = &keys[frame];
+        let time = f(k, "time");
+        let values: Vec<f32> = channels
+            .iter()
+            .map(|(field, def)| f_or(k, field, *def))
+            .collect();
+        tl.set_frame(frame, time, &values);
+        duration = duration.max(time);
+        if frame + 1 < n {
+            if let Some(curve) = k.get("curve") {
+                let next = &keys[frame + 1];
+                let time2 = f(next, "time");
+                for (ci, (field, def)) in channels.iter().enumerate() {
+                    let v2 = f_or(next, field, *def);
+                    bezier = read_curve(
+                        curve, &mut tl, bezier, frame, ci, time, time2, values[ci], v2,
+                    );
+                }
+            }
+        }
+        frame += 1;
+    }
+    (tl, duration)
+}
+
+/// Read an IK constraint timeline: mix and softness are Bezier-curved; bend
+/// direction, compress, and stretch are stored stepped.
+fn read_ik_timeline(keys: &[Value], constraint: usize) -> (ConstraintTimeline, f32) {
+    let n = keys.len();
+    let mut tl = ConstraintTimeline::new(constraint, n, n * 2, 6);
+    let mut bezier = 0;
+    let mut duration = 0.0_f32;
+    let mut frame = 0;
+    while frame < n {
+        let k = &keys[frame];
+        let time = f(k, "time");
+        let mix = f_or(k, "mix", 1.0);
+        let softness = f(k, "softness");
+        let bend = if bool_or(k, "bendPositive", true) {
+            1.0
+        } else {
+            -1.0
+        };
+        let compress = f32::from(bool_or(k, "compress", false));
+        let stretch = f32::from(bool_or(k, "stretch", false));
+        tl.set_frame(frame, time, &[mix, softness, bend, compress, stretch]);
+        duration = duration.max(time);
+        if frame + 1 < n {
+            if let Some(curve) = k.get("curve") {
+                let next = &keys[frame + 1];
+                let time2 = f(next, "time");
+                let mix2 = f_or(next, "mix", 1.0);
+                let soft2 = f(next, "softness");
+                bezier = read_curve(curve, &mut tl, bezier, frame, 0, time, time2, mix, mix2);
+                bezier = read_curve(
+                    curve, &mut tl, bezier, frame, 1, time, time2, softness, soft2,
+                );
+            }
+        }
+        frame += 1;
+    }
+    (tl, duration)
 }
 
 /// Resolve a constraint's named constrained bones to indices.
@@ -834,5 +1074,45 @@ mod tests {
         assert!((t.mix_rotate - 0.5).abs() < 1e-6);
         assert_eq!(t.properties.len(), 1);
         assert_eq!(t.properties[0].to.len(), 1);
+    }
+
+    #[test]
+    fn ik_mix_timeline_fades_the_constraint() {
+        let json = r#"{
+            "bones": [
+                { "name": "root" }, { "name": "aim", "parent": "root", "length": 10 },
+                { "name": "target", "parent": "root", "y": 10 }
+            ],
+            "constraints": [
+                { "type": "ik", "name": "aim-ik", "bones": ["aim"], "target": "target", "mix": 1 }
+            ],
+            "animations": {
+                "fade": { "ik": { "aim-ik": [ { "time": 0, "mix": 0 }, { "time": 1, "mix": 1 } ] } }
+            }
+        }"#;
+        let data = from_json(json).unwrap();
+        let aim = data.find_bone("aim").unwrap();
+        let anim = data.find_animation("fade").unwrap().clone();
+        let mut sk = crate::skel::Skeleton::new(std::sync::Arc::new(data));
+        let mut state = crate::anim::AnimationState::new();
+        state.set_animation(anim, false);
+
+        // time 0: IK mix 0 -> the constraint does nothing, aim keeps +x (a~1).
+        state.apply(&mut sk);
+        sk.update_world_transform();
+        assert!(
+            (sk.bone(aim).unwrap().a() - 1.0).abs() < 1e-2,
+            "a={}",
+            sk.bone(aim).unwrap().a()
+        );
+
+        // time 1: IK mix 1 -> aim is driven to point at the target (+y): a~0, c~1.
+        state.update(1.0);
+        sk.set_bones_to_setup_pose();
+        state.apply(&mut sk);
+        sk.update_world_transform();
+        let aim_bone = sk.bone(aim).unwrap();
+        assert!(aim_bone.a().abs() < 1e-2, "a={}", aim_bone.a());
+        assert!((aim_bone.c() - 1.0).abs() < 1e-2, "c={}", aim_bone.c());
     }
 }

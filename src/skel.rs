@@ -227,6 +227,37 @@ impl Skeleton {
         Some((bone, setup))
     }
 
+    /// An IK constraint's mutable pose paired with its setup data, for the
+    /// animation system.
+    pub(crate) fn ik_pose_and_setup(
+        &mut self,
+        i: usize,
+    ) -> Option<(&mut IkConstraint, &IkConstraintData)> {
+        let setup = self.data.ik_constraints.get(i)?;
+        let pose = self.ik_constraints.get_mut(i)?;
+        Some((pose, setup))
+    }
+
+    /// A transform constraint's mutable pose paired with its setup data.
+    pub(crate) fn transform_pose_and_setup(
+        &mut self,
+        i: usize,
+    ) -> Option<(&mut TransformConstraint, &TransformConstraintData)> {
+        let setup = self.data.transform_constraints.get(i)?;
+        let pose = self.transform_constraints.get_mut(i)?;
+        Some((pose, setup))
+    }
+
+    /// A path constraint's mutable pose paired with its setup data.
+    pub(crate) fn path_pose_and_setup(
+        &mut self,
+        i: usize,
+    ) -> Option<(&mut PathConstraint, &PathConstraintData)> {
+        let setup = self.data.path_constraints.get(i)?;
+        let pose = self.path_constraints.get_mut(i)?;
+        Some((pose, setup))
+    }
+
     /// Find a bone index by name.
     #[must_use]
     pub fn find_bone(&self, name: &str) -> Option<usize> {

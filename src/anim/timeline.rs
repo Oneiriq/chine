@@ -4,7 +4,7 @@
 //! transcribed from Spine 4.3: rotate/translate values are **added** to the
 //! setup pose, scale values **multiply** it (with sign-adjusted mixing).
 
-use super::curve::Curve;
+use super::curve::{absolute_value_with, Curve};
 use super::MixFrom;
 use crate::skel::Skeleton;
 
@@ -70,7 +70,62 @@ impl BoneTimeline {
     }
 }
 
-/// A keyframed animation channel for one bone property.
+/// A keyframed set of constraint-mix channels (IK / transform / path). The
+/// [`Timeline`] variant selects which constraint and channels it drives.
+#[derive(Debug, Clone)]
+pub(crate) struct ConstraintTimeline {
+    constraint: usize,
+    curve: Curve,
+}
+
+impl ConstraintTimeline {
+    /// A constraint timeline for `constraint` with `entries` floats per frame
+    /// (1 time + N channels).
+    pub(crate) fn new(
+        constraint: usize,
+        frame_count: usize,
+        bezier_count: usize,
+        entries: usize,
+    ) -> Self {
+        Self {
+            constraint,
+            curve: Curve::new(frame_count, bezier_count, entries),
+        }
+    }
+
+    /// Set a frame: `time` followed by one value per channel.
+    pub(crate) fn set_frame(&mut self, frame: usize, time: f32, values: &[f32]) {
+        self.curve.set_frame_n(frame, time, values);
+    }
+
+    /// Mark `frame` as stepped.
+    pub(crate) fn set_stepped(&mut self, frame: usize) {
+        self.curve.set_stepped(frame);
+    }
+
+    /// Store a Bezier segment table for `frame`'s channel `value`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn set_bezier(
+        &mut self,
+        bezier: usize,
+        frame: usize,
+        value: usize,
+        time1: f32,
+        value1: f32,
+        cx1: f32,
+        cy1: f32,
+        cx2: f32,
+        cy2: f32,
+        time2: f32,
+        value2: f32,
+    ) {
+        self.curve.set_bezier(
+            bezier, frame, value, time1, value1, cx1, cy1, cx2, cy2, time2, value2,
+        );
+    }
+}
+
+/// A keyframed animation channel for one bone property or constraint mix.
 #[derive(Debug, Clone)]
 pub(crate) enum Timeline {
     /// Local rotation (degrees).
@@ -79,6 +134,16 @@ pub(crate) enum Timeline {
     Translate(BoneTimeline),
     /// Local scale (x, y).
     Scale(BoneTimeline),
+    /// IK constraint mix / softness / bend / compress / stretch.
+    Ik(ConstraintTimeline),
+    /// Transform constraint mixes (rotate / x / y / scaleX / scaleY / shearY).
+    TransformMix(ConstraintTimeline),
+    /// Path constraint position.
+    PathPosition(ConstraintTimeline),
+    /// Path constraint spacing.
+    PathSpacing(ConstraintTimeline),
+    /// Path constraint mixes (rotate / x / y).
+    PathMix(ConstraintTimeline),
 }
 
 impl Timeline {
@@ -97,6 +162,11 @@ impl Timeline {
             Timeline::Rotate(t) => apply_rotate(t, skeleton, time, alpha, from, add),
             Timeline::Translate(t) => apply_translate(t, skeleton, time, alpha, from, add),
             Timeline::Scale(t) => apply_scale(t, skeleton, time, alpha, from, add, out),
+            Timeline::Ik(t) => apply_ik(t, skeleton, time, alpha, from, out),
+            Timeline::TransformMix(t) => apply_transform_mix(t, skeleton, time, alpha, from, add),
+            Timeline::PathPosition(t) => apply_path_position(t, skeleton, time, alpha, from, add),
+            Timeline::PathSpacing(t) => apply_path_spacing(t, skeleton, time, alpha, from),
+            Timeline::PathMix(t) => apply_path_mix(t, skeleton, time, alpha, from, add),
         }
     }
 }
@@ -218,6 +288,230 @@ fn signum(x: f32) -> f32 {
     } else {
         0.0
     }
+}
+
+/// IK constraint timeline: mix and softness are interpolated; bend direction,
+/// compress, and stretch are stepped (read from the frame).
+fn apply_ik(
+    t: &ConstraintTimeline,
+    skel: &mut Skeleton,
+    time: f32,
+    alpha: f32,
+    from: MixFrom,
+    out: bool,
+) {
+    let Some((pose, setup)) = skel.ik_pose_and_setup(t.constraint) else {
+        return;
+    };
+    if time < t.curve.first_time() {
+        match from {
+            MixFrom::Setup => {
+                pose.mix = setup.mix;
+                pose.softness = setup.softness;
+                pose.bend_direction = setup.bend_direction;
+                pose.compress = setup.compress;
+                pose.stretch = setup.stretch;
+            }
+            MixFrom::First => {
+                pose.mix += (setup.mix - pose.mix) * alpha;
+                pose.softness += (setup.softness - pose.softness) * alpha;
+                pose.bend_direction = setup.bend_direction;
+                pose.compress = setup.compress;
+                pose.stretch = setup.stretch;
+            }
+            MixFrom::Current => {}
+        }
+        return;
+    }
+    let mix = t.curve.value(time, 1);
+    let softness = t.curve.value(time, 2);
+    let (base_mix, base_soft) = if matches!(from, MixFrom::Setup) {
+        (setup.mix, setup.softness)
+    } else {
+        (pose.mix, pose.softness)
+    };
+    pose.mix = base_mix + (mix - base_mix) * alpha;
+    pose.softness = base_soft + (softness - base_soft) * alpha;
+    if out {
+        if matches!(from, MixFrom::Setup) {
+            pose.bend_direction = setup.bend_direction;
+            pose.compress = setup.compress;
+            pose.stretch = setup.stretch;
+        }
+    } else {
+        pose.bend_direction = t.curve.frame_value(time, 3) as i32;
+        pose.compress = t.curve.frame_value(time, 4) != 0.0;
+        pose.stretch = t.curve.frame_value(time, 5) != 0.0;
+    }
+}
+
+/// Transform constraint timeline: six interpolated mixes.
+fn apply_transform_mix(
+    t: &ConstraintTimeline,
+    skel: &mut Skeleton,
+    time: f32,
+    alpha: f32,
+    from: MixFrom,
+    add: bool,
+) {
+    let Some((pose, setup)) = skel.transform_pose_and_setup(t.constraint) else {
+        return;
+    };
+    if time < t.curve.first_time() {
+        match from {
+            MixFrom::Setup => {
+                pose.mix_rotate = setup.mix_rotate;
+                pose.mix_x = setup.mix_x;
+                pose.mix_y = setup.mix_y;
+                pose.mix_scale_x = setup.mix_scale_x;
+                pose.mix_scale_y = setup.mix_scale_y;
+                pose.mix_shear_y = setup.mix_shear_y;
+            }
+            MixFrom::First => {
+                pose.mix_rotate += (setup.mix_rotate - pose.mix_rotate) * alpha;
+                pose.mix_x += (setup.mix_x - pose.mix_x) * alpha;
+                pose.mix_y += (setup.mix_y - pose.mix_y) * alpha;
+                pose.mix_scale_x += (setup.mix_scale_x - pose.mix_scale_x) * alpha;
+                pose.mix_scale_y += (setup.mix_scale_y - pose.mix_scale_y) * alpha;
+                pose.mix_shear_y += (setup.mix_shear_y - pose.mix_shear_y) * alpha;
+            }
+            MixFrom::Current => {}
+        }
+        return;
+    }
+    pose.mix_rotate = absolute_value_with(
+        t.curve.value(time, 1),
+        alpha,
+        from,
+        add,
+        pose.mix_rotate,
+        setup.mix_rotate,
+    );
+    pose.mix_x = absolute_value_with(
+        t.curve.value(time, 2),
+        alpha,
+        from,
+        add,
+        pose.mix_x,
+        setup.mix_x,
+    );
+    pose.mix_y = absolute_value_with(
+        t.curve.value(time, 3),
+        alpha,
+        from,
+        add,
+        pose.mix_y,
+        setup.mix_y,
+    );
+    pose.mix_scale_x = absolute_value_with(
+        t.curve.value(time, 4),
+        alpha,
+        from,
+        add,
+        pose.mix_scale_x,
+        setup.mix_scale_x,
+    );
+    pose.mix_scale_y = absolute_value_with(
+        t.curve.value(time, 5),
+        alpha,
+        from,
+        add,
+        pose.mix_scale_y,
+        setup.mix_scale_y,
+    );
+    pose.mix_shear_y = absolute_value_with(
+        t.curve.value(time, 6),
+        alpha,
+        from,
+        add,
+        pose.mix_shear_y,
+        setup.mix_shear_y,
+    );
+}
+
+/// Path constraint position timeline (single absolute value).
+fn apply_path_position(
+    t: &ConstraintTimeline,
+    skel: &mut Skeleton,
+    time: f32,
+    alpha: f32,
+    from: MixFrom,
+    add: bool,
+) {
+    if let Some((pose, setup)) = skel.path_pose_and_setup(t.constraint) {
+        pose.position =
+            t.curve
+                .absolute_value(time, alpha, from, add, pose.position, setup.position);
+    }
+}
+
+/// Path constraint spacing timeline (single absolute value, never additive).
+fn apply_path_spacing(
+    t: &ConstraintTimeline,
+    skel: &mut Skeleton,
+    time: f32,
+    alpha: f32,
+    from: MixFrom,
+) {
+    if let Some((pose, setup)) = skel.path_pose_and_setup(t.constraint) {
+        pose.spacing =
+            t.curve
+                .absolute_value(time, alpha, from, false, pose.spacing, setup.spacing);
+    }
+}
+
+/// Path constraint mix timeline (rotate / x / y).
+fn apply_path_mix(
+    t: &ConstraintTimeline,
+    skel: &mut Skeleton,
+    time: f32,
+    alpha: f32,
+    from: MixFrom,
+    add: bool,
+) {
+    let Some((pose, setup)) = skel.path_pose_and_setup(t.constraint) else {
+        return;
+    };
+    if time < t.curve.first_time() {
+        match from {
+            MixFrom::Setup => {
+                pose.mix_rotate = setup.mix_rotate;
+                pose.mix_x = setup.mix_x;
+                pose.mix_y = setup.mix_y;
+            }
+            MixFrom::First => {
+                pose.mix_rotate += (setup.mix_rotate - pose.mix_rotate) * alpha;
+                pose.mix_x += (setup.mix_x - pose.mix_x) * alpha;
+                pose.mix_y += (setup.mix_y - pose.mix_y) * alpha;
+            }
+            MixFrom::Current => {}
+        }
+        return;
+    }
+    pose.mix_rotate = absolute_value_with(
+        t.curve.value(time, 1),
+        alpha,
+        from,
+        add,
+        pose.mix_rotate,
+        setup.mix_rotate,
+    );
+    pose.mix_x = absolute_value_with(
+        t.curve.value(time, 2),
+        alpha,
+        from,
+        add,
+        pose.mix_x,
+        setup.mix_x,
+    );
+    pose.mix_y = absolute_value_with(
+        t.curve.value(time, 3),
+        alpha,
+        from,
+        add,
+        pose.mix_y,
+        setup.mix_y,
+    );
 }
 
 #[cfg(test)]
