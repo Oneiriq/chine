@@ -19,6 +19,8 @@ const EPSILON: f32 = 1e-6;
 pub struct IkConstraintData {
     /// Constraint name, unique within the skeleton.
     pub name: String,
+    /// Global constraint order (lower applies first).
+    pub order: usize,
     /// The 1 or 2 constrained bone indices (parent first).
     pub bones: Vec<usize>,
     /// Target bone index.
@@ -484,6 +486,7 @@ mod tests {
     fn ik(name: &str, bones: Vec<usize>, target: usize) -> IkConstraintData {
         IkConstraintData {
             name: name.into(),
+            order: 0,
             bones,
             target,
             scale_y_mode: ScaleYMode::None,

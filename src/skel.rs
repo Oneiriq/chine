@@ -10,7 +10,8 @@
 
 use std::sync::Arc;
 
-use crate::constraint::ik::{self, IkConstraint};
+use crate::constraint::ik::{self, IkConstraint, IkConstraintData};
+use crate::constraint::transform::{self, TransformConstraint, TransformConstraintData};
 use crate::data::{BoneData, Inherit, SkeletonData};
 
 /// Degrees-to-radians factor.
@@ -43,12 +44,12 @@ pub struct Bone {
     pub shear_x: f32,
     /// Local y shear, in degrees.
     pub shear_y: f32,
-    a: f32,
-    b: f32,
-    c: f32,
-    d: f32,
-    world_x: f32,
-    world_y: f32,
+    pub(crate) a: f32,
+    pub(crate) b: f32,
+    pub(crate) c: f32,
+    pub(crate) d: f32,
+    pub(crate) world_x: f32,
+    pub(crate) world_y: f32,
 }
 
 impl Bone {
@@ -130,6 +131,7 @@ pub struct Skeleton {
     data: Arc<SkeletonData>,
     bones: Vec<Bone>,
     ik_constraints: Vec<IkConstraint>,
+    transform_constraints: Vec<TransformConstraint>,
     update_cache: Vec<Updatable>,
     /// World-space x offset applied to the whole skeleton.
     pub x: f32,
@@ -151,11 +153,17 @@ impl Skeleton {
             .iter()
             .map(IkConstraint::from_data)
             .collect();
+        let transform_constraints = data
+            .transform_constraints
+            .iter()
+            .map(TransformConstraint::from_data)
+            .collect();
         let update_cache = build_update_cache(&data);
         Self {
             data,
             bones,
             ik_constraints,
+            transform_constraints,
             update_cache,
             x: 0.0,
             y: 0.0,
@@ -225,6 +233,14 @@ impl Skeleton {
                     &self.data,
                     c,
                     &self.ik_constraints[c],
+                    self.scale_x,
+                    self.scale_y,
+                ),
+                Updatable::Transform(c) => transform::solve(
+                    &mut self.bones,
+                    &self.data,
+                    c,
+                    &self.transform_constraints[c],
                     self.scale_x,
                     self.scale_y,
                 ),
@@ -400,6 +416,8 @@ enum Updatable {
     Bone(usize),
     /// Apply the IK constraint at this index.
     Ik(usize),
+    /// Apply the transform constraint at this index.
+    Transform(usize),
 }
 
 /// Build the ordered update cache: a topological interleaving of bone
@@ -415,22 +433,98 @@ fn build_update_cache(data: &SkeletonData) -> Vec<Updatable> {
             children[p].push(i);
         }
     }
+
+    // Merge constraints of all kinds and process them in global order.
+    let mut ordered: Vec<(usize, Updatable)> = Vec::new();
+    for (i, ik) in data.ik_constraints.iter().enumerate() {
+        ordered.push((ik.order, Updatable::Ik(i)));
+    }
+    for (i, tc) in data.transform_constraints.iter().enumerate() {
+        ordered.push((tc.order, Updatable::Transform(i)));
+    }
+    ordered.sort_by_key(|(order, _)| *order);
+
     let mut sorted = vec![false; n];
     let mut cache = Vec::new();
-    for (ic, ik) in data.ik_constraints.iter().enumerate() {
-        let Some(&parent) = ik.bones.first() else {
-            continue;
-        };
-        sort_bone(ik.target, &parents, &mut sorted, &mut cache);
-        sort_bone(parent, &parents, &mut sorted, &mut cache);
-        cache.push(Updatable::Ik(ic));
-        sorted[parent] = false;
-        sort_reset(parent, &children, &mut sorted);
+    for (_, kind) in ordered {
+        match kind {
+            Updatable::Ik(i) => {
+                sort_ik(
+                    &data.ik_constraints[i],
+                    i,
+                    &parents,
+                    &children,
+                    &mut sorted,
+                    &mut cache,
+                );
+            }
+            Updatable::Transform(i) => {
+                sort_transform(
+                    &data.transform_constraints[i],
+                    i,
+                    &parents,
+                    &children,
+                    &mut sorted,
+                    &mut cache,
+                );
+            }
+            Updatable::Bone(_) => {}
+        }
     }
     for i in 0..n {
         sort_bone(i, &parents, &mut sorted, &mut cache);
     }
     cache
+}
+
+/// Sort an IK constraint into the cache: its target and constrained bones are
+/// computed before it, the constrained bones recomputed after.
+fn sort_ik(
+    ik: &IkConstraintData,
+    idx: usize,
+    parents: &[Option<usize>],
+    children: &[Vec<usize>],
+    sorted: &mut [bool],
+    cache: &mut Vec<Updatable>,
+) {
+    let Some(&parent) = ik.bones.first() else {
+        return;
+    };
+    sort_bone(ik.target, parents, sorted, cache);
+    sort_bone(parent, parents, sorted, cache);
+    cache.push(Updatable::Ik(idx));
+    sorted[parent] = false;
+    sort_reset(parent, children, sorted);
+}
+
+/// Sort a transform constraint into the cache. For world targets the
+/// constrained bones are computed before it and kept (their world is the
+/// constraint's output); their descendants are recomputed. For local targets
+/// the constrained bones themselves are recomputed afterward.
+fn sort_transform(
+    tc: &TransformConstraintData,
+    idx: usize,
+    parents: &[Option<usize>],
+    children: &[Vec<usize>],
+    sorted: &mut [bool],
+    cache: &mut Vec<Updatable>,
+) {
+    if !tc.local_source {
+        sort_bone(tc.source, parents, sorted, cache);
+    }
+    let world_target = !tc.local_target;
+    if world_target {
+        for &b in &tc.bones {
+            sort_bone(b, parents, sorted, cache);
+        }
+    }
+    cache.push(Updatable::Transform(idx));
+    for &b in &tc.bones {
+        sort_reset(b, children, sorted);
+    }
+    for &b in &tc.bones {
+        sorted[b] = world_target;
+    }
 }
 
 /// Add `bone` (and any unsorted ancestors) to the cache once, parents first.

@@ -11,6 +11,7 @@
 //! physics constraints follow.
 
 pub mod ik;
+pub mod transform;
 
 /// How a constraint adjusts Y scale when stretching or compressing
 /// (Spine 4.3 `ScaleYMode`).
