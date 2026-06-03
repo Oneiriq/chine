@@ -6,16 +6,16 @@
 //! track.
 //! Interpolation and blending are transcribed from Spine 4.3 for fidelity.
 //!
-//! This milestone covers the core bone timelines (rotate / translate / scale)
-//! and single-track playback. Slot / deform / event timelines, constraint
-//! timelines, and multi-track mixing are layered on later.
+//! Covered: bone timelines (rotate / translate / scale), the IK / transform /
+//! path / physics constraint timelines, and single-track playback. Slot /
+//! deform / event timelines and multi-track mixing are layered on later.
 
 mod curve;
 mod state;
 mod timeline;
 
 pub use state::{AnimationState, TrackEntry};
-pub(crate) use timeline::{BoneTimeline, ConstraintTimeline, Timeline};
+pub(crate) use timeline::{BoneTimeline, ConstraintTimeline, PhysicsProperty, Timeline};
 
 use crate::skel::Skeleton;
 

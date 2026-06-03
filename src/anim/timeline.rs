@@ -125,6 +125,25 @@ impl ConstraintTimeline {
     }
 }
 
+/// Which tunable a physics constraint timeline drives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PhysicsProperty {
+    /// Inertia.
+    Inertia,
+    /// Spring strength.
+    Strength,
+    /// Damping.
+    Damping,
+    /// Mass (animated as a mass value, stored inverted).
+    Mass,
+    /// Wind (blended additively).
+    Wind,
+    /// Gravity (blended additively).
+    Gravity,
+    /// Mix.
+    Mix,
+}
+
 /// A keyframed animation channel for one bone property or constraint mix.
 #[derive(Debug, Clone)]
 pub(crate) enum Timeline {
@@ -144,6 +163,8 @@ pub(crate) enum Timeline {
     PathSpacing(ConstraintTimeline),
     /// Path constraint mixes (rotate / x / y).
     PathMix(ConstraintTimeline),
+    /// Physics constraint tunable (the selected [`PhysicsProperty`]).
+    Physics(ConstraintTimeline, PhysicsProperty),
 }
 
 impl Timeline {
@@ -167,6 +188,9 @@ impl Timeline {
             Timeline::PathPosition(t) => apply_path_position(t, skeleton, time, alpha, from, add),
             Timeline::PathSpacing(t) => apply_path_spacing(t, skeleton, time, alpha, from),
             Timeline::PathMix(t) => apply_path_mix(t, skeleton, time, alpha, from, add),
+            Timeline::Physics(t, property) => {
+                apply_physics(t, *property, skeleton, time, alpha, from, add);
+            }
         }
     }
 }
@@ -512,6 +536,60 @@ fn apply_path_mix(
         pose.mix_y,
         setup.mix_y,
     );
+}
+
+/// Physics constraint timeline: drives one tunable. Mass is animated as a mass
+/// value but stored inverted; wind and gravity blend additively.
+fn apply_physics(
+    t: &ConstraintTimeline,
+    property: PhysicsProperty,
+    skel: &mut Skeleton,
+    time: f32,
+    alpha: f32,
+    from: MixFrom,
+    add: bool,
+) {
+    let Some((pose, setup)) = skel.physics_pose_and_setup(t.constraint) else {
+        return;
+    };
+    match property {
+        PhysicsProperty::Inertia => {
+            pose.inertia =
+                t.curve
+                    .absolute_value(time, alpha, from, add, pose.inertia, setup.inertia);
+        }
+        PhysicsProperty::Strength => {
+            pose.strength =
+                t.curve
+                    .absolute_value(time, alpha, from, add, pose.strength, setup.strength);
+        }
+        PhysicsProperty::Damping => {
+            pose.damping =
+                t.curve
+                    .absolute_value(time, alpha, from, add, pose.damping, setup.damping);
+        }
+        PhysicsProperty::Mass => {
+            let cur = 1.0 / pose.mass_inverse;
+            let base = 1.0 / setup.mass_inverse;
+            let m = t.curve.absolute_value(time, alpha, from, add, cur, base);
+            pose.mass_inverse = 1.0 / m;
+        }
+        PhysicsProperty::Wind => {
+            pose.wind = t
+                .curve
+                .absolute_value(time, alpha, from, true, pose.wind, setup.wind);
+        }
+        PhysicsProperty::Gravity => {
+            pose.gravity =
+                t.curve
+                    .absolute_value(time, alpha, from, true, pose.gravity, setup.gravity);
+        }
+        PhysicsProperty::Mix => {
+            pose.mix = t
+                .curve
+                .absolute_value(time, alpha, from, add, pose.mix, setup.mix);
+        }
+    }
 }
 
 #[cfg(test)]

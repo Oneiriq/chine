@@ -16,7 +16,7 @@ use std::sync::Arc;
 use glam::Vec2;
 use serde_json::Value;
 
-use crate::anim::{Animation, BoneTimeline, ConstraintTimeline, Timeline};
+use crate::anim::{Animation, BoneTimeline, ConstraintTimeline, PhysicsProperty, Timeline};
 use crate::attach::{Attachment, MeshAttachment, MeshVertices, PathAttachment, RegionAttachment};
 use crate::constraint::ik::IkConstraintData;
 use crate::constraint::path::{PathConstraintData, PositionMode, RotateMode, SpacingMode};
@@ -392,6 +392,45 @@ fn parse_animation(name: &str, anim: &Value, data: &SkeletonData) -> Result<Anim
                     }
                     _ => {}
                 }
+            }
+        }
+    }
+
+    if let Some(pcs) = anim.get("physics").and_then(Value::as_object) {
+        for (cname, channels) in pcs {
+            // Global physics timelines (empty constraint name) and the "reset"
+            // channel are not applied yet; per-constraint tunable channels are.
+            if cname.is_empty() {
+                continue;
+            }
+            let idx = data
+                .physics_constraints
+                .iter()
+                .position(|c| c.name == *cname)
+                .ok_or_else(|| LoadError::BadReference(cname.clone()))?;
+            let Some(channels) = channels.as_object() else {
+                continue;
+            };
+            for (channel, keys) in channels {
+                let Some(keys) = keys.as_array() else {
+                    continue;
+                };
+                if keys.is_empty() {
+                    continue;
+                }
+                let (property, default) = match channel.as_str() {
+                    "inertia" => (PhysicsProperty::Inertia, 0.5),
+                    "strength" => (PhysicsProperty::Strength, 100.0),
+                    "damping" => (PhysicsProperty::Damping, 0.85),
+                    "mass" => (PhysicsProperty::Mass, 1.0),
+                    "wind" => (PhysicsProperty::Wind, 0.0),
+                    "gravity" => (PhysicsProperty::Gravity, 0.0),
+                    "mix" => (PhysicsProperty::Mix, 1.0),
+                    _ => continue, // "reset" and unknown channels are skipped.
+                };
+                let (tl, dur) = read_curve_timeline(keys, idx, &[("value", default)]);
+                duration = duration.max(dur);
+                timelines.push(Timeline::Physics(tl, property));
             }
         }
     }
@@ -1149,6 +1188,35 @@ mod tests {
         assert!((p.mass_inverse - 0.5).abs() < 1e-6);
         // omitted inertia defaults to 0.5.
         assert!((p.inertia - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn physics_strength_timeline_animates_the_constraint() {
+        let json = r#"{
+            "bones": [ { "name": "root" }, { "name": "tail", "parent": "root", "length": 20 } ],
+            "constraints": [
+                { "type": "physics", "name": "jiggle", "bone": "tail", "y": 1, "strength": 100 }
+            ],
+            "animations": {
+                "soften": {
+                    "physics": {
+                        "jiggle": {
+                            "strength": [ { "time": 0, "value": 100 }, { "time": 1, "value": 20 } ]
+                        }
+                    }
+                }
+            }
+        }"#;
+        let data = from_json(json).unwrap();
+        let anim = data.find_animation("soften").unwrap().clone();
+        let mut sk = crate::skel::Skeleton::new(std::sync::Arc::new(data));
+        let mut state = crate::anim::AnimationState::new();
+        state.set_animation(anim, false);
+        // Halfway through, strength interpolates 100 -> 20, i.e. 60.
+        state.update(0.5);
+        state.apply(&mut sk);
+        let s = sk.physics_constraint(0).unwrap().strength;
+        assert!((s - 60.0).abs() < 1e-3, "strength={s}");
     }
 
     #[test]

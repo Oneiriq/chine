@@ -257,6 +257,12 @@ impl Skeleton {
         self.bones.get(index)
     }
 
+    /// A physics constraint's runtime state by index (its mixable tunables).
+    #[must_use]
+    pub fn physics_constraint(&self, index: usize) -> Option<&PhysicsConstraint> {
+        self.physics_constraints.get(index)
+    }
+
     /// Mutable access to a bone's local pose by index.
     pub fn bone_mut(&mut self, index: usize) -> Option<&mut Bone> {
         self.bones.get_mut(index)
@@ -298,6 +304,16 @@ impl Skeleton {
     ) -> Option<(&mut PathConstraint, &PathConstraintData)> {
         let setup = self.data.path_constraints.get(i)?;
         let pose = self.path_constraints.get_mut(i)?;
+        Some((pose, setup))
+    }
+
+    /// A physics constraint's mutable pose paired with its setup data.
+    pub(crate) fn physics_pose_and_setup(
+        &mut self,
+        i: usize,
+    ) -> Option<(&mut PhysicsConstraint, &PhysicsConstraintData)> {
+        let setup = self.data.physics_constraints.get(i)?;
+        let pose = self.physics_constraints.get_mut(i)?;
         Some((pose, setup))
     }
 
