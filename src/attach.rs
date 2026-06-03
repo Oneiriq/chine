@@ -1,10 +1,10 @@
 //! Attachments — the geometry a slot can display — and world-vertex computation.
 //!
-//! M2 covers the two renderable attachment types: [`RegionAttachment`] (a
-//! textured quad on one bone) and [`MeshAttachment`] (a textured mesh whose
-//! vertices may be weighted across several bones). Clipping, bounding-box,
-//! path, and point attachments arrive in later milestones. Animation-time mesh
-//! deformation is layered on in M4.
+//! [`RegionAttachment`] (a textured quad on one bone) and [`MeshAttachment`] (a
+//! textured mesh whose vertices may be weighted across several bones) are the
+//! renderable types; [`PathAttachment`] holds the Bezier control points that
+//! path constraints follow. Clipping, bounding-box, and point attachments
+//! arrive in later milestones.
 
 use glam::Vec2;
 
@@ -32,6 +32,8 @@ pub enum Attachment {
     Region(RegionAttachment),
     /// A textured mesh, optionally weighted across bones.
     Mesh(MeshAttachment),
+    /// A composite Bezier path that path constraints follow.
+    Path(PathAttachment),
 }
 
 /// A textured quad attached to a slot's bone.
@@ -225,46 +227,111 @@ impl MeshAttachment {
     /// of the bone the slot follows (used for unweighted meshes).
     #[must_use]
     pub fn compute_world_vertices(&self, skeleton: &Skeleton, slot_bone: usize) -> Vec<Vec2> {
-        let n = self.vertex_count();
-        let mut out = Vec::with_capacity(n);
-        match &self.vertices {
-            MeshVertices::Unweighted(v) => {
-                let Some(bone) = skeleton.bone(slot_bone) else {
-                    return out;
-                };
-                let (a, b, c, d) = (bone.a(), bone.b(), bone.c(), bone.d());
-                let (wx, wy) = (bone.world_x(), bone.world_y());
-                for i in 0..n {
-                    let vx = v[i * 2];
-                    let vy = v[i * 2 + 1];
-                    out.push(Vec2::new(vx * a + vy * b + wx, vx * c + vy * d + wy));
-                }
-            }
-            MeshVertices::Weighted { bones, vertices } => {
-                let mut bi = 0;
-                let mut vi = 0;
-                for _ in 0..n {
-                    let count = bones[bi];
-                    bi += 1;
-                    let mut wx = 0.0;
-                    let mut wy = 0.0;
-                    for _ in 0..count {
-                        let bone_index = bones[bi];
-                        bi += 1;
-                        let vx = vertices[vi];
-                        let vy = vertices[vi + 1];
-                        let weight = vertices[vi + 2];
-                        vi += 3;
-                        if let Some(bone) = skeleton.bone(bone_index) {
-                            wx += (vx * bone.a() + vy * bone.b() + bone.world_x()) * weight;
-                            wy += (vx * bone.c() + vy * bone.d() + bone.world_y()) * weight;
-                        }
-                    }
-                    out.push(Vec2::new(wx, wy));
-                }
+        compute_vertices(&self.vertices, self.vertex_count(), skeleton, slot_bone)
+    }
+}
+
+/// Transform a vertex attachment's bind-pose vertices into world space. Shared
+/// by [`MeshAttachment`] and [`PathAttachment`]: unweighted vertices follow the
+/// slot bone; weighted vertices are a blend across their influence bones.
+fn compute_vertices(
+    vertices: &MeshVertices,
+    count: usize,
+    skeleton: &Skeleton,
+    slot_bone: usize,
+) -> Vec<Vec2> {
+    let mut out = Vec::with_capacity(count);
+    match vertices {
+        MeshVertices::Unweighted(v) => {
+            let Some(bone) = skeleton.bone(slot_bone) else {
+                return out;
+            };
+            let (a, b, c, d) = (bone.a(), bone.b(), bone.c(), bone.d());
+            let (wx, wy) = (bone.world_x(), bone.world_y());
+            for i in 0..count {
+                let vx = v[i * 2];
+                let vy = v[i * 2 + 1];
+                out.push(Vec2::new(vx * a + vy * b + wx, vx * c + vy * d + wy));
             }
         }
-        out
+        MeshVertices::Weighted { bones, vertices } => {
+            let mut bi = 0;
+            let mut vi = 0;
+            for _ in 0..count {
+                let influences = bones[bi];
+                bi += 1;
+                let mut wx = 0.0;
+                let mut wy = 0.0;
+                for _ in 0..influences {
+                    let bone_index = bones[bi];
+                    bi += 1;
+                    let vx = vertices[vi];
+                    let vy = vertices[vi + 1];
+                    let weight = vertices[vi + 2];
+                    vi += 3;
+                    if let Some(bone) = skeleton.bone(bone_index) {
+                        wx += (vx * bone.a() + vy * bone.b() + bone.world_x()) * weight;
+                        wy += (vx * bone.c() + vy * bone.d() + bone.world_y()) * weight;
+                    }
+                }
+                out.push(Vec2::new(wx, wy));
+            }
+        }
+    }
+    out
+}
+
+/// A path attachment: a composite cubic-Bezier curve whose control points are a
+/// vertex set (weighted or not, like a mesh). A `PathConstraint` (a later
+/// milestone) samples positions and tangents along it; this milestone provides
+/// the control-point geometry.
+#[derive(Debug, Clone)]
+pub struct PathAttachment {
+    /// Attachment name (the key within a skin).
+    pub name: String,
+    /// Whether the start and end knots connect.
+    pub closed: bool,
+    /// Whether to arc-length-parameterize so movement has constant speed.
+    pub constant_speed: bool,
+    /// Per-curve lengths, used when `constant_speed`.
+    pub lengths: Vec<f32>,
+    /// Bezier control points (bind pose).
+    vertices: MeshVertices,
+    /// Number of control points.
+    vertex_count: usize,
+}
+
+impl PathAttachment {
+    /// A path attachment from its parts.
+    #[must_use]
+    pub fn new(
+        name: impl Into<String>,
+        vertices: MeshVertices,
+        vertex_count: usize,
+        lengths: Vec<f32>,
+        closed: bool,
+        constant_speed: bool,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            closed,
+            constant_speed,
+            lengths,
+            vertices,
+            vertex_count,
+        }
+    }
+
+    /// Number of Bezier control points.
+    #[must_use]
+    pub fn vertex_count(&self) -> usize {
+        self.vertex_count
+    }
+
+    /// Compute world-space positions for every control point.
+    #[must_use]
+    pub fn compute_world_vertices(&self, skeleton: &Skeleton, slot_bone: usize) -> Vec<Vec2> {
+        compute_vertices(&self.vertices, self.vertex_count, skeleton, slot_bone)
     }
 }
 
@@ -376,5 +443,25 @@ mod tests {
         let w = mesh.compute_world_vertices(&sk, 0);
         assert_eq!(w.len(), 1);
         assert!(close(w[0], 50.0, 0.0), "midpoint {:?}", w[0]);
+    }
+
+    #[test]
+    fn path_control_points_follow_their_bone() {
+        let sk = one_bone_at(10.0, 0.0);
+        // 4 control points (one cubic Bezier), unweighted.
+        let path = PathAttachment::new(
+            "p",
+            MeshVertices::Unweighted(vec![0.0, 0.0, 10.0, 0.0, 20.0, 0.0, 30.0, 0.0]),
+            4,
+            vec![30.0],
+            false,
+            true,
+        );
+        assert_eq!(path.vertex_count(), 4);
+        let w = path.compute_world_vertices(&sk, 0);
+        assert_eq!(w.len(), 4);
+        // bone at (10,0): control points offset by +10 in x.
+        assert!(close(w[0], 10.0, 0.0));
+        assert!(close(w[3], 40.0, 0.0));
     }
 }

@@ -17,7 +17,7 @@ use glam::Vec2;
 use serde_json::Value;
 
 use crate::anim::{Animation, BoneTimeline, Timeline};
-use crate::attach::{Attachment, MeshAttachment, MeshVertices, RegionAttachment};
+use crate::attach::{Attachment, MeshAttachment, MeshVertices, PathAttachment, RegionAttachment};
 use crate::constraint::ik::IkConstraintData;
 use crate::constraint::transform::{
     FromMapping, FromProp, ToMapping, ToProp, TransformConstraintData,
@@ -209,7 +209,24 @@ fn parse_attachment(name: &str, v: &Value) -> Option<Attachment> {
             m.hull_length = v.get("hull").and_then(Value::as_u64).unwrap_or(0) as usize;
             Some(Attachment::Mesh(m))
         }
-        // linkedmesh / boundingbox / clipping / path / point arrive later.
+        "path" => {
+            let count = v.get("vertexCount").and_then(Value::as_u64).unwrap_or(0) as usize;
+            let raw = f_array(v, "vertices");
+            let vertices = if raw.len() == count * 2 {
+                MeshVertices::Unweighted(raw)
+            } else {
+                parse_weighted(&raw)
+            };
+            Some(Attachment::Path(PathAttachment::new(
+                name,
+                vertices,
+                count,
+                f_array(v, "lengths"),
+                bool_or(v, "closed", false),
+                bool_or(v, "constantSpeed", true),
+            )))
+        }
+        // linkedmesh / boundingbox / clipping / point arrive later.
         _ => None,
     }
 }
