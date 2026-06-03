@@ -17,7 +17,7 @@ use glam::Vec2;
 use serde_json::Value;
 
 use crate::anim::{
-    Animation, AttachmentTimeline, BoneTimeline, ConstraintTimeline, DrawOrderTimeline,
+    Animation, AttachmentTimeline, BoneAxis, BoneTimeline, ConstraintTimeline, DrawOrderTimeline,
     EventTimeline, PhysicsProperty, PhysicsResetTimeline, Timeline, GLOBAL_PHYSICS,
 };
 use crate::attach::{Attachment, MeshAttachment, MeshVertices, PathAttachment, RegionAttachment};
@@ -321,7 +321,35 @@ fn parse_animation(name: &str, anim: &Value, data: &SkeletonData) -> Result<Anim
                         let (tl, d) = read_timeline2(keys, bone, "x", "y", 1.0);
                         (Timeline::Scale(tl), d)
                     }
-                    _ => continue, // shear / x-y splits / constraints arrive later
+                    "shear" => {
+                        let (tl, d) = read_timeline2(keys, bone, "x", "y", 0.0);
+                        (Timeline::Shear(tl), d)
+                    }
+                    "translatex" => {
+                        let (tl, d) = read_timeline1(keys, bone, 0.0);
+                        (Timeline::BoneAxis(tl, BoneAxis::TranslateX), d)
+                    }
+                    "translatey" => {
+                        let (tl, d) = read_timeline1(keys, bone, 0.0);
+                        (Timeline::BoneAxis(tl, BoneAxis::TranslateY), d)
+                    }
+                    "scalex" => {
+                        let (tl, d) = read_timeline1(keys, bone, 1.0);
+                        (Timeline::BoneAxis(tl, BoneAxis::ScaleX), d)
+                    }
+                    "scaley" => {
+                        let (tl, d) = read_timeline1(keys, bone, 1.0);
+                        (Timeline::BoneAxis(tl, BoneAxis::ScaleY), d)
+                    }
+                    "shearx" => {
+                        let (tl, d) = read_timeline1(keys, bone, 0.0);
+                        (Timeline::BoneAxis(tl, BoneAxis::ShearX), d)
+                    }
+                    "sheary" => {
+                        let (tl, d) = read_timeline1(keys, bone, 0.0);
+                        (Timeline::BoneAxis(tl, BoneAxis::ShearY), d)
+                    }
+                    _ => continue, // unknown bone channels are skipped
                 };
                 duration = duration.max(dur);
                 timelines.push(timeline);
@@ -1643,6 +1671,62 @@ mod tests {
         state.update(0.3);
         state.apply(&mut sk);
         assert!(sk.events().is_empty());
+    }
+
+    #[test]
+    fn single_axis_bone_timelines() {
+        let json = r#"{
+            "bones": [ { "name": "b" } ],
+            "animations": {
+                "anim": {
+                    "bones": {
+                        "b": {
+                            "translatex": [ { "time": 0, "value": 0 }, { "time": 1, "value": 10 } ],
+                            "scaley": [ { "time": 0, "value": 1 }, { "time": 1, "value": 3 } ],
+                            "shearx": [ { "time": 0, "value": 0 }, { "time": 1, "value": 20 } ]
+                        }
+                    }
+                }
+            }
+        }"#;
+        let data = from_json(json).unwrap();
+        let anim = data.find_animation("anim").unwrap().clone();
+        let mut sk = crate::skel::Skeleton::new(std::sync::Arc::new(data));
+        let mut state = crate::anim::AnimationState::new();
+        state.set_animation(anim, false);
+        state.update(0.5);
+        sk.set_bones_to_setup_pose();
+        state.apply(&mut sk);
+        let b = sk.bone(0).unwrap();
+        // translatex 0->10 at half = 5; scaley 1->3 = 2; shearx 0->20 = 10.
+        assert!((b.x - 5.0).abs() < 1e-3, "x={}", b.x);
+        assert!((b.scale_y - 2.0).abs() < 1e-3, "scale_y={}", b.scale_y);
+        assert!((b.shear_x - 10.0).abs() < 1e-3, "shear_x={}", b.shear_x);
+    }
+
+    #[test]
+    fn shear_bone_timeline() {
+        let json = r#"{
+            "bones": [ { "name": "b" } ],
+            "animations": {
+                "anim": {
+                    "bones": {
+                        "b": { "shear": [ { "time": 0, "x": 0, "y": 0 }, { "time": 1, "x": 30, "y": 40 } ] }
+                    }
+                }
+            }
+        }"#;
+        let data = from_json(json).unwrap();
+        let anim = data.find_animation("anim").unwrap().clone();
+        let mut sk = crate::skel::Skeleton::new(std::sync::Arc::new(data));
+        let mut state = crate::anim::AnimationState::new();
+        state.set_animation(anim, false);
+        state.update(0.5);
+        sk.set_bones_to_setup_pose();
+        state.apply(&mut sk);
+        let b = sk.bone(0).unwrap();
+        assert!((b.shear_x - 15.0).abs() < 1e-3, "shear_x={}", b.shear_x);
+        assert!((b.shear_y - 20.0).abs() < 1e-3, "shear_y={}", b.shear_y);
     }
 
     #[test]

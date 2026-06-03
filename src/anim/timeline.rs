@@ -212,6 +212,23 @@ pub(crate) enum PhysicsProperty {
     Mix,
 }
 
+/// A single bone axis driven by a one-value timeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BoneAxis {
+    /// Local x translation.
+    TranslateX,
+    /// Local y translation.
+    TranslateY,
+    /// Local x scale.
+    ScaleX,
+    /// Local y scale.
+    ScaleY,
+    /// Local x shear.
+    ShearX,
+    /// Local y shear.
+    ShearY,
+}
+
 /// A keyframed animation channel for one bone property or constraint mix.
 #[derive(Debug, Clone)]
 pub(crate) enum Timeline {
@@ -221,6 +238,10 @@ pub(crate) enum Timeline {
     Translate(BoneTimeline),
     /// Local scale (x, y).
     Scale(BoneTimeline),
+    /// Local shear (x, y).
+    Shear(BoneTimeline),
+    /// A single bone axis (translateX/Y, scaleX/Y, shearX/Y).
+    BoneAxis(BoneTimeline, BoneAxis),
     /// IK constraint mix / softness / bend / compress / stretch.
     Ik(ConstraintTimeline),
     /// Transform constraint mixes (rotate / x / y / scaleX / scaleY / shearY).
@@ -265,6 +286,10 @@ impl Timeline {
             Timeline::Rotate(t) => apply_rotate(t, skeleton, time, alpha, from, add),
             Timeline::Translate(t) => apply_translate(t, skeleton, time, alpha, from, add),
             Timeline::Scale(t) => apply_scale(t, skeleton, time, alpha, from, add, out),
+            Timeline::Shear(t) => apply_shear(t, skeleton, time, alpha, from, add),
+            Timeline::BoneAxis(t, axis) => {
+                apply_bone_axis(t, *axis, skeleton, time, alpha, from, add, out);
+            }
             Timeline::Ik(t) => apply_ik(t, skeleton, time, alpha, from, out),
             Timeline::TransformMix(t) => apply_transform_mix(t, skeleton, time, alpha, from, add),
             Timeline::PathPosition(t) => apply_path_position(t, skeleton, time, alpha, from, add),
@@ -400,6 +425,154 @@ fn signum(x: f32) -> f32 {
         -1.0
     } else {
         0.0
+    }
+}
+
+fn apply_shear(
+    t: &BoneTimeline,
+    skel: &mut Skeleton,
+    time: f32,
+    alpha: f32,
+    from: MixFrom,
+    add: bool,
+) {
+    let Some((bone, setup)) = skel.bone_and_setup(t.bone) else {
+        return;
+    };
+    if time < t.curve.first_time() {
+        match from {
+            MixFrom::Setup => {
+                bone.shear_x = setup.shear.x;
+                bone.shear_y = setup.shear.y;
+            }
+            MixFrom::First => {
+                bone.shear_x += (setup.shear.x - bone.shear_x) * alpha;
+                bone.shear_y += (setup.shear.y - bone.shear_y) * alpha;
+            }
+            MixFrom::Current => {}
+        }
+        return;
+    }
+    let x = t.curve.value(time, 1);
+    let y = t.curve.value(time, 2);
+    if matches!(from, MixFrom::Setup) {
+        bone.shear_x = setup.shear.x + x * alpha;
+        bone.shear_y = setup.shear.y + y * alpha;
+    } else if add {
+        bone.shear_x += x * alpha;
+        bone.shear_y += y * alpha;
+    } else {
+        bone.shear_x += (setup.shear.x + x - bone.shear_x) * alpha;
+        bone.shear_y += (setup.shear.y + y - bone.shear_y) * alpha;
+    }
+}
+
+/// Apply a single-axis bone timeline. Translation and shear axes add to the
+/// setup; scale axes multiply it with sign-aware mixing.
+#[allow(clippy::too_many_arguments)]
+fn apply_bone_axis(
+    t: &BoneTimeline,
+    axis: BoneAxis,
+    skel: &mut Skeleton,
+    time: f32,
+    alpha: f32,
+    from: MixFrom,
+    add: bool,
+    out: bool,
+) {
+    let Some((bone, setup)) = skel.bone_and_setup(t.bone) else {
+        return;
+    };
+    match axis {
+        BoneAxis::TranslateX => {
+            bone.x = t
+                .curve
+                .relative_value(time, alpha, from, add, bone.x, setup.position.x);
+        }
+        BoneAxis::TranslateY => {
+            bone.y = t
+                .curve
+                .relative_value(time, alpha, from, add, bone.y, setup.position.y);
+        }
+        BoneAxis::ShearX => {
+            bone.shear_x =
+                t.curve
+                    .relative_value(time, alpha, from, add, bone.shear_x, setup.shear.x);
+        }
+        BoneAxis::ShearY => {
+            bone.shear_y =
+                t.curve
+                    .relative_value(time, alpha, from, add, bone.shear_y, setup.shear.y);
+        }
+        BoneAxis::ScaleX => {
+            if time < t.curve.first_time() {
+                apply_scale_setup(&mut bone.scale_x, setup.scale.x, alpha, from);
+            } else {
+                bone.scale_x = scale_channel(
+                    t.curve.value(time, 1),
+                    setup.scale.x,
+                    bone.scale_x,
+                    alpha,
+                    from,
+                    add,
+                    out,
+                );
+            }
+        }
+        BoneAxis::ScaleY => {
+            if time < t.curve.first_time() {
+                apply_scale_setup(&mut bone.scale_y, setup.scale.y, alpha, from);
+            } else {
+                bone.scale_y = scale_channel(
+                    t.curve.value(time, 1),
+                    setup.scale.y,
+                    bone.scale_y,
+                    alpha,
+                    from,
+                    add,
+                    out,
+                );
+            }
+        }
+    }
+}
+
+/// Reset one scale channel toward its setup value (the before-first-frame case).
+fn apply_scale_setup(scale: &mut f32, setup: f32, alpha: f32, from: MixFrom) {
+    match from {
+        MixFrom::Setup => *scale = setup,
+        MixFrom::First => *scale += (setup - *scale) * alpha,
+        MixFrom::Current => {}
+    }
+}
+
+/// Blend one scale channel: the keyed value scales the setup, with Spine's
+/// sign-aware mixing. `out` is the mix-out direction.
+fn scale_channel(
+    value: f32,
+    setup: f32,
+    current: f32,
+    alpha: f32,
+    from: MixFrom,
+    add: bool,
+    out: bool,
+) -> f32 {
+    let target = value * setup;
+    if alpha == 1.0 && !add {
+        return target;
+    }
+    let base = if matches!(from, MixFrom::Setup) {
+        setup
+    } else {
+        current
+    };
+    if add {
+        base + (target - setup) * alpha
+    } else if out {
+        base + (target.abs() * signum(base) - base) * alpha
+    } else {
+        let signed = base.abs() * signum(target);
+        signed + (target - signed) * alpha
     }
 }
 

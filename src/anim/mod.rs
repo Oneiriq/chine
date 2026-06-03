@@ -16,8 +16,8 @@ mod timeline;
 
 pub use state::{AnimationState, TrackEntry};
 pub(crate) use timeline::{
-    AttachmentTimeline, BoneTimeline, ConstraintTimeline, DrawOrderTimeline, EventTimeline,
-    PhysicsProperty, PhysicsResetTimeline, Timeline, GLOBAL_PHYSICS,
+    AttachmentTimeline, BoneAxis, BoneTimeline, ConstraintTimeline, DrawOrderTimeline,
+    EventTimeline, PhysicsProperty, PhysicsResetTimeline, Timeline, GLOBAL_PHYSICS,
 };
 
 use crate::skel::Skeleton;
