@@ -258,6 +258,16 @@ impl MeshAttachment {
         }
     }
 
+    /// The length of a deform vertex array for this mesh: `2 * vertex_count` for
+    /// an unweighted mesh, or `2 *` the total influence count for a weighted one.
+    #[must_use]
+    pub fn deform_len(&self) -> usize {
+        match &self.vertices {
+            MeshVertices::Unweighted(v) => v.len(),
+            MeshVertices::Weighted { vertices, .. } => (vertices.len() / 3) * 2,
+        }
+    }
+
     /// Remap the mesh's `[0, 1]` region-relative UVs into page space using the
     /// bound atlas region. (Rotated regions are a follow-up.)
     pub fn remap_uvs(&mut self, region: &AtlasRegion, page_w: u32, page_h: u32) {
@@ -291,7 +301,7 @@ fn compute_vertices(
                 return out;
             };
             // A deform timeline overrides the local vertices for unweighted
-            // meshes. (Weighted deform is a follow-up.)
+            // meshes.
             let local = if deform.len() >= count * 2 { deform } else { v };
             let (a, b, c, d) = (bone.a(), bone.b(), bone.c(), bone.d());
             let (wx, wy) = (bone.world_x(), bone.world_y());
@@ -302,8 +312,10 @@ fn compute_vertices(
             }
         }
         MeshVertices::Weighted { bones, vertices } => {
+            // A deform timeline adds a per-influence offset to each bind vertex.
             let mut bi = 0;
             let mut vi = 0;
+            let mut fi = 0;
             for _ in 0..count {
                 let influences = bones[bi];
                 bi += 1;
@@ -312,8 +324,11 @@ fn compute_vertices(
                 for _ in 0..influences {
                     let bone_index = bones[bi];
                     bi += 1;
-                    let vx = vertices[vi];
-                    let vy = vertices[vi + 1];
+                    let dx = deform.get(fi).copied().unwrap_or(0.0);
+                    let dy = deform.get(fi + 1).copied().unwrap_or(0.0);
+                    fi += 2;
+                    let vx = vertices[vi] + dx;
+                    let vy = vertices[vi + 1] + dy;
                     let weight = vertices[vi + 2];
                     vi += 3;
                     if let Some(bone) = skeleton.bone(bone_index) {

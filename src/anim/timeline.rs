@@ -189,9 +189,10 @@ impl EventTimeline {
     }
 }
 
-/// A mesh deform timeline (unweighted): per-keyframe local-vertex offsets added
-/// to the attachment's setup vertices. Only applies while the slot shows the
-/// matching attachment.
+/// A mesh deform timeline: per-keyframe vertex offsets. For an unweighted mesh
+/// they add to the setup vertices; for a weighted mesh the setup is zero and the
+/// offsets add per-influence in `compute_vertices`. Only applies while the slot
+/// shows the matching attachment.
 #[derive(Debug, Clone)]
 pub(crate) struct DeformTimeline {
     slot: usize,

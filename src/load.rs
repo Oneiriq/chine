@@ -593,17 +593,19 @@ fn parse_animation(name: &str, anim: &Value, data: &SkeletonData) -> Result<Anim
                     else {
                         continue;
                     };
-                    // Weighted deform is a follow-up; only unweighted meshes here.
-                    let Some(setup) = mesh.setup_vertices() else {
-                        continue;
+                    let frame_len = mesh.deform_len();
+                    // Unweighted: setup = the bind vertices (offsets add to them).
+                    // Weighted: setup = zeros (offsets are added per-influence to
+                    // the bind positions in compute_vertices).
+                    let setup = match mesh.setup_vertices() {
+                        Some(v) => v.to_vec(),
+                        None => vec![0.0; frame_len],
                     };
-                    let setup = setup.to_vec();
-                    let vc = setup.len() / 2;
                     let mut times = Vec::with_capacity(keys.len());
                     let mut frames = Vec::with_capacity(keys.len());
                     for k in keys {
                         times.push(f(k, "time"));
-                        frames.push(read_deform_frame(k, vc));
+                        frames.push(read_deform_frame(k, frame_len));
                     }
                     duration = duration.max(times.last().copied().unwrap_or(0.0));
                     timelines.push(Timeline::Deform(DeformTimeline::new(
@@ -1032,14 +1034,13 @@ fn read_event_timeline(keys: &[Value], data: &SkeletonData) -> (EventTimeline, f
     (EventTimeline::new(times, events), duration)
 }
 
-/// Read one deform keyframe's sparse `offset`/`vertices` into a full
-/// `vertex_count * 2` offset array (zero where unspecified).
-fn read_deform_frame(k: &Value, vertex_count: usize) -> Vec<f32> {
-    let n = vertex_count * 2;
-    let mut frame = vec![0.0; n];
+/// Read one deform keyframe's sparse `offset`/`vertices` into a full `len`-long
+/// offset array (zero where unspecified).
+fn read_deform_frame(k: &Value, len: usize) -> Vec<f32> {
+    let mut frame = vec![0.0; len];
     let offset = k.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
     for (j, v) in f_array(k, "vertices").into_iter().enumerate() {
-        if offset + j < n {
+        if offset + j < len {
             frame[offset + j] = v;
         }
     }
@@ -1828,6 +1829,48 @@ mod tests {
         assert!((d[2] - 15.0).abs() < 1e-3, "d[2]={}", d[2]);
         assert!((d[0] - 0.0).abs() < 1e-3, "d[0]={}", d[0]);
         assert!((d[5] - 10.0).abs() < 1e-3, "d[5]={}", d[5]);
+    }
+
+    #[test]
+    fn weighted_deform_offsets_vertices() {
+        // A weighted mesh: 1 vertex, 1 influence (bone 0, bind at origin).
+        let json = r#"{
+            "bones": [ { "name": "root" } ],
+            "slots": [ { "name": "s", "bone": "root", "attachment": "m" } ],
+            "skins": [ { "name": "default", "attachments": { "s": { "m": {
+                "type": "mesh", "uvs": [0,0], "triangles": [], "vertices": [1, 0, 0, 0, 1]
+            } } } } ],
+            "animations": {
+                "wob": {
+                    "deform": { "default": { "s": { "m": [
+                        { "time": 0, "vertices": [0, 0] },
+                        { "time": 1, "vertices": [3, 4] }
+                    ] } } }
+                }
+            }
+        }"#;
+        let data = from_json(json).unwrap();
+        let anim = data.find_animation("wob").unwrap().clone();
+        let mut sk = crate::skel::Skeleton::new(std::sync::Arc::new(data));
+        let mut state = crate::anim::AnimationState::new();
+        state.set_animation(anim, false);
+        state.update(1.0);
+        sk.set_slots_to_setup_pose();
+        state.apply(&mut sk);
+        sk.update_world_transform();
+        // Weighted deform stores the per-influence offsets (not setup + offset).
+        let d = sk.slot(0).unwrap().deform.clone();
+        assert_eq!(d, vec![3.0, 4.0]);
+        // The world vertex = bind (0,0) + offset (3,4) at the identity root.
+        let crate::attach::Attachment::Mesh(m) = sk.data().attachment(0, "m", None).unwrap() else {
+            panic!("expected mesh");
+        };
+        let w = m.compute_world_vertices(&sk, 0, &d);
+        assert!(
+            (w[0].x - 3.0).abs() < 1e-3 && (w[0].y - 4.0).abs() < 1e-3,
+            "w0={:?}",
+            w[0]
+        );
     }
 
     #[test]
