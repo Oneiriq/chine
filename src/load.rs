@@ -447,6 +447,31 @@ fn parse_animation(name: &str, anim: &Value, data: &SkeletonData) -> Result<Anim
         }
     }
 
+    if let Some(slots) = anim.get("slots").and_then(Value::as_object) {
+        for (slot_name, channels) in slots {
+            let idx = data
+                .find_slot(slot_name)
+                .ok_or_else(|| LoadError::BadReference(slot_name.clone()))?;
+            let Some(channels) = channels.as_object() else {
+                continue;
+            };
+            for (channel, keys) in channels {
+                let Some(keys) = keys.as_array() else {
+                    continue;
+                };
+                if keys.is_empty() {
+                    continue;
+                }
+                if channel == "rgba" {
+                    let (tl, dur) = read_slot_rgba_timeline(keys, idx);
+                    duration = duration.max(dur);
+                    timelines.push(Timeline::SlotColor(tl));
+                }
+                // rgb / rgba2 / rgb2 / attachment / draw-order arrive later.
+            }
+        }
+    }
+
     Ok(Animation::new(name, duration, timelines))
 }
 
@@ -698,6 +723,36 @@ fn read_ik_timeline(keys: &[Value], constraint: usize) -> (ConstraintTimeline, f
                 bezier = read_curve(
                     curve, &mut tl, bezier, frame, 1, time, time2, softness, soft2,
                 );
+            }
+        }
+        frame += 1;
+    }
+    (tl, duration)
+}
+
+/// Read a slot RGBA color timeline (four channels from each keyframe's `color`
+/// hex string).
+fn read_slot_rgba_timeline(keys: &[Value], slot: usize) -> (ConstraintTimeline, f32) {
+    let n = keys.len();
+    let mut tl = ConstraintTimeline::new(slot, n, n * 4, 5);
+    let mut bezier = 0;
+    let mut duration = 0.0_f32;
+    let mut frame = 0;
+    while frame < n {
+        let k = &keys[frame];
+        let time = f(k, "time");
+        let c = parse_color(k.get("color").and_then(Value::as_str), Color::WHITE);
+        tl.set_frame(frame, time, &[c.r, c.g, c.b, c.a]);
+        duration = duration.max(time);
+        if frame + 1 < n {
+            if let Some(curve) = k.get("curve") {
+                let next = &keys[frame + 1];
+                let time2 = f(next, "time");
+                let c2 = parse_color(next.get("color").and_then(Value::as_str), Color::WHITE);
+                bezier = read_curve(curve, &mut tl, bezier, frame, 0, time, time2, c.r, c2.r);
+                bezier = read_curve(curve, &mut tl, bezier, frame, 1, time, time2, c.g, c2.g);
+                bezier = read_curve(curve, &mut tl, bezier, frame, 2, time, time2, c.b, c2.b);
+                bezier = read_curve(curve, &mut tl, bezier, frame, 3, time, time2, c.a, c2.a);
             }
         }
         frame += 1;
@@ -1314,6 +1369,34 @@ mod tests {
             after.abs() < 0.1,
             "expected reset to undo the droop, got {after}"
         );
+    }
+
+    #[test]
+    fn slot_color_timeline_animates_the_tint() {
+        let json = r#"{
+            "bones": [ { "name": "root" } ],
+            "slots": [ { "name": "s", "bone": "root", "attachment": "a", "color": "ffffffff" } ],
+            "animations": {
+                "fade": {
+                    "slots": {
+                        "s": { "rgba": [ { "time": 0, "color": "ffffffff" }, { "time": 1, "color": "ff000000" } ] }
+                    }
+                }
+            }
+        }"#;
+        let data = from_json(json).unwrap();
+        let anim = data.find_animation("fade").unwrap().clone();
+        let mut sk = crate::skel::Skeleton::new(std::sync::Arc::new(data));
+        let mut state = crate::anim::AnimationState::new();
+        state.set_animation(anim, false);
+        // Halfway, white (1,1,1,1) -> opaque-red-faded (1,0,0,0): (1, 0.5, 0.5, 0.5).
+        state.update(0.5);
+        sk.set_slots_to_setup_pose();
+        state.apply(&mut sk);
+        let c = sk.slot(0).unwrap().color;
+        assert!((c.r - 1.0).abs() < 1e-2, "r={}", c.r);
+        assert!((c.g - 0.5).abs() < 1e-2, "g={}", c.g);
+        assert!((c.a - 0.5).abs() < 1e-2, "a={}", c.a);
     }
 
     #[test]

@@ -14,7 +14,7 @@ use crate::constraint::ik::{self, IkConstraint, IkConstraintData};
 use crate::constraint::path::{self, PathConstraint, PathConstraintData};
 use crate::constraint::physics::{self, Physics, PhysicsConstraint, PhysicsConstraintData};
 use crate::constraint::transform::{self, TransformConstraint, TransformConstraintData};
-use crate::data::{BoneData, Inherit, SkeletonData};
+use crate::data::{BoneData, Color, Inherit, SkeletonData, SlotData};
 
 /// Degrees-to-radians factor.
 const DEG_RAD: f32 = core::f32::consts::PI / 180.0;
@@ -168,6 +168,35 @@ impl Bone {
     }
 }
 
+/// A posable slot: its current tint, dark tint, and shown attachment. Reset to
+/// the [`SlotData`] setup each frame, then driven by slot timelines.
+#[derive(Debug, Clone)]
+pub struct Slot {
+    /// Tint color multiplied into the attachment.
+    pub color: Color,
+    /// Optional dark color for two-color (tint-black) rendering.
+    pub dark_color: Option<Color>,
+    /// Name of the attachment currently shown, if any.
+    pub attachment: Option<String>,
+}
+
+impl Slot {
+    fn from_data(data: &SlotData) -> Self {
+        Self {
+            color: data.color,
+            dark_color: data.dark_color,
+            attachment: data.attachment.clone(),
+        }
+    }
+
+    /// Reset to the setup tint, dark tint, and attachment.
+    fn set_to_setup_pose(&mut self, data: &SlotData) {
+        self.color = data.color;
+        self.dark_color = data.dark_color;
+        self.attachment = data.attachment.clone();
+    }
+}
+
 /// A posable instance of a [`SkeletonData`] rig. Many skeletons can share one
 /// rig via the [`Arc`].
 #[derive(Debug, Clone)]
@@ -178,6 +207,8 @@ pub struct Skeleton {
     transform_constraints: Vec<TransformConstraint>,
     path_constraints: Vec<PathConstraint>,
     physics_constraints: Vec<PhysicsConstraint>,
+    slots: Vec<Slot>,
+    draw_order: Vec<usize>,
     update_cache: Vec<Updatable>,
     // Accumulated simulation time, advanced by `update`, read by physics.
     time: f32,
@@ -216,6 +247,8 @@ impl Skeleton {
             .iter()
             .map(PhysicsConstraint::from_data)
             .collect();
+        let slots = data.slots.iter().map(Slot::from_data).collect();
+        let draw_order: Vec<usize> = (0..data.slots.len()).collect();
         let update_cache = build_update_cache(&data);
         Self {
             data,
@@ -224,6 +257,8 @@ impl Skeleton {
             transform_constraints,
             path_constraints,
             physics_constraints,
+            slots,
+            draw_order,
             update_cache,
             time: 0.0,
             x: 0.0,
@@ -255,6 +290,24 @@ impl Skeleton {
     #[must_use]
     pub fn bone(&self, index: usize) -> Option<&Bone> {
         self.bones.get(index)
+    }
+
+    /// A slot's runtime state by index.
+    #[must_use]
+    pub fn slot(&self, index: usize) -> Option<&Slot> {
+        self.slots.get(index)
+    }
+
+    /// The runtime slots, indexed by slot index (not draw order).
+    #[must_use]
+    pub fn slots(&self) -> &[Slot] {
+        &self.slots
+    }
+
+    /// The current draw order: slot indices, back to front.
+    #[must_use]
+    pub fn draw_order(&self) -> &[usize] {
+        &self.draw_order
     }
 
     /// A physics constraint's runtime state by index (its mixable tunables).
@@ -294,6 +347,14 @@ impl Skeleton {
         let setup = self.data.bones.get(index)?;
         let bone = self.bones.get_mut(index)?;
         Some((bone, setup))
+    }
+
+    /// A slot's mutable runtime pose paired with its setup data, for slot
+    /// timelines.
+    pub(crate) fn slot_pose_and_setup(&mut self, i: usize) -> Option<(&mut Slot, &SlotData)> {
+        let setup = self.data.slots.get(i)?;
+        let slot = self.slots.get_mut(i)?;
+        Some((slot, setup))
     }
 
     /// An IK constraint's mutable pose paired with its setup data, for the
@@ -348,6 +409,16 @@ impl Skeleton {
         for (bone, data) in self.bones.iter_mut().zip(&self.data.bones) {
             bone.set_to_setup_pose(data);
         }
+    }
+
+    /// Reset every slot's tint, dark tint, and attachment to its setup, and the
+    /// draw order to setup order. Call each frame before applying slot timelines.
+    pub fn set_slots_to_setup_pose(&mut self) {
+        for (slot, data) in self.slots.iter_mut().zip(&self.data.slots) {
+            slot.set_to_setup_pose(data);
+        }
+        self.draw_order.clear();
+        self.draw_order.extend(0..self.slots.len());
     }
 
     /// Advance the physics simulation clock by `dt` seconds.

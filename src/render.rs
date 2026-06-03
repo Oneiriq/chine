@@ -69,23 +69,27 @@ fn bind_skin(skin: &mut Skin, atlas: &Atlas) {
 /// Produce the draw-order render command stream for a posed skeleton.
 ///
 /// Call [`Skeleton::update_world_transform`] first (to pose the bones) and
-/// [`bind_atlas`] once at load time (to resolve UVs). Uses each slot's setup
-/// attachment, color, and draw order (slot attachment / color / draw-order
-/// timelines arrive later).
+/// [`bind_atlas`] once at load time (to resolve UVs). Walks the skeleton's
+/// runtime draw order, reading each slot's current attachment and tint (driven
+/// by slot timelines); the blend mode comes from the setup data.
 #[must_use]
 pub fn render(skeleton: &Skeleton) -> Vec<RenderCommand> {
     let data = skeleton.data();
     let mut out = Vec::new();
-    for slot in &data.slots {
+    for &slot_index in skeleton.draw_order() {
+        let (Some(setup), Some(slot)) = (data.slots.get(slot_index), skeleton.slot(slot_index))
+        else {
+            continue;
+        };
         let Some(name) = slot.attachment.as_deref() else {
             continue;
         };
-        let Some(att) = data.attachment(slot.index, name, None) else {
+        let Some(att) = data.attachment(slot_index, name, None) else {
             continue;
         };
         match att {
             Attachment::Region(r) => {
-                let Some(bone) = skeleton.bone(slot.bone) else {
+                let Some(bone) = skeleton.bone(setup.bone) else {
                     continue;
                 };
                 out.push(RenderCommand {
@@ -94,17 +98,17 @@ pub fn render(skeleton: &Skeleton) -> Vec<RenderCommand> {
                     triangles: vec![0, 1, 2, 2, 3, 0],
                     color: mul(slot.color, r.color),
                     page: r.page,
-                    blend: slot.blend,
+                    blend: setup.blend,
                 });
             }
             Attachment::Mesh(m) => {
                 out.push(RenderCommand {
-                    positions: m.compute_world_vertices(skeleton, slot.bone),
+                    positions: m.compute_world_vertices(skeleton, setup.bone),
                     uvs: m.uvs.clone(),
                     triangles: m.triangles.clone(),
                     color: mul(slot.color, m.color),
                     page: m.page,
-                    blend: slot.blend,
+                    blend: setup.blend,
                 });
             }
             Attachment::Path(_) => {}

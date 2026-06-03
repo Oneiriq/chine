@@ -92,12 +92,22 @@ impl TrackEntry {
     /// Apply this entry to `skeleton`. `base` selects setup-pose blending (the
     /// lowest track) versus layering over the current pose.
     fn apply(&mut self, skeleton: &mut Skeleton, base: bool) {
-        let base_blend = if base { MixFrom::Setup } else { MixFrom::Current };
+        let base_blend = if base {
+            MixFrom::Setup
+        } else {
+            MixFrom::Current
+        };
         if let Some(from) = self.mixing_from.as_mut() {
             // Establish the outgoing pose, then blend the incoming one over it.
             let from_time = from.current_time();
-            from.animation
-                .apply(skeleton, from.last_time, from_time, from.alpha, base_blend, false);
+            from.animation.apply(
+                skeleton,
+                from.last_time,
+                from_time,
+                from.alpha,
+                base_blend,
+                false,
+            );
             from.last_time = from_time;
             let time = self.current_time();
             self.animation.apply(
@@ -111,8 +121,14 @@ impl TrackEntry {
             self.last_time = time;
         } else {
             let time = self.current_time();
-            self.animation
-                .apply(skeleton, self.last_time, time, self.alpha, base_blend, false);
+            self.animation.apply(
+                skeleton,
+                self.last_time,
+                time,
+                self.alpha,
+                base_blend,
+                false,
+            );
             self.last_time = time;
         }
     }
@@ -338,14 +354,20 @@ mod tests {
         sk.set_bones_to_setup_pose();
         state.apply(&mut sk);
         let mid = sk.bone(0).unwrap().rotation;
-        assert!((mid - 45.0).abs() < 2.0, "expected mid-crossfade ~45, got {mid}");
+        assert!(
+            (mid - 45.0).abs() < 2.0,
+            "expected mid-crossfade ~45, got {mid}"
+        );
 
         // Past the mix duration the crossfade completes at 90.
         state.update(0.6);
         sk.set_bones_to_setup_pose();
         state.apply(&mut sk);
         let done = sk.bone(0).unwrap().rotation;
-        assert!((done - 90.0).abs() < 1e-3, "expected 90 after mix, got {done}");
+        assert!(
+            (done - 90.0).abs() < 1e-3,
+            "expected 90 after mix, got {done}"
+        );
     }
 
     #[test]

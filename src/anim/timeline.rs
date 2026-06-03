@@ -188,6 +188,8 @@ pub(crate) enum Timeline {
     Physics(ConstraintTimeline, PhysicsProperty),
     /// Physics constraint reset, fired on keyframe crossings.
     PhysicsReset(PhysicsResetTimeline),
+    /// Slot tint color (RGBA); the timeline's index is the slot.
+    SlotColor(ConstraintTimeline),
 }
 
 impl Timeline {
@@ -218,6 +220,7 @@ impl Timeline {
                 apply_physics(t, *property, skeleton, time, alpha, from, add);
             }
             Timeline::PhysicsReset(t) => apply_physics_reset(t, skeleton, last_time, time),
+            Timeline::SlotColor(t) => apply_slot_color(t, skeleton, time, alpha, from, add),
         }
     }
 }
@@ -668,6 +671,66 @@ fn apply_physics_reset(t: &PhysicsResetTimeline, skel: &mut Skeleton, last_time:
     } else {
         skel.request_physics_reset(t.constraint);
     }
+}
+
+/// Slot color timeline: blends the slot's RGBA tint from its setup color toward
+/// the keyed colors. The timeline's index is the slot.
+fn apply_slot_color(
+    t: &ConstraintTimeline,
+    skel: &mut Skeleton,
+    time: f32,
+    alpha: f32,
+    from: MixFrom,
+    add: bool,
+) {
+    let Some((slot, setup)) = skel.slot_pose_and_setup(t.constraint) else {
+        return;
+    };
+    if time < t.curve.first_time() {
+        match from {
+            MixFrom::Setup => slot.color = setup.color,
+            MixFrom::First => {
+                slot.color.r += (setup.color.r - slot.color.r) * alpha;
+                slot.color.g += (setup.color.g - slot.color.g) * alpha;
+                slot.color.b += (setup.color.b - slot.color.b) * alpha;
+                slot.color.a += (setup.color.a - slot.color.a) * alpha;
+            }
+            MixFrom::Current => {}
+        }
+        return;
+    }
+    slot.color.r = absolute_value_with(
+        t.curve.value(time, 1),
+        alpha,
+        from,
+        add,
+        slot.color.r,
+        setup.color.r,
+    );
+    slot.color.g = absolute_value_with(
+        t.curve.value(time, 2),
+        alpha,
+        from,
+        add,
+        slot.color.g,
+        setup.color.g,
+    );
+    slot.color.b = absolute_value_with(
+        t.curve.value(time, 3),
+        alpha,
+        from,
+        add,
+        slot.color.b,
+        setup.color.b,
+    );
+    slot.color.a = absolute_value_with(
+        t.curve.value(time, 4),
+        alpha,
+        from,
+        add,
+        slot.color.a,
+        setup.color.a,
+    );
 }
 
 #[cfg(test)]
