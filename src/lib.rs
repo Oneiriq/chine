@@ -25,5 +25,6 @@
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 
+pub mod atlas;
 pub mod data;
 pub mod skel;
