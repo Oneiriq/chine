@@ -179,6 +179,9 @@ pub struct Slot {
     pub dark_color: Option<Color>,
     /// Name of the attachment currently shown, if any.
     pub attachment: Option<String>,
+    /// Deformed local vertex positions for the current mesh attachment, set by a
+    /// deform timeline (empty = use the attachment's setup vertices).
+    pub deform: Vec<f32>,
 }
 
 impl Slot {
@@ -187,14 +190,16 @@ impl Slot {
             color: data.color,
             dark_color: data.dark_color,
             attachment: data.attachment.clone(),
+            deform: Vec::new(),
         }
     }
 
-    /// Reset to the setup tint, dark tint, and attachment.
+    /// Reset to the setup tint, dark tint, and attachment, and clear the deform.
     fn set_to_setup_pose(&mut self, data: &SlotData) {
         self.color = data.color;
         self.dark_color = data.dark_color;
         self.attachment = data.attachment.clone();
+        self.deform.clear();
     }
 }
 

@@ -17,8 +17,9 @@ use glam::Vec2;
 use serde_json::Value;
 
 use crate::anim::{
-    Animation, AttachmentTimeline, BoneAxis, BoneTimeline, ConstraintTimeline, DrawOrderTimeline,
-    EventTimeline, PhysicsProperty, PhysicsResetTimeline, Timeline, GLOBAL_PHYSICS,
+    Animation, AttachmentTimeline, BoneAxis, BoneTimeline, ConstraintTimeline, DeformTimeline,
+    DrawOrderTimeline, EventTimeline, PhysicsProperty, PhysicsResetTimeline, Timeline,
+    GLOBAL_PHYSICS,
 };
 use crate::attach::{Attachment, MeshAttachment, MeshVertices, PathAttachment, RegionAttachment};
 use crate::constraint::ik::IkConstraintData;
@@ -564,6 +565,59 @@ fn parse_animation(name: &str, anim: &Value, data: &SkeletonData) -> Result<Anim
         }
     }
 
+    if let Some(deforms) = anim.get("deform").and_then(Value::as_object) {
+        for (skin_name, slots) in deforms {
+            let skin = if skin_name == "default" {
+                None
+            } else {
+                data.find_skin(skin_name)
+            };
+            let Some(slots) = slots.as_object() else {
+                continue;
+            };
+            for (slot_name, attachments) in slots {
+                let Some(slot_idx) = data.find_slot(slot_name) else {
+                    continue;
+                };
+                let Some(attachments) = attachments.as_object() else {
+                    continue;
+                };
+                for (att_name, keys) in attachments {
+                    let Some(keys) = keys.as_array() else {
+                        continue;
+                    };
+                    if keys.is_empty() {
+                        continue;
+                    }
+                    let Some(Attachment::Mesh(mesh)) = data.attachment(slot_idx, att_name, skin)
+                    else {
+                        continue;
+                    };
+                    // Weighted deform is a follow-up; only unweighted meshes here.
+                    let Some(setup) = mesh.setup_vertices() else {
+                        continue;
+                    };
+                    let setup = setup.to_vec();
+                    let vc = setup.len() / 2;
+                    let mut times = Vec::with_capacity(keys.len());
+                    let mut frames = Vec::with_capacity(keys.len());
+                    for k in keys {
+                        times.push(f(k, "time"));
+                        frames.push(read_deform_frame(k, vc));
+                    }
+                    duration = duration.max(times.last().copied().unwrap_or(0.0));
+                    timelines.push(Timeline::Deform(DeformTimeline::new(
+                        slot_idx,
+                        att_name.clone(),
+                        setup,
+                        times,
+                        frames,
+                    )));
+                }
+            }
+        }
+    }
+
     Ok(Animation::new(name, duration, timelines))
 }
 
@@ -976,6 +1030,20 @@ fn read_event_timeline(keys: &[Value], data: &SkeletonData) -> (EventTimeline, f
         duration = duration.max(time);
     }
     (EventTimeline::new(times, events), duration)
+}
+
+/// Read one deform keyframe's sparse `offset`/`vertices` into a full
+/// `vertex_count * 2` offset array (zero where unspecified).
+fn read_deform_frame(k: &Value, vertex_count: usize) -> Vec<f32> {
+    let n = vertex_count * 2;
+    let mut frame = vec![0.0; n];
+    let offset = k.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
+    for (j, v) in f_array(k, "vertices").into_iter().enumerate() {
+        if offset + j < n {
+            frame[offset + j] = v;
+        }
+    }
+    frame
 }
 
 /// Resolve a constraint's named constrained bones to indices.
@@ -1727,6 +1795,39 @@ mod tests {
         let b = sk.bone(0).unwrap();
         assert!((b.shear_x - 15.0).abs() < 1e-3, "shear_x={}", b.shear_x);
         assert!((b.shear_y - 20.0).abs() < 1e-3, "shear_y={}", b.shear_y);
+    }
+
+    #[test]
+    fn deform_timeline_moves_mesh_vertices() {
+        let json = r#"{
+            "bones": [ { "name": "root" } ],
+            "slots": [ { "name": "s", "bone": "root", "attachment": "m" } ],
+            "skins": [ { "name": "default", "attachments": { "s": { "m": {
+                "type": "mesh", "uvs": [0,0, 1,0, 0,1], "triangles": [0,1,2], "vertices": [0,0, 10,0, 0,10]
+            } } } } ],
+            "animations": {
+                "wobble": {
+                    "deform": { "default": { "s": { "m": [
+                        { "time": 0, "vertices": [0,0, 0,0, 0,0] },
+                        { "time": 1, "offset": 2, "vertices": [5, 0] }
+                    ] } } }
+                }
+            }
+        }"#;
+        let data = from_json(json).unwrap();
+        let anim = data.find_animation("wobble").unwrap().clone();
+        let mut sk = crate::skel::Skeleton::new(std::sync::Arc::new(data));
+        let mut state = crate::anim::AnimationState::new();
+        state.set_animation(anim, false);
+        state.update(1.0);
+        sk.set_slots_to_setup_pose();
+        state.apply(&mut sk);
+        let d = &sk.slot(0).unwrap().deform;
+        // vertex 1's x (index 2) gets +5: setup 10 -> 15; others unchanged.
+        assert_eq!(d.len(), 6);
+        assert!((d[2] - 15.0).abs() < 1e-3, "d[2]={}", d[2]);
+        assert!((d[0] - 0.0).abs() < 1e-3, "d[0]={}", d[0]);
+        assert!((d[5] - 10.0).abs() < 1e-3, "d[5]={}", d[5]);
     }
 
     #[test]

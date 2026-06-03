@@ -103,7 +103,7 @@ pub fn render(skeleton: &Skeleton) -> Vec<RenderCommand> {
             }
             Attachment::Mesh(m) => {
                 out.push(RenderCommand {
-                    positions: m.compute_world_vertices(skeleton, setup.bone),
+                    positions: m.compute_world_vertices(skeleton, setup.bone, &slot.deform),
                     uvs: m.uvs.clone(),
                     triangles: m.triangles.clone(),
                     color: mul(slot.color, m.color),

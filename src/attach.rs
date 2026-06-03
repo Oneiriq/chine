@@ -230,10 +230,32 @@ impl MeshAttachment {
     }
 
     /// Compute world-space positions for every vertex. `slot_bone` is the index
-    /// of the bone the slot follows (used for unweighted meshes).
+    /// of the bone the slot follows (used for unweighted meshes); `deform`
+    /// overrides the local vertices when non-empty (unweighted only).
     #[must_use]
-    pub fn compute_world_vertices(&self, skeleton: &Skeleton, slot_bone: usize) -> Vec<Vec2> {
-        compute_vertices(&self.vertices, self.vertex_count(), skeleton, slot_bone)
+    pub fn compute_world_vertices(
+        &self,
+        skeleton: &Skeleton,
+        slot_bone: usize,
+        deform: &[f32],
+    ) -> Vec<Vec2> {
+        compute_vertices(
+            &self.vertices,
+            self.vertex_count(),
+            skeleton,
+            slot_bone,
+            deform,
+        )
+    }
+
+    /// The unweighted setup vertex positions (`2 * vertex_count`), or `None` for
+    /// a weighted mesh. Used to build deform timelines.
+    #[must_use]
+    pub fn setup_vertices(&self) -> Option<&[f32]> {
+        match &self.vertices {
+            MeshVertices::Unweighted(v) => Some(v),
+            MeshVertices::Weighted { .. } => None,
+        }
     }
 
     /// Remap the mesh's `[0, 1]` region-relative UVs into page space using the
@@ -260,6 +282,7 @@ fn compute_vertices(
     count: usize,
     skeleton: &Skeleton,
     slot_bone: usize,
+    deform: &[f32],
 ) -> Vec<Vec2> {
     let mut out = Vec::with_capacity(count);
     match vertices {
@@ -267,11 +290,14 @@ fn compute_vertices(
             let Some(bone) = skeleton.bone(slot_bone) else {
                 return out;
             };
+            // A deform timeline overrides the local vertices for unweighted
+            // meshes. (Weighted deform is a follow-up.)
+            let local = if deform.len() >= count * 2 { deform } else { v };
             let (a, b, c, d) = (bone.a(), bone.b(), bone.c(), bone.d());
             let (wx, wy) = (bone.world_x(), bone.world_y());
             for i in 0..count {
-                let vx = v[i * 2];
-                let vy = v[i * 2 + 1];
+                let vx = local[i * 2];
+                let vy = local[i * 2 + 1];
                 out.push(Vec2::new(vx * a + vy * b + wx, vx * c + vy * d + wy));
             }
         }
@@ -352,7 +378,7 @@ impl PathAttachment {
     /// Compute world-space positions for every control point.
     #[must_use]
     pub fn compute_world_vertices(&self, skeleton: &Skeleton, slot_bone: usize) -> Vec<Vec2> {
-        compute_vertices(&self.vertices, self.vertex_count, skeleton, slot_bone)
+        compute_vertices(&self.vertices, self.vertex_count, skeleton, slot_bone, &[])
     }
 }
 
@@ -422,7 +448,7 @@ mod tests {
             vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
             vec![0, 1, 2],
         );
-        let w = mesh.compute_world_vertices(&sk, 0);
+        let w = mesh.compute_world_vertices(&sk, 0, &[]);
         // identity bone at (10,20): each local vertex offset by (10,20).
         assert!(close(w[0], 10.0, 20.0));
         assert!(close(w[1], 15.0, 20.0));
@@ -461,7 +487,7 @@ mod tests {
             vec![0.0, 0.0],
             vec![],
         );
-        let w = mesh.compute_world_vertices(&sk, 0);
+        let w = mesh.compute_world_vertices(&sk, 0, &[]);
         assert_eq!(w.len(), 1);
         assert!(close(w[0], 50.0, 0.0), "midpoint {:?}", w[0]);
     }

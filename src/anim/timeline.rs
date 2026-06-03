@@ -189,6 +189,38 @@ impl EventTimeline {
     }
 }
 
+/// A mesh deform timeline (unweighted): per-keyframe local-vertex offsets added
+/// to the attachment's setup vertices. Only applies while the slot shows the
+/// matching attachment.
+#[derive(Debug, Clone)]
+pub(crate) struct DeformTimeline {
+    slot: usize,
+    attachment: String,
+    setup: Vec<f32>,
+    times: Vec<f32>,
+    frames: Vec<Vec<f32>>,
+}
+
+impl DeformTimeline {
+    /// A deform timeline for `slot`/`attachment` with setup vertices and the
+    /// per-keyframe offset frames.
+    pub(crate) fn new(
+        slot: usize,
+        attachment: String,
+        setup: Vec<f32>,
+        times: Vec<f32>,
+        frames: Vec<Vec<f32>>,
+    ) -> Self {
+        Self {
+            slot,
+            attachment,
+            setup,
+            times,
+            frames,
+        }
+    }
+}
+
 /// Sentinel constraint index marking a physics timeline as global: it drives
 /// every physics constraint whose matching global flag is set.
 pub(crate) const GLOBAL_PHYSICS: usize = usize::MAX;
@@ -265,6 +297,8 @@ pub(crate) enum Timeline {
     DrawOrder(DrawOrderTimeline),
     /// Animation events fired on keyframe crossings.
     Event(EventTimeline),
+    /// Mesh deform (unweighted local-vertex offsets).
+    Deform(DeformTimeline),
 }
 
 impl Timeline {
@@ -305,6 +339,7 @@ impl Timeline {
             Timeline::Attachment(t) => apply_attachment(t, skeleton, time, from),
             Timeline::DrawOrder(t) => apply_draw_order(t, skeleton, time),
             Timeline::Event(t) => apply_event(t, skeleton, last_time, time),
+            Timeline::Deform(t) => apply_deform(t, skeleton, time, alpha, from),
         }
     }
 }
@@ -1015,6 +1050,55 @@ fn apply_event(t: &EventTimeline, skel: &mut Skeleton, last_time: f32, time: f32
             skel.push_event(t.events[i].clone());
         }
     }
+}
+
+/// Mesh deform timeline: set the slot's deform buffer to the setup vertices plus
+/// the interpolated keyframe offsets (scaled by `alpha`). Only applies while the
+/// slot shows the timeline's attachment.
+fn apply_deform(t: &DeformTimeline, skel: &mut Skeleton, time: f32, alpha: f32, from: MixFrom) {
+    let Some((slot, _)) = skel.slot_pose_and_setup(t.slot) else {
+        return;
+    };
+    if slot.attachment.as_deref() != Some(t.attachment.as_str()) {
+        return;
+    }
+    let n = t.setup.len();
+    if t.times.is_empty() || time < t.times[0] {
+        if matches!(from, MixFrom::Setup) {
+            slot.deform.clear();
+        }
+        return;
+    }
+    let offset = interp_deform(&t.times, &t.frames, time);
+    slot.deform.resize(n, 0.0);
+    for (i, d) in slot.deform.iter_mut().enumerate() {
+        *d = t.setup[i] + offset.get(i).copied().unwrap_or(0.0) * alpha;
+    }
+}
+
+/// Linearly interpolate the deform offset frames at `time`.
+fn interp_deform(times: &[f32], frames: &[Vec<f32>], time: f32) -> Vec<f32> {
+    let last = times.len() - 1;
+    if time >= times[last] {
+        return frames[last].clone();
+    }
+    let i = search_step(times, time);
+    let (t0, t1) = (times[i], times[i + 1]);
+    let alpha = if t1 > t0 {
+        (time - t0) / (t1 - t0)
+    } else {
+        0.0
+    };
+    let a = &frames[i];
+    let b = &frames[i + 1];
+    let n = a.len().max(b.len());
+    let mut out = vec![0.0; n];
+    for (j, v) in out.iter_mut().enumerate() {
+        let av = a.get(j).copied().unwrap_or(0.0);
+        let bv = b.get(j).copied().unwrap_or(0.0);
+        *v = av + (bv - av) * alpha;
+    }
+    out
 }
 
 /// Index of the last keyframe at or before `time` (assumes `time >= times[0]`).
