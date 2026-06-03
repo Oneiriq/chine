@@ -28,5 +28,7 @@
 pub mod atlas;
 pub mod attach;
 pub mod data;
+#[cfg(feature = "json")]
+pub mod load;
 pub mod skel;
 pub mod skin;
