@@ -130,6 +130,7 @@ pub struct Skeleton {
     data: Arc<SkeletonData>,
     bones: Vec<Bone>,
     ik_constraints: Vec<IkConstraint>,
+    update_cache: Vec<Updatable>,
     /// World-space x offset applied to the whole skeleton.
     pub x: f32,
     /// World-space y offset applied to the whole skeleton.
@@ -150,10 +151,12 @@ impl Skeleton {
             .iter()
             .map(IkConstraint::from_data)
             .collect();
+        let update_cache = build_update_cache(&data);
         Self {
             data,
             bones,
             ik_constraints,
+            update_cache,
             x: 0.0,
             y: 0.0,
             scale_x: 1.0,
@@ -205,57 +208,56 @@ impl Skeleton {
         }
     }
 
-    /// Compute every bone's world transform by forward kinematics, then apply
-    /// the skeleton's constraints (IK; transform / path / physics follow) in
-    /// order, re-running FK over each constraint's affected bones.
+    /// Pose every bone: walk the update cache, computing each bone's world
+    /// transform by forward kinematics and applying each constraint (IK; with
+    /// transform / path / physics to follow) in dependency order.
     ///
     /// Constraints modify the local pose, so reset bones to their setup or
     /// animated pose each frame (via [`Self::set_bones_to_setup_pose`] or the
     /// animation system) before calling this.
     pub fn update_world_transform(&mut self) {
-        self.fk_from(0);
-        for c in 0..self.ik_constraints.len() {
-            if let Some(start) = ik::solve(
-                &mut self.bones,
-                &self.data,
-                c,
-                &self.ik_constraints[c],
-                self.scale_x,
-                self.scale_y,
-            ) {
-                self.fk_from(start);
+        let len = self.update_cache.len();
+        for k in 0..len {
+            match self.update_cache[k] {
+                Updatable::Bone(i) => self.fk_one(i),
+                Updatable::Ik(c) => ik::solve(
+                    &mut self.bones,
+                    &self.data,
+                    c,
+                    &self.ik_constraints[c],
+                    self.scale_x,
+                    self.scale_y,
+                ),
             }
         }
     }
 
-    /// Recompute world transforms for bones `start..` from their local pose.
-    fn fk_from(&mut self, start: usize) {
+    /// Compute the world transform for bone `i` from its local pose and parent.
+    fn fk_one(&mut self, i: usize) {
         let (sx, sy) = (self.scale_x, self.scale_y);
         let (skel_x, skel_y) = (self.x, self.y);
-        for i in start..self.bones.len() {
-            let world = match self.bones[i].parent {
-                None => root_world(&self.bones[i], skel_x, skel_y, sx, sy),
-                Some(p) => {
-                    let parent = &self.bones[p];
-                    let pose = ParentPose {
-                        a: parent.a,
-                        b: parent.b,
-                        c: parent.c,
-                        d: parent.d,
-                        world_x: parent.world_x,
-                        world_y: parent.world_y,
-                    };
-                    child_world(&self.bones[i], &pose, sx, sy)
-                }
-            };
-            let bone = &mut self.bones[i];
-            bone.a = world.0;
-            bone.b = world.1;
-            bone.c = world.2;
-            bone.d = world.3;
-            bone.world_x = world.4;
-            bone.world_y = world.5;
-        }
+        let world = match self.bones[i].parent {
+            None => root_world(&self.bones[i], skel_x, skel_y, sx, sy),
+            Some(p) => {
+                let parent = &self.bones[p];
+                let pose = ParentPose {
+                    a: parent.a,
+                    b: parent.b,
+                    c: parent.c,
+                    d: parent.d,
+                    world_x: parent.world_x,
+                    world_y: parent.world_y,
+                };
+                child_world(&self.bones[i], &pose, sx, sy)
+            }
+        };
+        let bone = &mut self.bones[i];
+        bone.a = world.0;
+        bone.b = world.1;
+        bone.c = world.2;
+        bone.d = world.3;
+        bone.world_x = world.4;
+        bone.world_y = world.5;
     }
 }
 
@@ -387,6 +389,74 @@ fn child_world(b: &Bone, p: &ParentPose, sx: f32, sy: f32) -> World {
                 world_y,
             )
         }
+    }
+}
+
+/// One entry in a [`Skeleton`]'s update cache: compute a bone's world transform,
+/// or apply a constraint. Built by [`build_update_cache`] in dependency order.
+#[derive(Debug, Clone, Copy)]
+enum Updatable {
+    /// Compute the world transform for the bone at this index.
+    Bone(usize),
+    /// Apply the IK constraint at this index.
+    Ik(usize),
+}
+
+/// Build the ordered update cache: a topological interleaving of bone
+/// world-transform updates and constraint applications, mirroring Spine's
+/// `Skeleton.updateCache`. Bones a constraint reads are computed before it;
+/// bones it modifies are recomputed after.
+fn build_update_cache(data: &SkeletonData) -> Vec<Updatable> {
+    let n = data.bones.len();
+    let parents: Vec<Option<usize>> = data.bones.iter().map(|b| b.parent).collect();
+    let mut children: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (i, b) in data.bones.iter().enumerate() {
+        if let Some(p) = b.parent {
+            children[p].push(i);
+        }
+    }
+    let mut sorted = vec![false; n];
+    let mut cache = Vec::new();
+    for (ic, ik) in data.ik_constraints.iter().enumerate() {
+        let Some(&parent) = ik.bones.first() else {
+            continue;
+        };
+        sort_bone(ik.target, &parents, &mut sorted, &mut cache);
+        sort_bone(parent, &parents, &mut sorted, &mut cache);
+        cache.push(Updatable::Ik(ic));
+        sorted[parent] = false;
+        sort_reset(parent, &children, &mut sorted);
+    }
+    for i in 0..n {
+        sort_bone(i, &parents, &mut sorted, &mut cache);
+    }
+    cache
+}
+
+/// Add `bone` (and any unsorted ancestors) to the cache once, parents first.
+fn sort_bone(
+    bone: usize,
+    parents: &[Option<usize>],
+    sorted: &mut [bool],
+    cache: &mut Vec<Updatable>,
+) {
+    if sorted[bone] {
+        return;
+    }
+    if let Some(p) = parents[bone] {
+        sort_bone(p, parents, sorted, cache);
+    }
+    sorted[bone] = true;
+    cache.push(Updatable::Bone(bone));
+}
+
+/// Mark `bone`'s descendants unsorted so they are recomputed after a constraint.
+fn sort_reset(bone: usize, children: &[Vec<usize>], sorted: &mut [bool]) {
+    for &child in &children[bone] {
+        if sorted[child] {
+            sort_reset(child, children, sorted);
+        }
+        sorted[child] = false;
     }
 }
 

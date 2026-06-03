@@ -67,9 +67,8 @@ impl IkConstraint {
 }
 
 /// Solve IK constraint `c` against the current world transforms, writing the
-/// constrained bones' local pose. Returns the first constrained bone index (the
-/// point from which forward kinematics must be re-run), or `None` if nothing
-/// changed.
+/// constrained bones' local pose. The update cache recomputes their world
+/// transforms afterward.
 pub(crate) fn solve(
     bones: &mut [Bone],
     data: &SkeletonData,
@@ -77,12 +76,11 @@ pub(crate) fn solve(
     pose: &IkConstraint,
     skel_sx: f32,
     skel_sy: f32,
-) -> Option<usize> {
+) {
     let ik = &data.ik_constraints[c];
-    if pose.mix == 0.0 {
-        return None;
+    if pose.mix == 0.0 || ik.bones.is_empty() {
+        return;
     }
-    let start = *ik.bones.first()?;
     let target_x = bones[ik.target].world_x();
     let target_y = bones[ik.target].world_y();
     match ik.bones.len() {
@@ -100,9 +98,8 @@ pub(crate) fn solve(
             skel_sy,
         ),
         2 => apply2(bones, data, ik, target_x, target_y, pose, skel_sx, skel_sy),
-        _ => return None,
+        _ => {}
     }
-    Some(start)
 }
 
 /// Sign of `x` matching Java `Math.signum` (zero stays zero).
@@ -537,6 +534,37 @@ mod tests {
         let tip_y = shin.world_y() + shin.c() * 10.0;
         assert!((tip_x - 10.0).abs() < 0.05, "tip_x={tip_x}");
         assert!((tip_y - 10.0).abs() < 0.05, "tip_y={tip_y}");
+    }
+
+    #[test]
+    fn child_of_ik_chain_follows() {
+        // foot is a child of the IK-controlled shin (not itself constrained);
+        // the update cache must recompute it after the IK runs.
+        let data = SkeletonData {
+            bones: vec![
+                bone(0, "root", None, 0.0, 0.0, 0.0),
+                bone(1, "thigh", Some(0), 0.0, 0.0, 10.0),
+                bone(2, "shin", Some(1), 10.0, 0.0, 10.0),
+                bone(3, "foot", Some(2), 10.0, 0.0, 0.0),
+                bone(4, "target", Some(0), 10.0, 10.0, 0.0),
+            ],
+            ik_constraints: vec![ik("leg-ik", vec![1, 2], 4)],
+            ..Default::default()
+        };
+        let mut sk = Skeleton::new(Arc::new(data));
+        sk.update_world_transform();
+        // foot sits at the shin's tip, which IK drove toward ~(10, 10).
+        let foot = sk.bone(3).unwrap();
+        assert!(
+            (foot.world_x() - 10.0).abs() < 0.05,
+            "fx={}",
+            foot.world_x()
+        );
+        assert!(
+            (foot.world_y() - 10.0).abs() < 0.05,
+            "fy={}",
+            foot.world_y()
+        );
     }
 
     #[test]
