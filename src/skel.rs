@@ -310,6 +310,13 @@ impl Skeleton {
         &self.draw_order
     }
 
+    /// Replace the current draw order (slot indices, back to front), for the
+    /// draw-order timeline.
+    pub(crate) fn set_draw_order(&mut self, order: &[usize]) {
+        self.draw_order.clear();
+        self.draw_order.extend_from_slice(order);
+    }
+
     /// A physics constraint's runtime state by index (its mixable tunables).
     #[must_use]
     pub fn physics_constraint(&self, index: usize) -> Option<&PhysicsConstraint> {

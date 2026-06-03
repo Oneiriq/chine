@@ -17,8 +17,8 @@ use glam::Vec2;
 use serde_json::Value;
 
 use crate::anim::{
-    Animation, BoneTimeline, ConstraintTimeline, PhysicsProperty, PhysicsResetTimeline, Timeline,
-    GLOBAL_PHYSICS,
+    Animation, AttachmentTimeline, BoneTimeline, ConstraintTimeline, DrawOrderTimeline,
+    PhysicsProperty, PhysicsResetTimeline, Timeline, GLOBAL_PHYSICS,
 };
 use crate::attach::{Attachment, MeshAttachment, MeshVertices, PathAttachment, RegionAttachment};
 use crate::constraint::ik::IkConstraintData;
@@ -462,13 +462,45 @@ fn parse_animation(name: &str, anim: &Value, data: &SkeletonData) -> Result<Anim
                 if keys.is_empty() {
                     continue;
                 }
-                if channel == "rgba" {
-                    let (tl, dur) = read_slot_rgba_timeline(keys, idx);
-                    duration = duration.max(dur);
-                    timelines.push(Timeline::SlotColor(tl));
+                match channel.as_str() {
+                    "rgba" => {
+                        let (tl, dur) = read_slot_rgba_timeline(keys, idx);
+                        duration = duration.max(dur);
+                        timelines.push(Timeline::SlotColor(tl));
+                    }
+                    "attachment" => {
+                        let mut times = Vec::with_capacity(keys.len());
+                        let mut names = Vec::with_capacity(keys.len());
+                        for k in keys {
+                            times.push(f(k, "time"));
+                            names.push(k.get("name").and_then(Value::as_str).map(String::from));
+                        }
+                        duration = duration.max(times.last().copied().unwrap_or(0.0));
+                        timelines.push(Timeline::Attachment(AttachmentTimeline::new(
+                            idx, times, names,
+                        )));
+                    }
+                    _ => {} // rgb / rgba2 / rgb2 arrive later.
                 }
-                // rgb / rgba2 / rgb2 / attachment / draw-order arrive later.
             }
+        }
+    }
+
+    if let Some(dos) = anim
+        .get("drawOrder")
+        .or_else(|| anim.get("draworder"))
+        .and_then(Value::as_array)
+    {
+        let slot_count = data.slots.len();
+        let mut times = Vec::with_capacity(dos.len());
+        let mut orders = Vec::with_capacity(dos.len());
+        for k in dos {
+            times.push(f(k, "time"));
+            orders.push(read_draw_order(k, slot_count, data));
+        }
+        if let Some(&dur) = times.last() {
+            duration = duration.max(dur);
+            timelines.push(Timeline::DrawOrder(DrawOrderTimeline::new(times, orders)));
         }
     }
 
@@ -758,6 +790,62 @@ fn read_slot_rgba_timeline(keys: &[Value], slot: usize) -> (ConstraintTimeline, 
         frame += 1;
     }
     (tl, duration)
+}
+
+/// Read one draw-order keyframe's `offsets` into a full slot ordering (the setup
+/// order when there are no offsets).
+fn read_draw_order(k: &Value, slot_count: usize, data: &SkeletonData) -> Vec<usize> {
+    let mut offsets: Vec<(usize, i32)> = Vec::new();
+    if let Some(offs) = k.get("offsets").and_then(Value::as_array) {
+        for o in offs {
+            let Some(slot_name) = o.get("slot").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(slot_index) = data.find_slot(slot_name) else {
+                continue;
+            };
+            let offset = o.get("offset").and_then(Value::as_i64).unwrap_or(0) as i32;
+            offsets.push((slot_index, offset));
+        }
+    }
+    if offsets.is_empty() {
+        return (0..slot_count).collect();
+    }
+    compute_draw_order(slot_count, &mut offsets)
+}
+
+/// Compute a draw order from slot offsets, mirroring Spine: each listed slot
+/// moves by its offset; the rest keep their relative order.
+fn compute_draw_order(slot_count: usize, offsets: &mut [(usize, i32)]) -> Vec<usize> {
+    offsets.sort_by_key(|(slot, _)| *slot);
+    let mut draw_order = vec![usize::MAX; slot_count];
+    let mut unchanged = vec![0usize; slot_count.saturating_sub(offsets.len())];
+    let mut original_index = 0;
+    let mut unchanged_index = 0;
+    for &(slot_index, offset) in offsets.iter() {
+        while original_index != slot_index && original_index < slot_count {
+            unchanged[unchanged_index] = original_index;
+            unchanged_index += 1;
+            original_index += 1;
+        }
+        let pos = original_index as i32 + offset;
+        if (0..slot_count as i32).contains(&pos) {
+            draw_order[pos as usize] = original_index;
+        }
+        original_index += 1;
+    }
+    while original_index < slot_count {
+        unchanged[unchanged_index] = original_index;
+        unchanged_index += 1;
+        original_index += 1;
+    }
+    for i in (0..slot_count).rev() {
+        if draw_order[i] == usize::MAX && unchanged_index > 0 {
+            unchanged_index -= 1;
+            draw_order[i] = unchanged[unchanged_index];
+        }
+    }
+    draw_order
 }
 
 /// Resolve a constraint's named constrained bones to indices.
@@ -1397,6 +1485,71 @@ mod tests {
         assert!((c.r - 1.0).abs() < 1e-2, "r={}", c.r);
         assert!((c.g - 0.5).abs() < 1e-2, "g={}", c.g);
         assert!((c.a - 0.5).abs() < 1e-2, "a={}", c.a);
+    }
+
+    #[test]
+    fn attachment_timeline_swaps_the_attachment() {
+        let json = r#"{
+            "bones": [ { "name": "root" } ],
+            "slots": [ { "name": "s", "bone": "root", "attachment": "a" } ],
+            "animations": {
+                "swap": {
+                    "slots": {
+                        "s": { "attachment": [ { "time": 0, "name": "a" }, { "time": 1, "name": "b" } ] }
+                    }
+                }
+            }
+        }"#;
+        let data = from_json(json).unwrap();
+        let anim = data.find_animation("swap").unwrap().clone();
+        let mut sk = crate::skel::Skeleton::new(std::sync::Arc::new(data));
+        let mut state = crate::anim::AnimationState::new();
+        state.set_animation(anim, false);
+        // t=0.5 is before the second key, so the attachment is still "a" (stepped).
+        state.update(0.5);
+        sk.set_slots_to_setup_pose();
+        state.apply(&mut sk);
+        assert_eq!(sk.slot(0).unwrap().attachment.as_deref(), Some("a"));
+        // Past t=1.0 the attachment switches to "b".
+        state.update(0.6);
+        sk.set_slots_to_setup_pose();
+        state.apply(&mut sk);
+        assert_eq!(sk.slot(0).unwrap().attachment.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn draw_order_timeline_reorders_slots() {
+        let json = r#"{
+            "bones": [ { "name": "root" } ],
+            "slots": [
+                { "name": "s0", "bone": "root" },
+                { "name": "s1", "bone": "root" },
+                { "name": "s2", "bone": "root" }
+            ],
+            "animations": {
+                "reorder": {
+                    "drawOrder": [
+                        { "time": 0 },
+                        { "time": 1, "offsets": [ { "slot": "s0", "offset": 2 } ] }
+                    ]
+                }
+            }
+        }"#;
+        let data = from_json(json).unwrap();
+        let anim = data.find_animation("reorder").unwrap().clone();
+        let mut sk = crate::skel::Skeleton::new(std::sync::Arc::new(data));
+        let mut state = crate::anim::AnimationState::new();
+        state.set_animation(anim, false);
+        // t=0: identity draw order.
+        state.update(0.0);
+        sk.set_slots_to_setup_pose();
+        state.apply(&mut sk);
+        assert_eq!(sk.draw_order(), &[0, 1, 2]);
+        // t>=1: slot 0 moves two places back, others shift forward.
+        state.update(1.0);
+        sk.set_slots_to_setup_pose();
+        state.apply(&mut sk);
+        assert_eq!(sk.draw_order(), &[1, 2, 0]);
     }
 
     #[test]

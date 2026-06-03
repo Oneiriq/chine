@@ -142,6 +142,37 @@ impl PhysicsResetTimeline {
     }
 }
 
+/// A slot attachment timeline: stepped `(time, name)` pairs selecting which
+/// attachment a slot shows (`None` hides it).
+#[derive(Debug, Clone)]
+pub(crate) struct AttachmentTimeline {
+    slot: usize,
+    times: Vec<f32>,
+    names: Vec<Option<String>>,
+}
+
+impl AttachmentTimeline {
+    /// An attachment timeline for `slot`.
+    pub(crate) fn new(slot: usize, times: Vec<f32>, names: Vec<Option<String>>) -> Self {
+        Self { slot, times, names }
+    }
+}
+
+/// A draw-order timeline: stepped per-keyframe slot orderings (each a full
+/// permutation of slot indices, back to front).
+#[derive(Debug, Clone)]
+pub(crate) struct DrawOrderTimeline {
+    times: Vec<f32>,
+    orders: Vec<Vec<usize>>,
+}
+
+impl DrawOrderTimeline {
+    /// A draw-order timeline from per-keyframe orderings.
+    pub(crate) fn new(times: Vec<f32>, orders: Vec<Vec<usize>>) -> Self {
+        Self { times, orders }
+    }
+}
+
 /// Sentinel constraint index marking a physics timeline as global: it drives
 /// every physics constraint whose matching global flag is set.
 pub(crate) const GLOBAL_PHYSICS: usize = usize::MAX;
@@ -190,6 +221,10 @@ pub(crate) enum Timeline {
     PhysicsReset(PhysicsResetTimeline),
     /// Slot tint color (RGBA); the timeline's index is the slot.
     SlotColor(ConstraintTimeline),
+    /// Slot attachment swap (stepped).
+    Attachment(AttachmentTimeline),
+    /// Slot draw order (stepped permutations).
+    DrawOrder(DrawOrderTimeline),
 }
 
 impl Timeline {
@@ -221,6 +256,8 @@ impl Timeline {
             }
             Timeline::PhysicsReset(t) => apply_physics_reset(t, skeleton, last_time, time),
             Timeline::SlotColor(t) => apply_slot_color(t, skeleton, time, alpha, from, add),
+            Timeline::Attachment(t) => apply_attachment(t, skeleton, time, from),
+            Timeline::DrawOrder(t) => apply_draw_order(t, skeleton, time),
         }
     }
 }
@@ -731,6 +768,35 @@ fn apply_slot_color(
         slot.color.a,
         setup.color.a,
     );
+}
+
+/// Slot attachment timeline: a stepped switch to the keyed attachment name.
+fn apply_attachment(t: &AttachmentTimeline, skel: &mut Skeleton, time: f32, from: MixFrom) {
+    let Some((slot, setup)) = skel.slot_pose_and_setup(t.slot) else {
+        return;
+    };
+    if t.times.is_empty() || time < t.times[0] {
+        if matches!(from, MixFrom::Setup | MixFrom::First) {
+            slot.attachment = setup.attachment.clone();
+        }
+        return;
+    }
+    let idx = search_step(&t.times, time);
+    slot.attachment = t.names[idx].clone();
+}
+
+/// Draw-order timeline: a stepped switch to the keyed slot ordering.
+fn apply_draw_order(t: &DrawOrderTimeline, skel: &mut Skeleton, time: f32) {
+    if t.times.is_empty() || time < t.times[0] {
+        return; // before the first key: keep the setup order
+    }
+    let idx = search_step(&t.times, time);
+    skel.set_draw_order(&t.orders[idx]);
+}
+
+/// Index of the last keyframe at or before `time` (assumes `time >= times[0]`).
+fn search_step(times: &[f32], time: f32) -> usize {
+    times.iter().rposition(|&t| t <= time).unwrap_or(0)
 }
 
 #[cfg(test)]
