@@ -15,6 +15,7 @@ use crate::constraint::path::{self, PathConstraint, PathConstraintData};
 use crate::constraint::physics::{self, Physics, PhysicsConstraint, PhysicsConstraintData};
 use crate::constraint::transform::{self, TransformConstraint, TransformConstraintData};
 use crate::data::{BoneData, Color, Inherit, SkeletonData, SlotData};
+use crate::event::Event;
 
 /// Degrees-to-radians factor.
 const DEG_RAD: f32 = core::f32::consts::PI / 180.0;
@@ -209,6 +210,7 @@ pub struct Skeleton {
     physics_constraints: Vec<PhysicsConstraint>,
     slots: Vec<Slot>,
     draw_order: Vec<usize>,
+    events: Vec<Event>,
     update_cache: Vec<Updatable>,
     // Accumulated simulation time, advanced by `update`, read by physics.
     time: f32,
@@ -259,6 +261,7 @@ impl Skeleton {
             physics_constraints,
             slots,
             draw_order,
+            events: Vec::new(),
             update_cache,
             time: 0.0,
             x: 0.0,
@@ -315,6 +318,23 @@ impl Skeleton {
     pub(crate) fn set_draw_order(&mut self, order: &[usize]) {
         self.draw_order.clear();
         self.draw_order.extend_from_slice(order);
+    }
+
+    /// The events fired by the animation since the last apply (footsteps, hit
+    /// frames, audio cues).
+    #[must_use]
+    pub fn events(&self) -> &[Event] {
+        &self.events
+    }
+
+    /// Record a fired event (used by the event timeline).
+    pub(crate) fn push_event(&mut self, event: Event) {
+        self.events.push(event);
+    }
+
+    /// Clear the fired-event list (the animation system does this each apply).
+    pub(crate) fn clear_events(&mut self) {
+        self.events.clear();
     }
 
     /// A physics constraint's runtime state by index (its mixable tunables).

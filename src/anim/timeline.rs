@@ -7,6 +7,7 @@
 use super::curve::{absolute_value_with, Curve};
 use super::MixFrom;
 use crate::constraint::physics::{PhysicsConstraint, PhysicsConstraintData};
+use crate::event::Event;
 use crate::skel::Skeleton;
 
 /// A bone index plus its keyframe curve. The [`Timeline`] variant selects how
@@ -173,6 +174,21 @@ impl DrawOrderTimeline {
     }
 }
 
+/// An event timeline: keyframe times and the [`Event`] fired at each (with
+/// keyframe-overridden values resolved at load time).
+#[derive(Debug, Clone)]
+pub(crate) struct EventTimeline {
+    times: Vec<f32>,
+    events: Vec<Event>,
+}
+
+impl EventTimeline {
+    /// An event timeline from keyframe times and their resolved events.
+    pub(crate) fn new(times: Vec<f32>, events: Vec<Event>) -> Self {
+        Self { times, events }
+    }
+}
+
 /// Sentinel constraint index marking a physics timeline as global: it drives
 /// every physics constraint whose matching global flag is set.
 pub(crate) const GLOBAL_PHYSICS: usize = usize::MAX;
@@ -226,6 +242,8 @@ pub(crate) enum Timeline {
     Attachment(AttachmentTimeline),
     /// Slot draw order (stepped permutations).
     DrawOrder(DrawOrderTimeline),
+    /// Animation events fired on keyframe crossings.
+    Event(EventTimeline),
 }
 
 impl Timeline {
@@ -261,6 +279,7 @@ impl Timeline {
             }
             Timeline::Attachment(t) => apply_attachment(t, skeleton, time, from),
             Timeline::DrawOrder(t) => apply_draw_order(t, skeleton, time),
+            Timeline::Event(t) => apply_event(t, skeleton, last_time, time),
         }
     }
 }
@@ -807,6 +826,22 @@ fn apply_draw_order(t: &DrawOrderTimeline, skel: &mut Skeleton, time: f32) {
     }
     let idx = search_step(&t.times, time);
     skel.set_draw_order(&t.orders[idx]);
+}
+
+/// Event timeline: fire each event whose keyframe time falls in the window
+/// `(last_time, time]` (handling a loop wrap), collecting it on the skeleton.
+fn apply_event(t: &EventTimeline, skel: &mut Skeleton, last_time: f32, time: f32) {
+    let wrapped = time < last_time;
+    for (i, &kt) in t.times.iter().enumerate() {
+        let fired = if wrapped {
+            kt > last_time || kt <= time
+        } else {
+            kt > last_time && kt <= time
+        };
+        if fired {
+            skel.push_event(t.events[i].clone());
+        }
+    }
 }
 
 /// Index of the last keyframe at or before `time` (assumes `time >= times[0]`).

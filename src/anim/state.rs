@@ -241,6 +241,7 @@ impl AnimationState {
     /// higher tracks layered on top. Reset bones to setup first for a clean
     /// result.
     pub fn apply(&mut self, skeleton: &mut Skeleton) {
+        skeleton.clear_events();
         for (i, slot) in self.tracks.iter_mut().enumerate() {
             if let Some(entry) = slot {
                 entry.apply(skeleton, i == 0);

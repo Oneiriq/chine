@@ -29,6 +29,7 @@ pub mod atlas;
 pub mod attach;
 pub mod constraint;
 pub mod data;
+pub mod event;
 #[cfg(feature = "json")]
 pub mod load;
 pub mod render;

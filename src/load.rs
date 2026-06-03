@@ -18,7 +18,7 @@ use serde_json::Value;
 
 use crate::anim::{
     Animation, AttachmentTimeline, BoneTimeline, ConstraintTimeline, DrawOrderTimeline,
-    PhysicsProperty, PhysicsResetTimeline, Timeline, GLOBAL_PHYSICS,
+    EventTimeline, PhysicsProperty, PhysicsResetTimeline, Timeline, GLOBAL_PHYSICS,
 };
 use crate::attach::{Attachment, MeshAttachment, MeshVertices, PathAttachment, RegionAttachment};
 use crate::constraint::ik::IkConstraintData;
@@ -29,6 +29,7 @@ use crate::constraint::transform::{
 };
 use crate::constraint::ScaleYMode;
 use crate::data::{BlendMode, BoneData, Color, Inherit, SkeletonData, SlotData};
+use crate::event::{Event, EventData};
 use crate::skin::Skin;
 
 /// An error parsing a Spine export.
@@ -177,6 +178,24 @@ pub fn from_json(text: &str) -> Result<SkeletonData, LoadError> {
                 }
                 _ => {}
             }
+        }
+    }
+
+    if let Some(events) = root.get("events").and_then(Value::as_object) {
+        for (name, e) in events {
+            data.events.push(EventData {
+                name: name.clone(),
+                int_value: e.get("int").and_then(Value::as_i64).unwrap_or(0) as i32,
+                float_value: f(e, "float"),
+                string_value: e
+                    .get("string")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                audio_path: e.get("audio").and_then(Value::as_str).map(String::from),
+                volume: f_or(e, "volume", 1.0),
+                balance: f(e, "balance"),
+            });
         }
     }
 
@@ -506,6 +525,14 @@ fn parse_animation(name: &str, anim: &Value, data: &SkeletonData) -> Result<Anim
         if let Some(&dur) = times.last() {
             duration = duration.max(dur);
             timelines.push(Timeline::DrawOrder(DrawOrderTimeline::new(times, orders)));
+        }
+    }
+
+    if let Some(events) = anim.get("events").and_then(Value::as_array) {
+        if !events.is_empty() {
+            let (tl, dur) = read_event_timeline(events, data);
+            duration = duration.max(dur);
+            timelines.push(Timeline::Event(tl));
         }
     }
 
@@ -880,6 +907,47 @@ fn compute_draw_order(slot_count: usize, offsets: &mut [(usize, i32)]) -> Vec<us
         }
     }
     draw_order
+}
+
+/// Read an animation event timeline: each keyframe's event, resolving its value
+/// overrides against the named event's setup defaults.
+fn read_event_timeline(keys: &[Value], data: &SkeletonData) -> (EventTimeline, f32) {
+    let mut times = Vec::with_capacity(keys.len());
+    let mut events = Vec::with_capacity(keys.len());
+    let mut duration = 0.0_f32;
+    for k in keys {
+        let time = f(k, "time");
+        let name = k.get("name").and_then(Value::as_str).unwrap_or("");
+        let setup = data.events.iter().find(|e| e.name == name);
+        let (di, df, ds, dv, db) = match setup {
+            Some(e) => (
+                e.int_value,
+                e.float_value,
+                e.string_value.clone(),
+                e.volume,
+                e.balance,
+            ),
+            None => (0, 0.0, String::new(), 1.0, 0.0),
+        };
+        events.push(Event {
+            name: name.to_string(),
+            time,
+            int_value: k
+                .get("int")
+                .and_then(Value::as_i64)
+                .map_or(di, |v| v as i32),
+            float_value: f_or(k, "float", df),
+            string_value: k
+                .get("string")
+                .and_then(Value::as_str)
+                .map_or(ds, String::from),
+            volume: f_or(k, "volume", dv),
+            balance: f_or(k, "balance", db),
+        });
+        times.push(time);
+        duration = duration.max(time);
+    }
+    (EventTimeline::new(times, events), duration)
 }
 
 /// Resolve a constraint's named constrained bones to indices.
@@ -1544,6 +1612,37 @@ mod tests {
         // rgb interpolates white -> red (g 0.5); alpha stays the setup 0x80 (~0.502).
         assert!((c.g - 0.5).abs() < 1e-2, "g={}", c.g);
         assert!((c.a - 0.502).abs() < 1e-2, "a={}", c.a);
+    }
+
+    #[test]
+    fn event_timeline_fires_events() {
+        let json = r#"{
+            "bones": [ { "name": "root" } ],
+            "events": { "footstep": { "int": 5 } },
+            "animations": {
+                "walk": { "events": [ { "time": 0.5, "name": "footstep", "int": 7 } ] }
+            }
+        }"#;
+        let data = from_json(json).unwrap();
+        assert_eq!(data.events.len(), 1);
+        let anim = data.find_animation("walk").unwrap().clone();
+        let mut sk = crate::skel::Skeleton::new(std::sync::Arc::new(data));
+        let mut state = crate::anim::AnimationState::new();
+        state.set_animation(anim, false);
+        // Before the keyframe at 0.5, nothing fires.
+        state.update(0.3);
+        state.apply(&mut sk);
+        assert!(sk.events().is_empty());
+        // Crossing 0.5 fires the footstep with the keyframe int override (7).
+        state.update(0.3);
+        state.apply(&mut sk);
+        assert_eq!(sk.events().len(), 1);
+        assert_eq!(sk.events()[0].name, "footstep");
+        assert_eq!(sk.events()[0].int_value, 7);
+        // The next apply clears it.
+        state.update(0.3);
+        state.apply(&mut sk);
+        assert!(sk.events().is_empty());
     }
 
     #[test]

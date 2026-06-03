@@ -15,6 +15,7 @@ use crate::constraint::ik::IkConstraintData;
 use crate::constraint::path::PathConstraintData;
 use crate::constraint::physics::PhysicsConstraintData;
 use crate::constraint::transform::TransformConstraintData;
+use crate::event::EventData;
 use crate::skin::Skin;
 
 /// An RGBA color with components in `[0, 1]`.
@@ -180,6 +181,8 @@ pub struct SkeletonData {
     pub path_constraints: Vec<PathConstraintData>,
     /// Physics constraints, applied after FK by [`crate::skel::Skeleton`].
     pub physics_constraints: Vec<PhysicsConstraintData>,
+    /// Named events that animations can fire.
+    pub events: Vec<EventData>,
 }
 
 impl SkeletonData {
