@@ -13,6 +13,7 @@ use crate::anim::Animation;
 use crate::attach::Attachment;
 use crate::constraint::ik::IkConstraintData;
 use crate::constraint::path::PathConstraintData;
+use crate::constraint::physics::PhysicsConstraintData;
 use crate::constraint::transform::TransformConstraintData;
 use crate::skin::Skin;
 
@@ -157,6 +158,9 @@ pub struct SkeletonData {
     pub position: Vec2,
     /// Setup-pose bounds size (the export's `width`/`height`).
     pub size: Vec2,
+    /// Spine's `referenceScale` for physics (the default is 100); physics
+    /// treats a non-positive value as that default.
+    pub reference_scale: f32,
     /// Bones in hierarchy order: the root first, every parent before its
     /// children.
     pub bones: Vec<BoneData>,
@@ -174,6 +178,8 @@ pub struct SkeletonData {
     pub transform_constraints: Vec<TransformConstraintData>,
     /// Path constraints, applied after FK by [`crate::skel::Skeleton`].
     pub path_constraints: Vec<PathConstraintData>,
+    /// Physics constraints, applied after FK by [`crate::skel::Skeleton`].
+    pub physics_constraints: Vec<PhysicsConstraintData>,
 }
 
 impl SkeletonData {

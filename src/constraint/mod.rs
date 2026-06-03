@@ -7,11 +7,12 @@
 //! animated pose each frame before posing (Spine separates an animated pose from
 //! an applied pose; chine collapses them by re-applying the pose every frame).
 //!
-//! This milestone implements IK constraints (see [`ik`]); transform, path, and
-//! physics constraints follow.
+//! Each constraint kind lives in its own submodule: [`ik`], [`transform`],
+//! [`path`], and [`physics`].
 
 pub mod ik;
 pub mod path;
+pub mod physics;
 pub mod transform;
 
 /// How a constraint adjusts Y scale when stretching or compressing

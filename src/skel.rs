@@ -5,13 +5,14 @@
 //! system) and calls [`Skeleton::update_world_transform`], which computes every
 //! bone's *world* transform root-to-children. The world transform is a 2x2
 //! matrix `(a, b, c, d)` plus a world position `(world_x, world_y)`, the same
-//! representation the official Spine runtimes use. Constraints and physics are
-//! layered on in later milestones; M1 is pure forward kinematics.
+//! representation the official Spine runtimes use. After the forward-kinematics
+//! pass, IK, transform, path, and physics constraints adjust the pose in order.
 
 use std::sync::Arc;
 
 use crate::constraint::ik::{self, IkConstraint, IkConstraintData};
 use crate::constraint::path::{self, PathConstraint, PathConstraintData};
+use crate::constraint::physics::{self, Physics, PhysicsConstraint, PhysicsConstraintData};
 use crate::constraint::transform::{self, TransformConstraint, TransformConstraintData};
 use crate::data::{BoneData, Inherit, SkeletonData};
 
@@ -133,6 +134,38 @@ impl Bone {
         self.world_x = world_x;
         self.world_y = world_y;
     }
+
+    /// Offset the world position (used by the physics solver).
+    pub(crate) fn add_world_pos(&mut self, dx: f32, dy: f32) {
+        self.world_x += dx;
+        self.world_y += dy;
+    }
+
+    /// Rotate the world matrix's `(a, c)` column by `(sin, cos)`.
+    pub(crate) fn rotate_a_c(&mut self, sin: f32, cos: f32) {
+        let a = self.a;
+        self.a = cos * a - sin * self.c;
+        self.c = sin * a + cos * self.c;
+    }
+
+    /// Rotate the world matrix's `(b, d)` column by `(sin, cos)`.
+    pub(crate) fn rotate_b_d(&mut self, sin: f32, cos: f32) {
+        let b = self.b;
+        self.b = cos * b - sin * self.d;
+        self.d = sin * b + cos * self.d;
+    }
+
+    /// Scale the world matrix's `(a, c)` column.
+    pub(crate) fn scale_a_c(&mut self, s: f32) {
+        self.a *= s;
+        self.c *= s;
+    }
+
+    /// Scale the world matrix's `(b, d)` column.
+    pub(crate) fn scale_b_d(&mut self, s: f32) {
+        self.b *= s;
+        self.d *= s;
+    }
 }
 
 /// A posable instance of a [`SkeletonData`] rig. Many skeletons can share one
@@ -144,7 +177,10 @@ pub struct Skeleton {
     ik_constraints: Vec<IkConstraint>,
     transform_constraints: Vec<TransformConstraint>,
     path_constraints: Vec<PathConstraint>,
+    physics_constraints: Vec<PhysicsConstraint>,
     update_cache: Vec<Updatable>,
+    // Accumulated simulation time, advanced by `update`, read by physics.
+    time: f32,
     /// World-space x offset applied to the whole skeleton.
     pub x: f32,
     /// World-space y offset applied to the whole skeleton.
@@ -175,6 +211,11 @@ impl Skeleton {
             .iter()
             .map(PathConstraint::from_data)
             .collect();
+        let physics_constraints = data
+            .physics_constraints
+            .iter()
+            .map(PhysicsConstraint::from_data)
+            .collect();
         let update_cache = build_update_cache(&data);
         Self {
             data,
@@ -182,7 +223,9 @@ impl Skeleton {
             ik_constraints,
             transform_constraints,
             path_constraints,
+            physics_constraints,
             update_cache,
+            time: 0.0,
             x: 0.0,
             y: 0.0,
             scale_x: 1.0,
@@ -271,14 +314,26 @@ impl Skeleton {
         }
     }
 
-    /// Pose every bone: walk the update cache, computing each bone's world
-    /// transform by forward kinematics and applying each constraint (IK; with
-    /// transform / path / physics to follow) in dependency order.
+    /// Advance the physics simulation clock by `dt` seconds.
     ///
-    /// Constraints modify the local pose, so reset bones to their setup or
-    /// animated pose each frame (via [`Self::set_bones_to_setup_pose`] or the
-    /// animation system) before calling this.
+    /// Call once per frame before [`Self::update_world_transform`] so physics
+    /// constraints integrate over the elapsed time. Skeletons without physics
+    /// constraints need not call this.
+    pub fn update(&mut self, dt: f32) {
+        self.time += dt;
+    }
+
+    /// Pose every bone: walk the update cache, computing each bone's world
+    /// transform by forward kinematics and applying each constraint (IK,
+    /// transform, path, and physics) in dependency order.
+    ///
+    /// Constraints modify the pose, so reset bones to their setup or animated
+    /// pose each frame (via [`Self::set_bones_to_setup_pose`] or the animation
+    /// system) before calling this. Call [`Self::update`] first if physics
+    /// constraints should advance.
     pub fn update_world_transform(&mut self) {
+        let reference_scale = self.data.reference_scale;
+        let time = self.time;
         let len = self.update_cache.len();
         for k in 0..len {
             match self.update_cache[k] {
@@ -303,6 +358,15 @@ impl Skeleton {
                     let pose = self.path_constraints[c];
                     path::solve(self, c, pose);
                 }
+                Updatable::Physics(c) => physics::solve(
+                    &mut self.bones,
+                    &self.data,
+                    c,
+                    &mut self.physics_constraints[c],
+                    time,
+                    reference_scale,
+                    Physics::Update,
+                ),
             }
         }
     }
@@ -479,6 +543,8 @@ enum Updatable {
     Transform(usize),
     /// Apply the path constraint at this index.
     Path(usize),
+    /// Apply the physics constraint at this index.
+    Physics(usize),
 }
 
 /// Build the ordered update cache: a topological interleaving of bone
@@ -505,6 +571,9 @@ fn build_update_cache(data: &SkeletonData) -> Vec<Updatable> {
     }
     for (i, pc) in data.path_constraints.iter().enumerate() {
         ordered.push((pc.order, Updatable::Path(i)));
+    }
+    for (i, pc) in data.physics_constraints.iter().enumerate() {
+        ordered.push((pc.order, Updatable::Physics(i)));
     }
     ordered.sort_by_key(|(order, _)| *order);
 
@@ -539,6 +608,16 @@ fn build_update_cache(data: &SkeletonData) -> Vec<Updatable> {
                     pc,
                     i,
                     slot_bone,
+                    &parents,
+                    &children,
+                    &mut sorted,
+                    &mut cache,
+                );
+            }
+            Updatable::Physics(i) => {
+                sort_physics(
+                    &data.physics_constraints[i],
+                    i,
                     &parents,
                     &children,
                     &mut sorted,
@@ -629,6 +708,23 @@ fn sort_path(
     }
 }
 
+/// Sort a physics constraint into the cache. Its bone is computed before it;
+/// the constraint then writes that bone's world transform, so the bone keeps
+/// its computed slot (the constraint's output) and only its descendants are
+/// recomputed afterward.
+fn sort_physics(
+    pd: &PhysicsConstraintData,
+    idx: usize,
+    parents: &[Option<usize>],
+    children: &[Vec<usize>],
+    sorted: &mut [bool],
+    cache: &mut Vec<Updatable>,
+) {
+    sort_bone(pd.bone, parents, sorted, cache);
+    cache.push(Updatable::Physics(idx));
+    sort_reset(pd.bone, children, sorted);
+}
+
 /// Add `bone` (and any unsorted ancestors) to the cache once, parents first.
 fn sort_bone(
     bone: usize,
@@ -659,6 +755,7 @@ fn sort_reset(bone: usize, children: &[Vec<usize>], sorted: &mut [bool]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constraint::ScaleYMode;
     use crate::data::BoneData;
     use glam::Vec2;
 
@@ -750,5 +847,94 @@ mod tests {
         assert!(close(arm.a(), 1.0) && close(arm.b(), 0.0));
         assert!(close(arm.c(), 0.0) && close(arm.d(), 1.0));
         assert!(close(arm.world_x(), 10.0) && close(arm.world_y(), 25.0));
+    }
+
+    // A root at the origin with a "tail" child at (10, 0); the physics
+    // constraint drives the tail's world y under gravity.
+    fn physics_skel(gravity: f32) -> Skeleton {
+        let data = SkeletonData {
+            reference_scale: 100.0,
+            bones: vec![
+                BoneData {
+                    index: 0,
+                    name: "root".into(),
+                    ..Default::default()
+                },
+                BoneData {
+                    index: 1,
+                    name: "tail".into(),
+                    parent: Some(0),
+                    position: Vec2::new(10.0, 0.0),
+                    length: 10.0,
+                    ..Default::default()
+                },
+            ],
+            physics_constraints: vec![PhysicsConstraintData {
+                name: "phys".into(),
+                order: 0,
+                bone: 1,
+                x: 0.0,
+                y: 1.0,
+                rotate: 0.0,
+                scale_x: 0.0,
+                shear_x: 0.0,
+                limit: 5000.0,
+                step: 1.0 / 60.0,
+                scale_y_mode: ScaleYMode::None,
+                inertia: 1.0,
+                strength: 50.0,
+                damping: 0.9,
+                mass_inverse: 1.0,
+                wind: 0.0,
+                gravity,
+                mix: 1.0,
+            }],
+            ..Default::default()
+        };
+        Skeleton::new(Arc::new(data))
+    }
+
+    fn step_frame(sk: &mut Skeleton) {
+        sk.update(1.0 / 60.0);
+        sk.set_bones_to_setup_pose();
+        sk.update_world_transform();
+    }
+
+    #[test]
+    fn physics_inert_without_forces() {
+        // No gravity, no wind, a stationary skeleton: physics adds no offset.
+        let mut sk = physics_skel(0.0);
+        for _ in 0..120 {
+            step_frame(&mut sk);
+        }
+        let tail = sk.bone(1).unwrap();
+        assert!(close(tail.world_x(), 10.0) && close(tail.world_y(), 0.0));
+    }
+
+    #[test]
+    fn physics_gravity_droops_and_settles() {
+        let mut sk = physics_skel(1.0);
+        // The tail starts at world y = 0; run long enough for the spring to
+        // settle.
+        for _ in 0..600 {
+            step_frame(&mut sk);
+        }
+        let settled = sk.bone(1).unwrap().world_y();
+        // Gravity pulls the tail down (negative y).
+        assert!(settled < -0.5, "expected droop, got {settled}");
+        // Steady state balances gravity against the spring:
+        // y_offset = -gravity * reference_scale / strength = -100 / 50 = -2.
+        assert!(
+            (settled + 2.0).abs() < 0.3,
+            "expected settle near -2, got {settled}"
+        );
+        // Confirm it has converged, not still moving.
+        let before = sk.bone(1).unwrap().world_y();
+        step_frame(&mut sk);
+        let after = sk.bone(1).unwrap().world_y();
+        assert!(
+            (after - before).abs() < 0.001,
+            "not settled: {before} -> {after}"
+        );
     }
 }
