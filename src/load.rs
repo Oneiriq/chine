@@ -521,6 +521,16 @@ fn parse_animation(name: &str, anim: &Value, data: &SkeletonData) -> Result<Anim
                         duration = duration.max(dur);
                         timelines.push(Timeline::SlotColor(tl, false));
                     }
+                    "rgba2" => {
+                        let (tl, dur) = read_slot_two_color_timeline(keys, idx, true);
+                        duration = duration.max(dur);
+                        timelines.push(Timeline::SlotTwoColor(tl, true));
+                    }
+                    "rgb2" => {
+                        let (tl, dur) = read_slot_two_color_timeline(keys, idx, false);
+                        duration = duration.max(dur);
+                        timelines.push(Timeline::SlotTwoColor(tl, false));
+                    }
                     "attachment" => {
                         let mut times = Vec::with_capacity(keys.len());
                         let mut names = Vec::with_capacity(keys.len());
@@ -533,7 +543,7 @@ fn parse_animation(name: &str, anim: &Value, data: &SkeletonData) -> Result<Anim
                             idx, times, names,
                         )));
                     }
-                    _ => {} // rgba2 / rgb2 (two-color) arrive later.
+                    _ => {} // unknown slot channels are skipped.
                 }
             }
         }
@@ -930,6 +940,64 @@ fn read_slot_rgb_timeline(keys: &[Value], slot: usize) -> (ConstraintTimeline, f
                 bezier = read_curve(curve, &mut tl, bezier, frame, 0, time, time2, c.r, c2.r);
                 bezier = read_curve(curve, &mut tl, bezier, frame, 1, time, time2, c.g, c2.g);
                 bezier = read_curve(curve, &mut tl, bezier, frame, 2, time, time2, c.b, c2.b);
+            }
+        }
+        frame += 1;
+    }
+    (tl, duration)
+}
+
+/// Read a slot two-color timeline: the light tint (RGB, or RGBA when
+/// `light_alpha`) from each keyframe's `light` hex, then the dark tint (RGB)
+/// from `dark`.
+fn read_slot_two_color_timeline(
+    keys: &[Value],
+    slot: usize,
+    light_alpha: bool,
+) -> (ConstraintTimeline, f32) {
+    let nc = if light_alpha { 7 } else { 6 };
+    let n = keys.len();
+    let mut tl = ConstraintTimeline::new(slot, n, n * nc, nc + 1);
+    let channels = |k: &Value| -> Vec<f32> {
+        let light = parse_color(k.get("light").and_then(Value::as_str), Color::WHITE);
+        let dark = parse_color(
+            k.get("dark").and_then(Value::as_str),
+            Color::new(0.0, 0.0, 0.0, 1.0),
+        );
+        let mut v = vec![light.r, light.g, light.b];
+        if light_alpha {
+            v.push(light.a);
+        }
+        v.extend([dark.r, dark.g, dark.b]);
+        v
+    };
+    let mut bezier = 0;
+    let mut duration = 0.0_f32;
+    let mut frame = 0;
+    while frame < n {
+        let k = &keys[frame];
+        let time = f(k, "time");
+        let vals = channels(k);
+        tl.set_frame(frame, time, &vals);
+        duration = duration.max(time);
+        if frame + 1 < n {
+            if let Some(curve) = k.get("curve") {
+                let next = &keys[frame + 1];
+                let time2 = f(next, "time");
+                let next_vals = channels(next);
+                for ci in 0..nc {
+                    bezier = read_curve(
+                        curve,
+                        &mut tl,
+                        bezier,
+                        frame,
+                        ci,
+                        time,
+                        time2,
+                        vals[ci],
+                        next_vals[ci],
+                    );
+                }
             }
         }
         frame += 1;
@@ -1871,6 +1939,40 @@ mod tests {
             "w0={:?}",
             w[0]
         );
+    }
+
+    #[test]
+    fn two_color_timeline_animates_light_and_dark() {
+        let json = r#"{
+            "bones": [ { "name": "root" } ],
+            "slots": [ { "name": "s", "bone": "root", "attachment": "a", "color": "ffffffff", "dark": "000000" } ],
+            "animations": {
+                "tc": {
+                    "slots": { "s": { "rgba2": [
+                        { "time": 0, "light": "ffffffff", "dark": "000000" },
+                        { "time": 1, "light": "ff0000ff", "dark": "00ff00" }
+                    ] } }
+                }
+            }
+        }"#;
+        let data = from_json(json).unwrap();
+        let anim = data.find_animation("tc").unwrap().clone();
+        let mut sk = crate::skel::Skeleton::new(std::sync::Arc::new(data));
+        let mut state = crate::anim::AnimationState::new();
+        state.set_animation(anim, false);
+        state.update(0.5);
+        sk.set_slots_to_setup_pose();
+        state.apply(&mut sk);
+        let slot = sk.slot(0).unwrap();
+        // light white -> red (g 1->0.5); dark black -> green (g 0->0.5).
+        assert!(
+            (slot.color.g - 0.5).abs() < 1e-2,
+            "light g={}",
+            slot.color.g
+        );
+        let dark = slot.dark_color.unwrap();
+        assert!((dark.g - 0.5).abs() < 1e-2, "dark g={}", dark.g);
+        assert!((dark.r - 0.0).abs() < 1e-2, "dark r={}", dark.r);
     }
 
     #[test]

@@ -26,6 +26,8 @@ pub struct RenderCommand {
     pub triangles: Vec<u16>,
     /// Tint color (slot color times attachment color).
     pub color: Color,
+    /// Dark tint for two-color (tint-black) rendering, if the slot uses it.
+    pub dark_color: Option<Color>,
     /// Atlas page index (which texture to bind).
     pub page: usize,
     /// Blend mode for the attachment's slot.
@@ -97,6 +99,7 @@ pub fn render(skeleton: &Skeleton) -> Vec<RenderCommand> {
                     uvs: r.uvs.to_vec(),
                     triangles: vec![0, 1, 2, 2, 3, 0],
                     color: mul(slot.color, r.color),
+                    dark_color: slot.dark_color,
                     page: r.page,
                     blend: setup.blend,
                 });
@@ -107,6 +110,7 @@ pub fn render(skeleton: &Skeleton) -> Vec<RenderCommand> {
                     uvs: m.uvs.clone(),
                     triangles: m.triangles.clone(),
                     color: mul(slot.color, m.color),
+                    dark_color: slot.dark_color,
                     page: m.page,
                     blend: setup.blend,
                 });

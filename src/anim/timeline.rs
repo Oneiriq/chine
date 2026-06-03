@@ -7,6 +7,7 @@
 use super::curve::{absolute_value_with, Curve};
 use super::MixFrom;
 use crate::constraint::physics::{PhysicsConstraint, PhysicsConstraintData};
+use crate::data::Color;
 use crate::event::Event;
 use crate::skel::Skeleton;
 
@@ -292,6 +293,9 @@ pub(crate) enum Timeline {
     /// Slot tint color; the index is the slot, the flag whether alpha is keyed
     /// (RGBA vs RGB).
     SlotColor(ConstraintTimeline, bool),
+    /// Slot two-color (light + dark); the flag is whether the light has alpha
+    /// (RGBA2 vs RGB2).
+    SlotTwoColor(ConstraintTimeline, bool),
     /// Slot attachment swap (stepped).
     Attachment(AttachmentTimeline),
     /// Slot draw order (stepped permutations).
@@ -336,6 +340,9 @@ impl Timeline {
             Timeline::PhysicsReset(t) => apply_physics_reset(t, skeleton, last_time, time),
             Timeline::SlotColor(t, has_alpha) => {
                 apply_slot_color(t, *has_alpha, skeleton, time, alpha, from, add);
+            }
+            Timeline::SlotTwoColor(t, light_alpha) => {
+                apply_slot_two_color(t, *light_alpha, skeleton, time, alpha, from, add);
             }
             Timeline::Attachment(t) => apply_attachment(t, skeleton, time, from),
             Timeline::DrawOrder(t) => apply_draw_order(t, skeleton, time),
@@ -1011,6 +1018,107 @@ fn apply_slot_color(
             setup.color.a,
         );
     }
+}
+
+/// Slot two-color timeline: blends the slot's light (RGB or RGBA) and dark (RGB)
+/// tints from their setup colors toward the keyed colors.
+fn apply_slot_two_color(
+    t: &ConstraintTimeline,
+    light_alpha: bool,
+    skel: &mut Skeleton,
+    time: f32,
+    alpha: f32,
+    from: MixFrom,
+    add: bool,
+) {
+    let Some((slot, setup)) = skel.slot_pose_and_setup(t.constraint) else {
+        return;
+    };
+    let setup_dark = setup.dark_color.unwrap_or(Color::new(0.0, 0.0, 0.0, 1.0));
+    if time < t.curve.first_time() {
+        match from {
+            MixFrom::Setup => {
+                slot.color = setup.color;
+                slot.dark_color = setup.dark_color;
+            }
+            MixFrom::First => {
+                slot.color.r += (setup.color.r - slot.color.r) * alpha;
+                slot.color.g += (setup.color.g - slot.color.g) * alpha;
+                slot.color.b += (setup.color.b - slot.color.b) * alpha;
+                if light_alpha {
+                    slot.color.a += (setup.color.a - slot.color.a) * alpha;
+                }
+                let mut dark = slot.dark_color.unwrap_or(setup_dark);
+                dark.r += (setup_dark.r - dark.r) * alpha;
+                dark.g += (setup_dark.g - dark.g) * alpha;
+                dark.b += (setup_dark.b - dark.b) * alpha;
+                slot.dark_color = Some(dark);
+            }
+            MixFrom::Current => {}
+        }
+        return;
+    }
+    slot.color.r = absolute_value_with(
+        t.curve.value(time, 1),
+        alpha,
+        from,
+        add,
+        slot.color.r,
+        setup.color.r,
+    );
+    slot.color.g = absolute_value_with(
+        t.curve.value(time, 2),
+        alpha,
+        from,
+        add,
+        slot.color.g,
+        setup.color.g,
+    );
+    slot.color.b = absolute_value_with(
+        t.curve.value(time, 3),
+        alpha,
+        from,
+        add,
+        slot.color.b,
+        setup.color.b,
+    );
+    if light_alpha {
+        slot.color.a = absolute_value_with(
+            t.curve.value(time, 4),
+            alpha,
+            from,
+            add,
+            slot.color.a,
+            setup.color.a,
+        );
+    }
+    let base = if light_alpha { 4 } else { 3 };
+    let mut dark = slot.dark_color.unwrap_or(setup_dark);
+    dark.r = absolute_value_with(
+        t.curve.value(time, base + 1),
+        alpha,
+        from,
+        add,
+        dark.r,
+        setup_dark.r,
+    );
+    dark.g = absolute_value_with(
+        t.curve.value(time, base + 2),
+        alpha,
+        from,
+        add,
+        dark.g,
+        setup_dark.g,
+    );
+    dark.b = absolute_value_with(
+        t.curve.value(time, base + 3),
+        alpha,
+        from,
+        add,
+        dark.b,
+        setup_dark.b,
+    );
+    slot.dark_color = Some(dark);
 }
 
 /// Slot attachment timeline: a stepped switch to the keyed attachment name.
