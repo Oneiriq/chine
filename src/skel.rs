@@ -263,6 +263,12 @@ impl Skeleton {
         self.physics_constraints.get(index)
     }
 
+    /// Every physics constraint's mutable runtime pose, for global physics
+    /// timelines. Pair with [`Self::data_arc`] to read the matching setup data.
+    pub(crate) fn physics_constraints_mut(&mut self) -> &mut [PhysicsConstraint] {
+        &mut self.physics_constraints
+    }
+
     /// Mutable access to a bone's local pose by index.
     pub fn bone_mut(&mut self, index: usize) -> Option<&mut Bone> {
         self.bones.get_mut(index)
@@ -904,6 +910,13 @@ mod tests {
                 wind: 0.0,
                 gravity,
                 mix: 1.0,
+                inertia_global: false,
+                strength_global: false,
+                damping_global: false,
+                mass_global: false,
+                wind_global: false,
+                gravity_global: false,
+                mix_global: false,
             }],
             ..Default::default()
         };

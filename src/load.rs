@@ -16,7 +16,9 @@ use std::sync::Arc;
 use glam::Vec2;
 use serde_json::Value;
 
-use crate::anim::{Animation, BoneTimeline, ConstraintTimeline, PhysicsProperty, Timeline};
+use crate::anim::{
+    Animation, BoneTimeline, ConstraintTimeline, PhysicsProperty, Timeline, GLOBAL_PHYSICS,
+};
 use crate::attach::{Attachment, MeshAttachment, MeshVertices, PathAttachment, RegionAttachment};
 use crate::constraint::ik::IkConstraintData;
 use crate::constraint::path::{PathConstraintData, PositionMode, RotateMode, SpacingMode};
@@ -398,16 +400,17 @@ fn parse_animation(name: &str, anim: &Value, data: &SkeletonData) -> Result<Anim
 
     if let Some(pcs) = anim.get("physics").and_then(Value::as_object) {
         for (cname, channels) in pcs {
-            // Global physics timelines (empty constraint name) and the "reset"
-            // channel are not applied yet; per-constraint tunable channels are.
-            if cname.is_empty() {
-                continue;
-            }
-            let idx = data
-                .physics_constraints
-                .iter()
-                .position(|c| c.name == *cname)
-                .ok_or_else(|| LoadError::BadReference(cname.clone()))?;
+            // An empty constraint name marks a global timeline (it drives every
+            // physics constraint whose matching global flag is set). The "reset"
+            // channel is still skipped below.
+            let idx = if cname.is_empty() {
+                GLOBAL_PHYSICS
+            } else {
+                data.physics_constraints
+                    .iter()
+                    .position(|c| c.name == *cname)
+                    .ok_or_else(|| LoadError::BadReference(cname.clone()))?
+            };
             let Some(channels) = channels.as_object() else {
                 continue;
             };
@@ -896,6 +899,13 @@ fn parse_physics(
         wind: f(cm, "wind"),
         gravity: f(cm, "gravity"),
         mix: f_or(cm, "mix", 1.0),
+        inertia_global: bool_or(cm, "inertiaGlobal", false),
+        strength_global: bool_or(cm, "strengthGlobal", false),
+        damping_global: bool_or(cm, "dampingGlobal", false),
+        mass_global: bool_or(cm, "massGlobal", false),
+        wind_global: bool_or(cm, "windGlobal", false),
+        gravity_global: bool_or(cm, "gravityGlobal", false),
+        mix_global: bool_or(cm, "mixGlobal", false),
     })
 }
 
@@ -1217,6 +1227,42 @@ mod tests {
         state.apply(&mut sk);
         let s = sk.physics_constraint(0).unwrap().strength;
         assert!((s - 60.0).abs() < 1e-3, "strength={s}");
+    }
+
+    #[test]
+    fn global_physics_timeline_drives_flagged_constraints() {
+        let json = r#"{
+            "bones": [
+                { "name": "root" },
+                { "name": "a", "parent": "root", "length": 10 },
+                { "name": "b", "parent": "root", "length": 10 }
+            ],
+            "constraints": [
+                { "type": "physics", "name": "pa", "bone": "a", "y": 1, "strength": 100, "strengthGlobal": true },
+                { "type": "physics", "name": "pb", "bone": "b", "y": 1, "strength": 100 }
+            ],
+            "animations": {
+                "soften": {
+                    "physics": {
+                        "": { "strength": [ { "time": 0, "value": 40 }, { "time": 1, "value": 40 } ] }
+                    }
+                }
+            }
+        }"#;
+        let data = from_json(json).unwrap();
+        assert_eq!(data.physics_constraints.len(), 2);
+        assert!(data.physics_constraints[0].strength_global);
+        assert!(!data.physics_constraints[1].strength_global);
+        let anim = data.find_animation("soften").unwrap().clone();
+        let mut sk = crate::skel::Skeleton::new(std::sync::Arc::new(data));
+        let mut state = crate::anim::AnimationState::new();
+        state.set_animation(anim, false);
+        state.update(0.5);
+        state.apply(&mut sk);
+        // The global strength timeline (value 40) drives only "pa"
+        // (strengthGlobal); "pb" keeps its setup strength (100).
+        assert!((sk.physics_constraint(0).unwrap().strength - 40.0).abs() < 1e-3);
+        assert!((sk.physics_constraint(1).unwrap().strength - 100.0).abs() < 1e-3);
     }
 
     #[test]

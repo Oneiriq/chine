@@ -74,6 +74,20 @@ pub struct PhysicsConstraintData {
     pub gravity: f32,
     /// Setup mix (`0` disables, `1` full).
     pub mix: f32,
+    /// Whether a global inertia timeline drives this constraint.
+    pub inertia_global: bool,
+    /// Whether a global strength timeline drives this constraint.
+    pub strength_global: bool,
+    /// Whether a global damping timeline drives this constraint.
+    pub damping_global: bool,
+    /// Whether a global mass timeline drives this constraint.
+    pub mass_global: bool,
+    /// Whether a global wind timeline drives this constraint.
+    pub wind_global: bool,
+    /// Whether a global gravity timeline drives this constraint.
+    pub gravity_global: bool,
+    /// Whether a global mix timeline drives this constraint.
+    pub mix_global: bool,
 }
 
 /// A runtime physics constraint: the mixable tunables plus simulation state

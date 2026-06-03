@@ -6,6 +6,7 @@
 
 use super::curve::{absolute_value_with, Curve};
 use super::MixFrom;
+use crate::constraint::physics::{PhysicsConstraint, PhysicsConstraintData};
 use crate::skel::Skeleton;
 
 /// A bone index plus its keyframe curve. The [`Timeline`] variant selects how
@@ -124,6 +125,10 @@ impl ConstraintTimeline {
         );
     }
 }
+
+/// Sentinel constraint index marking a physics timeline as global: it drives
+/// every physics constraint whose matching global flag is set.
+pub(crate) const GLOBAL_PHYSICS: usize = usize::MAX;
 
 /// Which tunable a physics constraint timeline drives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -538,8 +543,9 @@ fn apply_path_mix(
     );
 }
 
-/// Physics constraint timeline: drives one tunable. Mass is animated as a mass
-/// value but stored inverted; wind and gravity blend additively.
+/// Physics constraint timeline: drives one tunable on one constraint, or on
+/// every constraint whose matching global flag is set when the target is
+/// [`GLOBAL_PHYSICS`].
 fn apply_physics(
     t: &ConstraintTimeline,
     property: PhysicsProperty,
@@ -549,45 +555,75 @@ fn apply_physics(
     from: MixFrom,
     add: bool,
 ) {
-    let Some((pose, setup)) = skel.physics_pose_and_setup(t.constraint) else {
-        return;
-    };
+    if t.constraint == GLOBAL_PHYSICS {
+        let data = skel.data_arc();
+        for (pose, setup) in skel
+            .physics_constraints_mut()
+            .iter_mut()
+            .zip(&data.physics_constraints)
+        {
+            if property_global(setup, property) {
+                apply_physics_one(pose, setup, property, &t.curve, time, alpha, from, add);
+            }
+        }
+    } else if let Some((pose, setup)) = skel.physics_pose_and_setup(t.constraint) {
+        apply_physics_one(pose, setup, property, &t.curve, time, alpha, from, add);
+    }
+}
+
+/// Whether `property` is flagged global on `data` (so a global timeline drives
+/// it).
+fn property_global(data: &PhysicsConstraintData, property: PhysicsProperty) -> bool {
+    match property {
+        PhysicsProperty::Inertia => data.inertia_global,
+        PhysicsProperty::Strength => data.strength_global,
+        PhysicsProperty::Damping => data.damping_global,
+        PhysicsProperty::Mass => data.mass_global,
+        PhysicsProperty::Wind => data.wind_global,
+        PhysicsProperty::Gravity => data.gravity_global,
+        PhysicsProperty::Mix => data.mix_global,
+    }
+}
+
+/// Apply one physics tunable to a single constraint pose. Mass is animated as a
+/// mass value but stored inverted; wind and gravity blend additively.
+#[allow(clippy::too_many_arguments)]
+fn apply_physics_one(
+    pose: &mut PhysicsConstraint,
+    setup: &PhysicsConstraintData,
+    property: PhysicsProperty,
+    curve: &Curve,
+    time: f32,
+    alpha: f32,
+    from: MixFrom,
+    add: bool,
+) {
     match property {
         PhysicsProperty::Inertia => {
-            pose.inertia =
-                t.curve
-                    .absolute_value(time, alpha, from, add, pose.inertia, setup.inertia);
+            pose.inertia = curve.absolute_value(time, alpha, from, add, pose.inertia, setup.inertia);
         }
         PhysicsProperty::Strength => {
             pose.strength =
-                t.curve
-                    .absolute_value(time, alpha, from, add, pose.strength, setup.strength);
+                curve.absolute_value(time, alpha, from, add, pose.strength, setup.strength);
         }
         PhysicsProperty::Damping => {
             pose.damping =
-                t.curve
-                    .absolute_value(time, alpha, from, add, pose.damping, setup.damping);
+                curve.absolute_value(time, alpha, from, add, pose.damping, setup.damping);
         }
         PhysicsProperty::Mass => {
             let cur = 1.0 / pose.mass_inverse;
             let base = 1.0 / setup.mass_inverse;
-            let m = t.curve.absolute_value(time, alpha, from, add, cur, base);
-            pose.mass_inverse = 1.0 / m;
+            pose.mass_inverse = 1.0 / curve.absolute_value(time, alpha, from, add, cur, base);
         }
         PhysicsProperty::Wind => {
-            pose.wind = t
-                .curve
-                .absolute_value(time, alpha, from, true, pose.wind, setup.wind);
+            pose.wind = curve.absolute_value(time, alpha, from, true, pose.wind, setup.wind);
         }
         PhysicsProperty::Gravity => {
             pose.gravity =
-                t.curve
-                    .absolute_value(time, alpha, from, true, pose.gravity, setup.gravity);
+                curve.absolute_value(time, alpha, from, true, pose.gravity, setup.gravity);
         }
         PhysicsProperty::Mix => {
-            pose.mix = t
-                .curve
-                .absolute_value(time, alpha, from, add, pose.mix, setup.mix);
+            pose.mix = curve.absolute_value(time, alpha, from, add, pose.mix, setup.mix);
         }
     }
 }
