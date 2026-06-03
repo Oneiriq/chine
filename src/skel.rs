@@ -4,7 +4,7 @@
 //! frame the host mutates bone *local* poses (directly or via the animation
 //! system) and calls [`Skeleton::update_world_transform`], which computes every
 //! bone's *world* transform root-to-children. The world transform is a 2x2
-//! matrix `(a, b, c, d)` plus a world position `(world_x, world_y)` — the same
+//! matrix `(a, b, c, d)` plus a world position `(world_x, world_y)`, the same
 //! representation the official Spine runtimes use. Constraints and physics are
 //! layered on in later milestones; M1 is pure forward kinematics.
 

@@ -2,7 +2,8 @@
 //!
 //! An [`Animation`] is a set of timelines that pose a [`Skeleton`] over time.
 //! Each timeline interpolates one bone property with stepped / linear / Bezier
-//! curves (see [`curve`]); [`AnimationState`] plays an animation on a track.
+//! curves (see the `curve` module); [`AnimationState`] plays an animation on a
+//! track.
 //! Interpolation and blending are transcribed from Spine 4.3 for fidelity.
 //!
 //! This milestone covers the core bone timelines (rotate / translate / scale)

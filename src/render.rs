@@ -2,7 +2,7 @@
 //! data.
 //!
 //! [`render`] walks a skeleton's slots in draw order and emits a
-//! [`RenderCommand`] per visible attachment — world-space positions, page UVs,
+//! [`RenderCommand`] per visible attachment: world-space positions, page UVs,
 //! triangles, tint, blend mode, and atlas page. The host uploads these to the
 //! GPU; chine does no rendering itself. Call [`bind_atlas`] once after loading
 //! so attachment UVs and page indices are resolved against the atlas.

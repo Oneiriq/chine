@@ -4,7 +4,7 @@ A pure-Rust [Spine](https://esotericsoftware.com/) 4.3 skeletal animation runtim
 
 `chine` loads Spine skeleton exports and a texture atlas, poses and animates a
 skeleton (forward kinematics plus IK, transform, and path constraints), and
-emits renderer-agnostic draw data — leaving all GPU work to the host engine.
+emits renderer-agnostic draw data, leaving all GPU work to the host engine.
 
 It is a clean-room reimplementation and is **not** affiliated with or endorsed
 by Esoteric Software. Using Spine skeleton data requires a valid
@@ -18,17 +18,23 @@ from-scratch, dependency-light (`glam` plus optional `serde`) implementation of
 the 4.3 runtime, so projects can target current Spine in pure Rust. The math is
 transcribed from the Spine 4.3 reference runtime for fidelity.
 
-(The name is the *chine* — the backbone.)
+(The name is the *chine*, the backbone.)
 
 ## Pipeline
 
-```text
-load (.json) + atlas (.atlas)    ->  SkeletonData   (immutable, shareable rig)
-  Skeleton::new                  ->  Skeleton       (posable instance)
-  per frame:
-    AnimationState::update + apply    ->  animated local pose
-    Skeleton::update_world_transform  ->  world pose (FK + constraints)
-    render                            ->  Vec<RenderCommand>  ->  host GPU
+```mermaid
+flowchart TD
+    load[".json export + .atlas"] --> data["SkeletonData (immutable, shareable rig)"]
+    data --> skel["Skeleton::new (posable instance)"]
+    skel --> anim
+    subgraph perframe ["per frame"]
+        direction TB
+        anim["AnimationState: update + apply"]
+        world["update_world_transform (FK + constraints)"]
+        draw["render (emits RenderCommands)"]
+        anim --> world --> draw
+    end
+    draw --> gpu["host GPU"]
 ```
 
 ## Usage
@@ -70,27 +76,27 @@ cargo run --example inspect -- skeleton.json atlas.atlas
 
 ## Implemented
 
-- Spine `.json` skeleton loader — bones, slots, skins, and region / mesh / path
+- Spine `.json` skeleton loader: bones, slots, skins, and region / mesh / path
   attachments (including weighted meshes).
-- Texture atlas (`.atlas`) parsing — the 4.1+ format plus common legacy keys.
+- Texture atlas (`.atlas`) parsing: the 4.1+ format plus common legacy keys.
 - Forward kinematics with all five inherit modes.
-- Animation — rotate / translate / scale timelines, stepped / linear / Bezier
+- Animation: rotate / translate / scale timelines, stepped / linear / Bezier
   curve interpolation, and a single-track `AnimationState`.
 - Constraints, ordered by a topological update cache:
-  - **IK** — 1- and 2-bone solvers with softness, stretch, compress, and scale
+  - **IK**: 1- and 2-bone solvers with softness, stretch, compress, and scale
     modes.
-  - **Transform** — the 4.3 source-to-target property-mapping system.
-  - **Path** — constant-speed Bezier arc-length sampling along a path attachment.
-- Constraint timelines — animate IK / transform / path mix values.
+  - **Transform**: the 4.3 source-to-target property-mapping system.
+  - **Path**: constant-speed Bezier arc-length sampling along a path attachment.
+- Constraint timelines: animate IK / transform / path mix values.
 - A renderer-agnostic `RenderCommand` draw stream.
 
-The loader is validated against real exports (e.g. spineboy: 67 bones, 52 slots,
-11 animations, 7 IK + 7 transform constraints).
+The loader is validated against real exports (for example spineboy: 67 bones,
+52 slots, 11 animations, 7 IK + 7 transform constraints).
 
 ## Cargo features
 
-- `json` *(default)* — the `.json` skeleton loader (`serde` / `serde_json`).
-- `binary` — placeholder for the forthcoming `.skel` loader.
+- `json` *(default)*: the `.json` skeleton loader (`serde` / `serde_json`).
+- `binary`: placeholder for the forthcoming `.skel` loader.
 
 ## Roadmap
 

@@ -1,4 +1,4 @@
-//! Skins — named sets of attachments.
+//! Skins: named sets of attachments.
 //!
 //! A [`Skin`] maps `(slot index, attachment name)` to an [`Attachment`]. A
 //! skeleton's *default* skin holds its base attachments; *named* skins (e.g.

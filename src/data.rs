@@ -1,6 +1,6 @@
 //! Setup-pose skeleton data: the immutable rig loaded from a Spine export.
 //!
-//! [`SkeletonData`] is the shared, read-only description of a rig — its bones,
+//! [`SkeletonData`] is the shared, read-only description of a rig: its bones,
 //! slots, and (in later milestones) skins, attachments, animations, and
 //! constraints. A posable `Skeleton` instance is created from it; many
 //! skeletons can share one `SkeletonData`.
@@ -30,7 +30,7 @@ pub struct Color {
 }
 
 impl Color {
-    /// Opaque white (`1, 1, 1, 1`) — the default tint.
+    /// Opaque white (`1, 1, 1, 1`), the default tint.
     pub const WHITE: Self = Self {
         r: 1.0,
         g: 1.0,
@@ -123,7 +123,7 @@ impl Default for BoneData {
     }
 }
 
-/// Setup-pose data for one slot — a draw-order entry that displays the
+/// Setup-pose data for one slot: a draw-order entry that displays the
 /// attachment of a given name on a given bone.
 #[derive(Debug, Clone)]
 pub struct SlotData {
@@ -157,7 +157,7 @@ pub struct SkeletonData {
     pub position: Vec2,
     /// Setup-pose bounds size (the export's `width`/`height`).
     pub size: Vec2,
-    /// Bones in hierarchy order — the root first, every parent before its
+    /// Bones in hierarchy order: the root first, every parent before its
     /// children.
     pub bones: Vec<BoneData>,
     /// Slots in setup-pose draw order (back to front).

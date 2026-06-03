@@ -1,4 +1,4 @@
-//! Attachments — the geometry a slot can display — and world-vertex computation.
+//! Attachments (the geometry a slot can display) and world-vertex computation.
 //!
 //! [`RegionAttachment`] (a textured quad on one bone) and [`MeshAttachment`] (a
 //! textured mesh whose vertices may be weighted across several bones) are the

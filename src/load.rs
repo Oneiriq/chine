@@ -5,7 +5,7 @@
 //! `.skel` binary loader and the animation / constraint sections arrive in
 //! later milestones; unknown sections are ignored.
 //!
-//! Region attachments are parsed with their transform but without UVs — those
+//! Region attachments are parsed with their transform but without UVs; those
 //! are filled in once an [`crate::atlas::Atlas`] is bound (the UV/offset layout
 //! depends on the packed region).
 
