@@ -10,6 +10,7 @@
 
 use std::sync::Arc;
 
+use crate::constraint::ik::{self, IkConstraint};
 use crate::data::{BoneData, Inherit, SkeletonData};
 
 /// Degrees-to-radians factor.
@@ -128,6 +129,7 @@ impl Bone {
 pub struct Skeleton {
     data: Arc<SkeletonData>,
     bones: Vec<Bone>,
+    ik_constraints: Vec<IkConstraint>,
     /// World-space x offset applied to the whole skeleton.
     pub x: f32,
     /// World-space y offset applied to the whole skeleton.
@@ -143,9 +145,15 @@ impl Skeleton {
     #[must_use]
     pub fn new(data: Arc<SkeletonData>) -> Self {
         let bones = data.bones.iter().map(Bone::from_data).collect();
+        let ik_constraints = data
+            .ik_constraints
+            .iter()
+            .map(IkConstraint::from_data)
+            .collect();
         Self {
             data,
             bones,
+            ik_constraints,
             x: 0.0,
             y: 0.0,
             scale_x: 1.0,
@@ -197,13 +205,34 @@ impl Skeleton {
         }
     }
 
-    /// Compute every bone's world transform from its local pose by forward
-    /// kinematics, root to children. (IK / transform / path / physics
-    /// constraints arrive in later milestones.)
+    /// Compute every bone's world transform by forward kinematics, then apply
+    /// the skeleton's constraints (IK; transform / path / physics follow) in
+    /// order, re-running FK over each constraint's affected bones.
+    ///
+    /// Constraints modify the local pose, so reset bones to their setup or
+    /// animated pose each frame (via [`Self::set_bones_to_setup_pose`] or the
+    /// animation system) before calling this.
     pub fn update_world_transform(&mut self) {
+        self.fk_from(0);
+        for c in 0..self.ik_constraints.len() {
+            if let Some(start) = ik::solve(
+                &mut self.bones,
+                &self.data,
+                c,
+                &self.ik_constraints[c],
+                self.scale_x,
+                self.scale_y,
+            ) {
+                self.fk_from(start);
+            }
+        }
+    }
+
+    /// Recompute world transforms for bones `start..` from their local pose.
+    fn fk_from(&mut self, start: usize) {
         let (sx, sy) = (self.scale_x, self.scale_y);
         let (skel_x, skel_y) = (self.x, self.y);
-        for i in 0..self.bones.len() {
+        for i in start..self.bones.len() {
             let world = match self.bones[i].parent {
                 None => root_world(&self.bones[i], skel_x, skel_y, sx, sy),
                 Some(p) => {

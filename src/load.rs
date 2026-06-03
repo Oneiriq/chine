@@ -18,6 +18,8 @@ use serde_json::Value;
 
 use crate::anim::{Animation, BoneTimeline, Timeline};
 use crate::attach::{Attachment, MeshAttachment, MeshVertices, RegionAttachment};
+use crate::constraint::ik::IkConstraintData;
+use crate::constraint::ScaleYMode;
 use crate::data::{BlendMode, BoneData, Color, Inherit, SkeletonData, SlotData};
 use crate::skin::Skin;
 
@@ -142,6 +144,55 @@ pub fn from_json(text: &str) -> Result<SkeletonData, LoadError> {
             } else {
                 data.skins.push(skin);
             }
+        }
+    }
+
+    if let Some(constraints) = root.get("constraints").and_then(Value::as_array) {
+        for cm in constraints {
+            if cm.get("type").and_then(Value::as_str) != Some("ik") {
+                continue;
+            }
+            let name = str_field(cm, "name")?;
+            let mut cbones = Vec::new();
+            if let Some(bs) = cm.get("bones").and_then(Value::as_array) {
+                for bn in bs {
+                    let bn = bn
+                        .as_str()
+                        .ok_or_else(|| LoadError::Schema("ik bone name".into()))?;
+                    cbones.push(
+                        data.find_bone(bn)
+                            .ok_or_else(|| LoadError::BadReference(bn.to_string()))?,
+                    );
+                }
+            }
+            let target_name = str_field(cm, "target")?;
+            let target = data
+                .find_bone(&target_name)
+                .ok_or(LoadError::BadReference(target_name))?;
+            let scale_y_mode = match cm.get("scaleY").and_then(Value::as_str) {
+                Some("uniform") => ScaleYMode::Uniform,
+                Some("volume") => ScaleYMode::Volume,
+                _ => ScaleYMode::None,
+            };
+            data.ik_constraints.push(IkConstraintData {
+                name,
+                bones: cbones,
+                target,
+                scale_y_mode,
+                mix: f_or(cm, "mix", 1.0),
+                softness: f(cm, "softness"),
+                bend_direction: if cm
+                    .get("bendPositive")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true)
+                {
+                    1
+                } else {
+                    -1
+                },
+                compress: cm.get("compress").and_then(Value::as_bool).unwrap_or(false),
+                stretch: cm.get("stretch").and_then(Value::as_bool).unwrap_or(false),
+            });
         }
     }
 
@@ -555,5 +606,26 @@ mod tests {
         state.apply(&mut sk);
         // setup rotation 0 + interpolated 45 at the halfway point.
         assert!((sk.bone(arm).unwrap().rotation - 45.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn parses_ik_constraint() {
+        let json = r#"{
+            "bones": [
+                { "name": "root" }, { "name": "thigh", "parent": "root" },
+                { "name": "shin", "parent": "thigh" }, { "name": "goal", "parent": "root" }
+            ],
+            "constraints": [
+                { "type": "ik", "name": "leg", "bones": ["thigh", "shin"],
+                  "target": "goal", "bendPositive": false, "mix": 0.8 }
+            ]
+        }"#;
+        let data = from_json(json).unwrap();
+        assert_eq!(data.ik_constraints.len(), 1);
+        let c = &data.ik_constraints[0];
+        assert_eq!(c.bones, vec![1, 2]);
+        assert_eq!(c.target, 3);
+        assert_eq!(c.bend_direction, -1);
+        assert!((c.mix - 0.8).abs() < 1e-6);
     }
 }

@@ -11,6 +11,7 @@ use glam::Vec2;
 
 use crate::anim::Animation;
 use crate::attach::Attachment;
+use crate::constraint::ik::IkConstraintData;
 use crate::skin::Skin;
 
 /// An RGBA color with components in `[0, 1]`.
@@ -165,6 +166,8 @@ pub struct SkeletonData {
     pub skins: Vec<Skin>,
     /// Animations from the export, each shareable for playback on a track.
     pub animations: Vec<Arc<Animation>>,
+    /// IK constraints, applied after FK by [`crate::skel::Skeleton`].
+    pub ik_constraints: Vec<IkConstraintData>,
 }
 
 impl SkeletonData {

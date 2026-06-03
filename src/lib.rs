@@ -28,6 +28,7 @@
 pub mod anim;
 pub mod atlas;
 pub mod attach;
+pub mod constraint;
 pub mod data;
 #[cfg(feature = "json")]
 pub mod load;
