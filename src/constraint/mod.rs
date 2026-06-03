@@ -11,6 +11,7 @@
 //! physics constraints follow.
 
 pub mod ik;
+pub mod path;
 pub mod transform;
 
 /// How a constraint adjusts Y scale when stretching or compressing

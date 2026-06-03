@@ -12,6 +12,7 @@ use glam::Vec2;
 use crate::anim::Animation;
 use crate::attach::Attachment;
 use crate::constraint::ik::IkConstraintData;
+use crate::constraint::path::PathConstraintData;
 use crate::constraint::transform::TransformConstraintData;
 use crate::skin::Skin;
 
@@ -171,6 +172,8 @@ pub struct SkeletonData {
     pub ik_constraints: Vec<IkConstraintData>,
     /// Transform constraints, applied after FK by [`crate::skel::Skeleton`].
     pub transform_constraints: Vec<TransformConstraintData>,
+    /// Path constraints, applied after FK by [`crate::skel::Skeleton`].
+    pub path_constraints: Vec<PathConstraintData>,
 }
 
 impl SkeletonData {

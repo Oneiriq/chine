@@ -19,6 +19,7 @@ use serde_json::Value;
 use crate::anim::{Animation, BoneTimeline, Timeline};
 use crate::attach::{Attachment, MeshAttachment, MeshVertices, PathAttachment, RegionAttachment};
 use crate::constraint::ik::IkConstraintData;
+use crate::constraint::path::{PathConstraintData, PositionMode, RotateMode, SpacingMode};
 use crate::constraint::transform::{
     FromMapping, FromProp, ToMapping, ToProp, TransformConstraintData,
 };
@@ -160,6 +161,10 @@ pub fn from_json(text: &str) -> Result<SkeletonData, LoadError> {
                 Some("transform") => {
                     let c = parse_transform(cm, order, &data)?;
                     data.transform_constraints.push(c);
+                }
+                Some("path") => {
+                    let c = parse_path(cm, order, &data)?;
+                    data.path_constraints.push(c);
                 }
                 _ => {}
             }
@@ -519,6 +524,51 @@ fn parse_transform(
         mix_scale_x,
         mix_scale_y: f_or(cm, "mixScaleY", mix_scale_x),
         mix_shear_y: f_or(cm, "mixShearY", 1.0),
+    })
+}
+
+/// Parse a `path` constraint entry.
+fn parse_path(
+    cm: &Value,
+    order: usize,
+    data: &SkeletonData,
+) -> Result<PathConstraintData, LoadError> {
+    let name = str_field(cm, "name")?;
+    let bones = constraint_bones(cm, "path", data)?;
+    let slot_name = str_field(cm, "slot")?;
+    let slot = data
+        .find_slot(&slot_name)
+        .ok_or(LoadError::BadReference(slot_name))?;
+    let position_mode = match cm.get("positionMode").and_then(Value::as_str) {
+        Some("fixed") => PositionMode::Fixed,
+        _ => PositionMode::Percent,
+    };
+    let spacing_mode = match cm.get("spacingMode").and_then(Value::as_str) {
+        Some("fixed") => SpacingMode::Fixed,
+        Some("percent") => SpacingMode::Percent,
+        Some("proportional") => SpacingMode::Proportional,
+        _ => SpacingMode::Length,
+    };
+    let rotate_mode = match cm.get("rotateMode").and_then(Value::as_str) {
+        Some("chain") => RotateMode::Chain,
+        Some("chainScale") => RotateMode::ChainScale,
+        _ => RotateMode::Tangent,
+    };
+    let mix_x = f_or(cm, "mixX", 1.0);
+    Ok(PathConstraintData {
+        name,
+        order,
+        bones,
+        slot,
+        position_mode,
+        spacing_mode,
+        rotate_mode,
+        offset_rotation: f(cm, "rotation"),
+        position: f(cm, "position"),
+        spacing: f(cm, "spacing"),
+        mix_rotate: f_or(cm, "mixRotate", 1.0),
+        mix_x,
+        mix_y: f_or(cm, "mixY", mix_x),
     })
 }
 

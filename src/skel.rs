@@ -11,6 +11,7 @@
 use std::sync::Arc;
 
 use crate::constraint::ik::{self, IkConstraint, IkConstraintData};
+use crate::constraint::path::{self, PathConstraint, PathConstraintData};
 use crate::constraint::transform::{self, TransformConstraint, TransformConstraintData};
 use crate::data::{BoneData, Inherit, SkeletonData};
 
@@ -122,6 +123,16 @@ impl Bone {
     pub fn world_y(&self) -> f32 {
         self.world_y
     }
+
+    /// Set the full world transform (for constraints that write world space).
+    pub(crate) fn set_world(&mut self, a: f32, b: f32, c: f32, d: f32, world_x: f32, world_y: f32) {
+        self.a = a;
+        self.b = b;
+        self.c = c;
+        self.d = d;
+        self.world_x = world_x;
+        self.world_y = world_y;
+    }
 }
 
 /// A posable instance of a [`SkeletonData`] rig. Many skeletons can share one
@@ -132,6 +143,7 @@ pub struct Skeleton {
     bones: Vec<Bone>,
     ik_constraints: Vec<IkConstraint>,
     transform_constraints: Vec<TransformConstraint>,
+    path_constraints: Vec<PathConstraint>,
     update_cache: Vec<Updatable>,
     /// World-space x offset applied to the whole skeleton.
     pub x: f32,
@@ -158,12 +170,18 @@ impl Skeleton {
             .iter()
             .map(TransformConstraint::from_data)
             .collect();
+        let path_constraints = data
+            .path_constraints
+            .iter()
+            .map(PathConstraint::from_data)
+            .collect();
         let update_cache = build_update_cache(&data);
         Self {
             data,
             bones,
             ik_constraints,
             transform_constraints,
+            path_constraints,
             update_cache,
             x: 0.0,
             y: 0.0,
@@ -176,6 +194,12 @@ impl Skeleton {
     #[must_use]
     pub fn data(&self) -> &SkeletonData {
         &self.data
+    }
+
+    /// A shared handle to the rig data, for constraints that must read the rig
+    /// while also mutating bones (decouples from the `&self` borrow).
+    pub(crate) fn data_arc(&self) -> Arc<SkeletonData> {
+        Arc::clone(&self.data)
     }
 
     /// All bones, in hierarchy order.
@@ -244,6 +268,10 @@ impl Skeleton {
                     self.scale_x,
                     self.scale_y,
                 ),
+                Updatable::Path(c) => {
+                    let pose = self.path_constraints[c];
+                    path::solve(self, c, pose);
+                }
             }
         }
     }
@@ -418,6 +446,8 @@ enum Updatable {
     Ik(usize),
     /// Apply the transform constraint at this index.
     Transform(usize),
+    /// Apply the path constraint at this index.
+    Path(usize),
 }
 
 /// Build the ordered update cache: a topological interleaving of bone
@@ -442,6 +472,9 @@ fn build_update_cache(data: &SkeletonData) -> Vec<Updatable> {
     for (i, tc) in data.transform_constraints.iter().enumerate() {
         ordered.push((tc.order, Updatable::Transform(i)));
     }
+    for (i, pc) in data.path_constraints.iter().enumerate() {
+        ordered.push((pc.order, Updatable::Path(i)));
+    }
     ordered.sort_by_key(|(order, _)| *order);
 
     let mut sorted = vec![false; n];
@@ -462,6 +495,19 @@ fn build_update_cache(data: &SkeletonData) -> Vec<Updatable> {
                 sort_transform(
                     &data.transform_constraints[i],
                     i,
+                    &parents,
+                    &children,
+                    &mut sorted,
+                    &mut cache,
+                );
+            }
+            Updatable::Path(i) => {
+                let pc = &data.path_constraints[i];
+                let slot_bone = data.slots[pc.slot].bone;
+                sort_path(
+                    pc,
+                    i,
+                    slot_bone,
                     &parents,
                     &children,
                     &mut sorted,
@@ -524,6 +570,31 @@ fn sort_transform(
     }
     for &b in &tc.bones {
         sorted[b] = world_target;
+    }
+}
+
+/// Sort a path constraint into the cache. The slot bone and constrained bones
+/// are computed before it; the constrained bones keep their world (the
+/// constraint's output) and their descendants are recomputed.
+fn sort_path(
+    pc: &PathConstraintData,
+    idx: usize,
+    slot_bone: usize,
+    parents: &[Option<usize>],
+    children: &[Vec<usize>],
+    sorted: &mut [bool],
+    cache: &mut Vec<Updatable>,
+) {
+    sort_bone(slot_bone, parents, sorted, cache);
+    for &b in &pc.bones {
+        sort_bone(b, parents, sorted, cache);
+    }
+    cache.push(Updatable::Path(idx));
+    for &b in &pc.bones {
+        sort_reset(b, children, sorted);
+    }
+    for &b in &pc.bones {
+        sorted[b] = true;
     }
 }
 
