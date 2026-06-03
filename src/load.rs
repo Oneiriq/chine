@@ -1,9 +1,9 @@
 //! Loading skeleton data from Spine exports.
 //!
 //! Behind the `json` feature, [`from_json`] parses a Spine `.json` export into
-//! a [`SkeletonData`] rig (bones, slots, skins, region/mesh attachments). The
-//! `.skel` binary loader and the animation / constraint sections arrive in
-//! later milestones; unknown sections are ignored.
+//! a [`SkeletonData`] rig: bones, slots, skins, region / mesh / path
+//! attachments, animations, and IK / transform / path / physics constraints.
+//! The binary `.skel` loader arrives later; unknown sections are ignored.
 //!
 //! Region attachments are parsed with their transform but without UVs; those
 //! are filled in once an [`crate::atlas::Atlas`] is bound (the UV/offset layout
@@ -20,6 +20,7 @@ use crate::anim::{Animation, BoneTimeline, ConstraintTimeline, Timeline};
 use crate::attach::{Attachment, MeshAttachment, MeshVertices, PathAttachment, RegionAttachment};
 use crate::constraint::ik::IkConstraintData;
 use crate::constraint::path::{PathConstraintData, PositionMode, RotateMode, SpacingMode};
+use crate::constraint::physics::PhysicsConstraintData;
 use crate::constraint::transform::{
     FromMapping, FromProp, ToMapping, ToProp, TransformConstraintData,
 };
@@ -70,6 +71,7 @@ pub fn from_json(text: &str) -> Result<SkeletonData, LoadError> {
         data.spine_version = skel.get("spine").and_then(Value::as_str).map(String::from);
         data.position = Vec2::new(f(skel, "x"), f(skel, "y"));
         data.size = Vec2::new(f(skel, "width"), f(skel, "height"));
+        data.reference_scale = f_or(skel, "referenceScale", 100.0);
     }
 
     if let Some(bones) = root.get("bones").and_then(Value::as_array) {
@@ -165,6 +167,10 @@ pub fn from_json(text: &str) -> Result<SkeletonData, LoadError> {
                 Some("path") => {
                     let c = parse_path(cm, order, &data)?;
                     data.path_constraints.push(c);
+                }
+                Some("physics") => {
+                    let c = parse_physics(cm, order, &data)?;
+                    data.physics_constraints.push(c);
                 }
                 _ => {}
             }
@@ -812,6 +818,48 @@ fn parse_path(
     })
 }
 
+/// Parse a `physics` constraint entry. `fps` becomes a fixed `step` of `1/fps`
+/// and `mass` is stored inverted; the per-property "global" flags (used only by
+/// physics timelines) are not read yet.
+fn parse_physics(
+    cm: &Value,
+    order: usize,
+    data: &SkeletonData,
+) -> Result<PhysicsConstraintData, LoadError> {
+    let name = str_field(cm, "name")?;
+    let bone_name = str_field(cm, "bone")?;
+    let bone = data
+        .find_bone(&bone_name)
+        .ok_or(LoadError::BadReference(bone_name))?;
+    let scale_y_mode = match cm.get("scaleY").and_then(Value::as_str) {
+        Some("uniform") => ScaleYMode::Uniform,
+        Some("volume") => ScaleYMode::Volume,
+        _ => ScaleYMode::None,
+    };
+    let fps = cm.get("fps").and_then(Value::as_f64).unwrap_or(60.0);
+    let mass = f_or(cm, "mass", 1.0);
+    Ok(PhysicsConstraintData {
+        name,
+        order,
+        bone,
+        x: f(cm, "x"),
+        y: f(cm, "y"),
+        rotate: f(cm, "rotate"),
+        scale_x: f(cm, "scaleX"),
+        shear_x: f(cm, "shearX"),
+        limit: f_or(cm, "limit", 5000.0),
+        step: 1.0 / (fps.max(1.0) as f32),
+        scale_y_mode,
+        inertia: f_or(cm, "inertia", 0.5),
+        strength: f_or(cm, "strength", 100.0),
+        damping: f_or(cm, "damping", 0.85),
+        mass_inverse: 1.0 / if mass != 0.0 { mass } else { 1.0 },
+        wind: f(cm, "wind"),
+        gravity: f(cm, "gravity"),
+        mix: f_or(cm, "mix", 1.0),
+    })
+}
+
 fn from_prop(name: &str) -> Option<FromProp> {
     Some(match name {
         "rotate" => FromProp::Rotate,
@@ -1074,6 +1122,33 @@ mod tests {
         assert!((t.mix_rotate - 0.5).abs() < 1e-6);
         assert_eq!(t.properties.len(), 1);
         assert_eq!(t.properties[0].to.len(), 1);
+    }
+
+    #[test]
+    fn parses_physics_constraint() {
+        let json = r#"{
+            "skeleton": { "referenceScale": 120 },
+            "bones": [ { "name": "root" }, { "name": "tail", "parent": "root", "length": 30 } ],
+            "constraints": [
+                { "type": "physics", "name": "jiggle", "bone": "tail",
+                  "y": 1, "rotate": 1, "gravity": 2, "strength": 80, "damping": 0.9,
+                  "mass": 2, "fps": 120, "mix": 1 }
+            ]
+        }"#;
+        let data = from_json(json).unwrap();
+        assert!((data.reference_scale - 120.0).abs() < 1e-6);
+        assert_eq!(data.physics_constraints.len(), 1);
+        let p = &data.physics_constraints[0];
+        assert_eq!(p.bone, 1);
+        assert_eq!(p.order, 0);
+        assert!((p.gravity - 2.0).abs() < 1e-6);
+        assert!((p.strength - 80.0).abs() < 1e-6);
+        // fps 120 -> step 1/120.
+        assert!((p.step - 1.0 / 120.0).abs() < 1e-6);
+        // mass 2 -> mass_inverse 0.5.
+        assert!((p.mass_inverse - 0.5).abs() < 1e-6);
+        // omitted inertia defaults to 0.5.
+        assert!((p.inertia - 0.5).abs() < 1e-6);
     }
 
     #[test]
