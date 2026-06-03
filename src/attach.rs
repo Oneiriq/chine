@@ -269,17 +269,22 @@ impl MeshAttachment {
     }
 
     /// Remap the mesh's `[0, 1]` region-relative UVs into page space using the
-    /// bound atlas region. (Rotated regions are a follow-up.)
+    /// bound atlas region, handling a 90-degree rotated region.
     pub fn remap_uvs(&mut self, region: &AtlasRegion, page_w: u32, page_h: u32) {
-        if region.degrees == 90 {
-            return;
-        }
         let (pw, ph) = (page_w.max(1) as f32, page_h.max(1) as f32);
         let (rx, ry) = (region.x as f32, region.y as f32);
         let (rw, rh) = (region.width as f32, region.height as f32);
         for i in 0..self.vertex_count() {
-            self.uvs[i * 2] = (rx + self.uvs[i * 2] * rw) / pw;
-            self.uvs[i * 2 + 1] = (ry + self.uvs[i * 2 + 1] * rh) / ph;
+            let mu = self.uvs[i * 2];
+            let mv = self.uvs[i * 2 + 1];
+            if region.degrees == 90 {
+                // The region is packed rotated 90 degrees: swap and flip the axes.
+                self.uvs[i * 2] = (rx + (1.0 - mv) * rw) / pw;
+                self.uvs[i * 2 + 1] = (ry + mu * rh) / ph;
+            } else {
+                self.uvs[i * 2] = (rx + mu * rw) / pw;
+                self.uvs[i * 2 + 1] = (ry + mv * rh) / ph;
+            }
         }
     }
 }
@@ -525,5 +530,38 @@ mod tests {
         // bone at (10,0): control points offset by +10 in x.
         assert!(close(w[0], 10.0, 0.0));
         assert!(close(w[3], 40.0, 0.0));
+    }
+
+    #[test]
+    fn rotated_region_remaps_mesh_uvs() {
+        let region = AtlasRegion {
+            name: "r".into(),
+            page: 0,
+            x: 10,
+            y: 20,
+            width: 30,
+            height: 40,
+            degrees: 90,
+            offset_x: 0.0,
+            offset_y: 0.0,
+            original_width: 40,
+            original_height: 30,
+            index: -1,
+        };
+        let mut m = MeshAttachment::new(
+            "m",
+            "m",
+            MeshVertices::Unweighted(vec![0.0, 0.0, 5.0, 5.0]),
+            vec![0.0, 0.0, 1.0, 1.0], // mesh UVs (0,0) and (1,1)
+            vec![],
+        );
+        m.remap_uvs(&region, 100, 100);
+        // degrees 90: u = (rx + (1 - mv) * rw) / pw, v = (ry + mu * rh) / ph.
+        // (0,0) -> u=(10+30)/100=0.4, v=(20+0)/100=0.2.
+        assert!((m.uvs[0] - 0.4).abs() < 1e-4, "u0={}", m.uvs[0]);
+        assert!((m.uvs[1] - 0.2).abs() < 1e-4, "v0={}", m.uvs[1]);
+        // (1,1) -> u=(10+0)/100=0.1, v=(20+40)/100=0.6.
+        assert!((m.uvs[2] - 0.1).abs() < 1e-4, "u1={}", m.uvs[2]);
+        assert!((m.uvs[3] - 0.6).abs() < 1e-4, "v1={}", m.uvs[3]);
     }
 }
