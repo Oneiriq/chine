@@ -25,6 +25,7 @@
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 
+pub mod anim;
 pub mod atlas;
 pub mod attach;
 pub mod data;

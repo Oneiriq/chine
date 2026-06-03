@@ -11,10 +11,12 @@
 
 use std::error::Error;
 use std::fmt;
+use std::sync::Arc;
 
 use glam::Vec2;
 use serde_json::Value;
 
+use crate::anim::{Animation, BoneTimeline, Timeline};
 use crate::attach::{Attachment, MeshAttachment, MeshVertices, RegionAttachment};
 use crate::data::{BlendMode, BoneData, Color, Inherit, SkeletonData, SlotData};
 use crate::skin::Skin;
@@ -104,7 +106,10 @@ pub fn from_json(text: &str) -> Result<SkeletonData, LoadError> {
                     .get("dark")
                     .and_then(Value::as_str)
                     .map(|h| parse_color(Some(h), Color::WHITE)),
-                attachment: s.get("attachment").and_then(Value::as_str).map(String::from),
+                attachment: s
+                    .get("attachment")
+                    .and_then(Value::as_str)
+                    .map(String::from),
                 blend: parse_blend(s.get("blend").and_then(Value::as_str)),
             });
         }
@@ -137,6 +142,13 @@ pub fn from_json(text: &str) -> Result<SkeletonData, LoadError> {
             } else {
                 data.skins.push(skin);
             }
+        }
+    }
+
+    if let Some(anims) = root.get("animations").and_then(Value::as_object) {
+        for (name, anim) in anims {
+            let animation = parse_animation(name, anim, &data)?;
+            data.animations.push(Arc::new(animation));
         }
     }
 
@@ -202,6 +214,155 @@ fn parse_weighted(raw: &[f32]) -> MeshVertices {
         }
     }
     MeshVertices::Weighted { bones, vertices }
+}
+
+/// Parse one animation: bone rotate / translate / scale timelines. Other
+/// channels (slot, deform, event, constraint timelines) arrive in later
+/// milestones and are skipped.
+fn parse_animation(name: &str, anim: &Value, data: &SkeletonData) -> Result<Animation, LoadError> {
+    let mut timelines = Vec::new();
+    let mut duration = 0.0_f32;
+    if let Some(bones) = anim.get("bones").and_then(Value::as_object) {
+        for (bone_name, props) in bones {
+            let bone = data
+                .find_bone(bone_name)
+                .ok_or_else(|| LoadError::BadReference(bone_name.clone()))?;
+            let Some(props) = props.as_object() else {
+                continue;
+            };
+            for (prop, keys) in props {
+                let Some(keys) = keys.as_array() else {
+                    continue;
+                };
+                if keys.is_empty() {
+                    continue;
+                }
+                let (timeline, dur) = match prop.as_str() {
+                    "rotate" => {
+                        let (tl, d) = read_timeline1(keys, bone, 0.0);
+                        (Timeline::Rotate(tl), d)
+                    }
+                    "translate" => {
+                        let (tl, d) = read_timeline2(keys, bone, "x", "y", 0.0);
+                        (Timeline::Translate(tl), d)
+                    }
+                    "scale" => {
+                        let (tl, d) = read_timeline2(keys, bone, "x", "y", 1.0);
+                        (Timeline::Scale(tl), d)
+                    }
+                    _ => continue, // shear / x-y splits / constraints arrive later
+                };
+                duration = duration.max(dur);
+                timelines.push(timeline);
+            }
+        }
+    }
+    Ok(Animation::new(name, duration, timelines))
+}
+
+/// Read a one-value (rotate) timeline. Returns the timeline and its last
+/// keyframe time. Mirrors Spine's `readTimeline` for `CurveTimeline1`.
+fn read_timeline1(keys: &[Value], bone: usize, default_value: f32) -> (BoneTimeline, f32) {
+    let n = keys.len();
+    let mut tl = BoneTimeline::one_value(bone, n, n);
+    let mut bezier = 0;
+    let mut duration = 0.0_f32;
+    let mut frame = 0;
+    while frame < n {
+        let k = &keys[frame];
+        let time = f(k, "time");
+        let value = f_or(k, "value", default_value);
+        tl.set_frame1(frame, time, value);
+        duration = duration.max(time);
+        if frame + 1 < n {
+            if let Some(curve) = k.get("curve") {
+                let next = &keys[frame + 1];
+                let time2 = f(next, "time");
+                let value2 = f_or(next, "value", default_value);
+                bezier = read_curve(curve, &mut tl, bezier, frame, 0, time, time2, value, value2);
+            }
+        }
+        frame += 1;
+    }
+    (tl, duration)
+}
+
+/// Read a two-value (translate / scale) timeline. Mirrors Spine's `readTimeline`
+/// for `BoneTimeline2`.
+fn read_timeline2(
+    keys: &[Value],
+    bone: usize,
+    name1: &str,
+    name2: &str,
+    default_value: f32,
+) -> (BoneTimeline, f32) {
+    let n = keys.len();
+    let mut tl = BoneTimeline::two_value(bone, n, n * 2);
+    let mut bezier = 0;
+    let mut duration = 0.0_f32;
+    let mut frame = 0;
+    while frame < n {
+        let k = &keys[frame];
+        let time = f(k, "time");
+        let v1 = f_or(k, name1, default_value);
+        let v2 = f_or(k, name2, default_value);
+        tl.set_frame2(frame, time, v1, v2);
+        duration = duration.max(time);
+        if frame + 1 < n {
+            if let Some(curve) = k.get("curve") {
+                let next = &keys[frame + 1];
+                let time2 = f(next, "time");
+                let nv1 = f_or(next, name1, default_value);
+                let nv2 = f_or(next, name2, default_value);
+                bezier = read_curve(curve, &mut tl, bezier, frame, 0, time, time2, v1, nv1);
+                bezier = read_curve(curve, &mut tl, bezier, frame, 1, time, time2, v2, nv2);
+            }
+        }
+        frame += 1;
+    }
+    (tl, duration)
+}
+
+/// Apply one keyframe's `curve` field (absent = linear, `"stepped"`, or a Bezier
+/// array; the array holds 4 floats per value channel at offset `value_ord * 4`).
+/// Mirrors Spine's `readCurve`.
+#[allow(clippy::too_many_arguments)]
+fn read_curve(
+    curve: &Value,
+    tl: &mut BoneTimeline,
+    bezier: usize,
+    frame: usize,
+    value_ord: usize,
+    time1: f32,
+    time2: f32,
+    value1: f32,
+    value2: f32,
+) -> usize {
+    if let Some(s) = curve.as_str() {
+        if s == "stepped" {
+            tl.set_stepped(frame);
+        }
+        return bezier;
+    }
+    let Some(arr) = curve.as_array() else {
+        return bezier;
+    };
+    let base = value_ord * 4;
+    let at = |i: usize| arr.get(base + i).and_then(Value::as_f64).unwrap_or(0.0) as f32;
+    tl.set_bezier(
+        bezier,
+        frame,
+        value_ord,
+        time1,
+        value1,
+        at(0),
+        at(1),
+        at(2),
+        at(3),
+        time2,
+        value2,
+    );
+    bezier + 1
 }
 
 fn f(v: &Value, key: &str) -> f32 {
@@ -365,5 +526,34 @@ mod tests {
     fn unknown_bone_reference_errors() {
         let bad = r#"{ "bones": [ { "name": "a", "parent": "ghost" } ] }"#;
         assert!(matches!(from_json(bad), Err(LoadError::BadReference(_))));
+    }
+
+    #[test]
+    fn parses_and_plays_a_rotate_animation() {
+        let json = r#"{
+            "bones": [ { "name": "root" }, { "name": "arm", "parent": "root" } ],
+            "animations": {
+                "wave": {
+                    "bones": {
+                        "arm": {
+                            "rotate": [ { "time": 0, "value": 0 }, { "time": 1, "value": 90 } ]
+                        }
+                    }
+                }
+            }
+        }"#;
+        let data = from_json(json).unwrap();
+        assert_eq!(data.animations.len(), 1);
+        let anim = data.find_animation("wave").unwrap().clone();
+        assert!((anim.duration() - 1.0).abs() < 1e-6);
+
+        let arm = data.find_bone("arm").unwrap();
+        let mut sk = crate::skel::Skeleton::new(std::sync::Arc::new(data));
+        let mut state = crate::anim::AnimationState::new();
+        state.set_animation(anim, false);
+        state.update(0.5);
+        state.apply(&mut sk);
+        // setup rotation 0 + interpolated 45 at the halfway point.
+        assert!((sk.bone(arm).unwrap().rotation - 45.0).abs() < 1e-4);
     }
 }

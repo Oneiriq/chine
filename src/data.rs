@@ -5,8 +5,11 @@
 //! constraints. A posable `Skeleton` instance is created from it; many
 //! skeletons can share one `SkeletonData`.
 
+use std::sync::Arc;
+
 use glam::Vec2;
 
+use crate::anim::Animation;
 use crate::attach::Attachment;
 use crate::skin::Skin;
 
@@ -160,6 +163,8 @@ pub struct SkeletonData {
     pub default_skin: Skin,
     /// Named skins (character variants) that override or extend the default.
     pub skins: Vec<Skin>,
+    /// Animations from the export, each shareable for playback on a track.
+    pub animations: Vec<Arc<Animation>>,
 }
 
 impl SkeletonData {
@@ -192,6 +197,12 @@ impl SkeletonData {
     ) -> Option<&'a Attachment> {
         skin.and_then(|s| s.attachment(slot, name))
             .or_else(|| self.default_skin.attachment(slot, name))
+    }
+
+    /// Find an animation by name.
+    #[must_use]
+    pub fn find_animation(&self, name: &str) -> Option<&Arc<Animation>> {
+        self.animations.iter().find(|a| a.name() == name)
     }
 }
 

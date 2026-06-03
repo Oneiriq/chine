@@ -1,0 +1,70 @@
+//! Animation: keyframed timelines, curves, and playback.
+//!
+//! An [`Animation`] is a set of timelines that pose a [`Skeleton`] over time.
+//! Each timeline interpolates one bone property with stepped / linear / Bezier
+//! curves (see [`curve`]); [`AnimationState`] plays an animation on a track.
+//! Interpolation and blending are transcribed from Spine 4.3 for fidelity.
+//!
+//! This milestone covers the core bone timelines (rotate / translate / scale)
+//! and single-track playback. Slot / deform / event timelines, constraint
+//! timelines, and multi-track mixing are layered on later.
+
+mod curve;
+mod state;
+mod timeline;
+
+pub use state::{AnimationState, TrackEntry};
+pub(crate) use timeline::{BoneTimeline, Timeline};
+
+use crate::skel::Skeleton;
+
+/// Which value a timeline blends from (Spine 4.3 `MixFrom`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MixFrom {
+    /// Blend from the bone's setup value (replaces the current pose).
+    Setup,
+    /// Blend from the current value, treating the first application as setup.
+    First,
+    /// Blend from the current value.
+    Current,
+}
+
+/// A named set of timelines that pose a skeleton over a fixed duration.
+#[derive(Debug, Clone)]
+pub struct Animation {
+    name: String,
+    duration: f32,
+    timelines: Vec<Timeline>,
+}
+
+impl Animation {
+    /// Build an animation from its timelines. `duration` is the last keyframe
+    /// time, in seconds.
+    pub(crate) fn new(name: impl Into<String>, duration: f32, timelines: Vec<Timeline>) -> Self {
+        Self {
+            name: name.into(),
+            duration,
+            timelines,
+        }
+    }
+
+    /// The animation's name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The animation's duration in seconds (its last keyframe time).
+    #[must_use]
+    pub fn duration(&self) -> f32 {
+        self.duration
+    }
+
+    /// Apply every timeline to `skeleton` at `time` (seconds), mixing with
+    /// weight `alpha` from `from`. `add` selects additive blending.
+    pub fn apply(&self, skeleton: &mut Skeleton, time: f32, alpha: f32, from: MixFrom, add: bool) {
+        for timeline in &self.timelines {
+            timeline.apply(skeleton, time, alpha, from, add, false);
+        }
+    }
+}

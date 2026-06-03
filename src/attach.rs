@@ -367,7 +367,7 @@ mod tests {
             "m",
             "m",
             MeshVertices::Weighted {
-                bones: vec![2, 0, 1],            // 1 vertex, influenced by bones 0 and 1
+                bones: vec![2, 0, 1], // 1 vertex, influenced by bones 0 and 1
                 vertices: vec![0.0, 0.0, 0.5, 0.0, 0.0, 0.5], // (0,0)w.5 via bone0; (0,0)w.5 via bone1
             },
             vec![0.0, 0.0],

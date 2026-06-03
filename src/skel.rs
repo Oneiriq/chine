@@ -176,6 +176,14 @@ impl Skeleton {
         self.bones.get_mut(index)
     }
 
+    /// Split borrow for the animation system: a bone's mutable local pose paired
+    /// with its immutable setup data. `None` if `index` is out of range.
+    pub(crate) fn bone_and_setup(&mut self, index: usize) -> Option<(&mut Bone, &BoneData)> {
+        let setup = self.data.bones.get(index)?;
+        let bone = self.bones.get_mut(index)?;
+        Some((bone, setup))
+    }
+
     /// Find a bone index by name.
     #[must_use]
     pub fn find_bone(&self, name: &str) -> Option<usize> {
