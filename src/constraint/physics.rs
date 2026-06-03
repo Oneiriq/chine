@@ -111,6 +111,7 @@ pub struct PhysicsConstraint {
 
     // Simulation state, carried across frames.
     reset: bool,
+    pending_reset: bool,
     ux: f32,
     uy: f32,
     cx: f32,
@@ -141,6 +142,7 @@ impl PhysicsConstraint {
             gravity: data.gravity,
             mix: data.mix,
             reset: true,
+            pending_reset: false,
             ux: 0.0,
             uy: 0.0,
             cx: 0.0,
@@ -173,6 +175,17 @@ impl PhysicsConstraint {
         self.rotate_velocity = 0.0;
         self.scale_offset = 0.0;
         self.scale_velocity = 0.0;
+    }
+
+    /// Request a reset on the next `update_world_transform` (set by the physics
+    /// reset timeline).
+    pub(crate) fn set_pending_reset(&mut self) {
+        self.pending_reset = true;
+    }
+
+    /// Take and clear the pending-reset flag.
+    pub(crate) fn take_pending_reset(&mut self) -> bool {
+        core::mem::take(&mut self.pending_reset)
     }
 }
 
@@ -281,8 +294,7 @@ pub(crate) fn solve(
 
                 if rotate_or_shear {
                     mr = (pd.rotate + pd.shear_x) * mix;
-                    let mut r =
-                        (dy + pose.ty).atan2(dx + pose.tx) - ca - pose.rotate_offset * mr;
+                    let mut r = (dy + pose.ty).atan2(dx + pose.tx) - ca - pose.rotate_offset * mr;
                     pose.rotate_offset += (r - (r * INV_PI2 - 0.5).ceil() * PI2) * i;
                     r = pose.rotate_offset * mr + ca;
                     cc = r.cos();
@@ -391,7 +403,11 @@ fn apply_scale(bone: &mut Bone, pd: &PhysicsConstraintData, scale_mix: f32) {
         ScaleYMode::Uniform => bone.scale_b_d(s),
         ScaleYMode::Volume => {
             s = s.abs();
-            s = if s >= 0.7 { 1.0 / s } else { 4.0 - 3.673_47 * s };
+            s = if s >= 0.7 {
+                1.0 / s
+            } else {
+                4.0 - 3.673_47 * s
+            };
             bone.scale_b_d(s);
         }
     }

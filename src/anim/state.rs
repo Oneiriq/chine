@@ -20,6 +20,8 @@ pub struct TrackEntry {
     pub looping: bool,
     /// Mix weight in `[0, 1]`.
     pub alpha: f32,
+    // The previous applied time, for keyframe-crossing timelines (physics reset).
+    last_time: f32,
 }
 
 impl TrackEntry {
@@ -30,6 +32,7 @@ impl TrackEntry {
             time_scale: 1.0,
             looping,
             alpha: 1.0,
+            last_time: -1.0,
         }
     }
 
@@ -93,10 +96,12 @@ impl AnimationState {
     /// set from their setup pose plus the keyed value; bones the animation does
     /// not touch keep their current pose (reset to setup first for a clean
     /// result).
-    pub fn apply(&self, skeleton: &mut Skeleton) {
-        if let Some(t) = &self.track {
+    pub fn apply(&mut self, skeleton: &mut Skeleton) {
+        if let Some(t) = &mut self.track {
+            let time = t.current_time();
             t.animation
-                .apply(skeleton, t.current_time(), t.alpha, MixFrom::Setup, false);
+                .apply(skeleton, t.last_time, time, t.alpha, MixFrom::Setup, false);
+            t.last_time = time;
         }
     }
 }

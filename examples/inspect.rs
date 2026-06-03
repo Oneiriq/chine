@@ -8,7 +8,10 @@ use std::sync::Arc;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    assert!(args.len() >= 3, "usage: inspect <skeleton.json> <atlas.atlas>");
+    assert!(
+        args.len() >= 3,
+        "usage: inspect <skeleton.json> <atlas.atlas>"
+    );
 
     let json = std::fs::read_to_string(&args[1]).expect("read json");
     let atlas_text = std::fs::read_to_string(&args[2]).expect("read atlas");

@@ -126,6 +126,22 @@ impl ConstraintTimeline {
     }
 }
 
+/// A physics constraint reset timeline: keyframe times that, when crossed, reset
+/// the target constraint's simulation state (or every physics constraint when
+/// the target is [`GLOBAL_PHYSICS`]).
+#[derive(Debug, Clone)]
+pub(crate) struct PhysicsResetTimeline {
+    constraint: usize,
+    times: Vec<f32>,
+}
+
+impl PhysicsResetTimeline {
+    /// A reset timeline for `constraint` firing at each time in `times`.
+    pub(crate) fn new(constraint: usize, times: Vec<f32>) -> Self {
+        Self { constraint, times }
+    }
+}
+
 /// Sentinel constraint index marking a physics timeline as global: it drives
 /// every physics constraint whose matching global flag is set.
 pub(crate) const GLOBAL_PHYSICS: usize = usize::MAX;
@@ -170,14 +186,19 @@ pub(crate) enum Timeline {
     PathMix(ConstraintTimeline),
     /// Physics constraint tunable (the selected [`PhysicsProperty`]).
     Physics(ConstraintTimeline, PhysicsProperty),
+    /// Physics constraint reset, fired on keyframe crossings.
+    PhysicsReset(PhysicsResetTimeline),
 }
 
 impl Timeline {
-    /// Apply this timeline to `skeleton` at `time`. `from`/`add`/`out` follow
-    /// Spine's mix semantics; `out` only affects scale.
+    /// Apply this timeline to `skeleton` over the window `(last_time, time]`.
+    /// `from`/`add`/`out` follow Spine's mix semantics; `out` only affects
+    /// scale; `last_time` is used only by the physics reset timeline.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn apply(
         &self,
         skeleton: &mut Skeleton,
+        last_time: f32,
         time: f32,
         alpha: f32,
         from: MixFrom,
@@ -196,6 +217,7 @@ impl Timeline {
             Timeline::Physics(t, property) => {
                 apply_physics(t, *property, skeleton, time, alpha, from, add);
             }
+            Timeline::PhysicsReset(t) => apply_physics_reset(t, skeleton, last_time, time),
         }
     }
 }
@@ -600,7 +622,8 @@ fn apply_physics_one(
 ) {
     match property {
         PhysicsProperty::Inertia => {
-            pose.inertia = curve.absolute_value(time, alpha, from, add, pose.inertia, setup.inertia);
+            pose.inertia =
+                curve.absolute_value(time, alpha, from, add, pose.inertia, setup.inertia);
         }
         PhysicsProperty::Strength => {
             pose.strength =
@@ -625,6 +648,25 @@ fn apply_physics_one(
         PhysicsProperty::Mix => {
             pose.mix = curve.absolute_value(time, alpha, from, add, pose.mix, setup.mix);
         }
+    }
+}
+
+/// Physics reset timeline: if a keyframe time falls in the window
+/// `(last_time, time]` (handling a loop wrap where `time < last_time`), reset
+/// the target constraint, or every physics constraint when global.
+fn apply_physics_reset(t: &PhysicsResetTimeline, skel: &mut Skeleton, last_time: f32, time: f32) {
+    let fired = if time >= last_time {
+        t.times.iter().any(|&kt| kt > last_time && kt <= time)
+    } else {
+        t.times.iter().any(|&kt| kt > last_time || kt <= time)
+    };
+    if !fired {
+        return;
+    }
+    if t.constraint == GLOBAL_PHYSICS {
+        skel.request_all_physics_reset();
+    } else {
+        skel.request_physics_reset(t.constraint);
     }
 }
 
@@ -658,7 +700,7 @@ mod tests {
         let mut t = BoneTimeline::one_value(0, 2, 0);
         t.set_frame1(0, 0.0, 0.0);
         t.set_frame1(1, 1.0, 90.0);
-        Timeline::Rotate(t).apply(&mut sk, 0.5, 1.0, MixFrom::Setup, false, false);
+        Timeline::Rotate(t).apply(&mut sk, -1.0, 0.5, 1.0, MixFrom::Setup, false, false);
         assert!((rotation(&sk) - 45.0).abs() < 1e-4);
     }
 
@@ -669,7 +711,7 @@ mod tests {
         let mut t = BoneTimeline::one_value(0, 2, 0);
         t.set_frame1(0, 0.0, 0.0);
         t.set_frame1(1, 1.0, 60.0);
-        Timeline::Rotate(t).apply(&mut sk, 1.0, 0.5, MixFrom::Setup, false, false);
+        Timeline::Rotate(t).apply(&mut sk, -1.0, 1.0, 0.5, MixFrom::Setup, false, false);
         // setup + value*alpha = 30 + 60*0.5 = 60.
         assert!((rotation(&sk) - 60.0).abs() < 1e-4);
     }
@@ -681,7 +723,7 @@ mod tests {
         let mut t = BoneTimeline::one_value(0, 2, 0);
         t.set_frame1(0, 1.0, 0.0);
         t.set_frame1(1, 2.0, 90.0);
-        Timeline::Rotate(t).apply(&mut sk, 0.0, 1.0, MixFrom::Setup, false, false);
+        Timeline::Rotate(t).apply(&mut sk, -1.0, 0.0, 1.0, MixFrom::Setup, false, false);
         assert!((rotation(&sk) - 30.0).abs() < 1e-4);
     }
 
@@ -691,7 +733,7 @@ mod tests {
         let mut t = BoneTimeline::two_value(0, 2, 0);
         t.set_frame2(0, 0.0, 0.0, 0.0);
         t.set_frame2(1, 1.0, 10.0, 20.0);
-        Timeline::Translate(t).apply(&mut sk, 0.5, 1.0, MixFrom::Setup, false, false);
+        Timeline::Translate(t).apply(&mut sk, -1.0, 0.5, 1.0, MixFrom::Setup, false, false);
         let b = sk.bone(0).unwrap();
         assert!((b.x - 5.0).abs() < 1e-4 && (b.y - 10.0).abs() < 1e-4);
     }
@@ -702,7 +744,7 @@ mod tests {
         let mut t = BoneTimeline::two_value(0, 2, 0);
         t.set_frame2(0, 0.0, 1.0, 1.0);
         t.set_frame2(1, 1.0, 2.0, 2.0);
-        Timeline::Scale(t).apply(&mut sk, 0.5, 1.0, MixFrom::Setup, false, false);
+        Timeline::Scale(t).apply(&mut sk, -1.0, 0.5, 1.0, MixFrom::Setup, false, false);
         let b = sk.bone(0).unwrap();
         assert!((b.scale_x - 1.5).abs() < 1e-4 && (b.scale_y - 1.5).abs() < 1e-4);
     }

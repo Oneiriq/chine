@@ -17,7 +17,8 @@ use glam::Vec2;
 use serde_json::Value;
 
 use crate::anim::{
-    Animation, BoneTimeline, ConstraintTimeline, PhysicsProperty, Timeline, GLOBAL_PHYSICS,
+    Animation, BoneTimeline, ConstraintTimeline, PhysicsProperty, PhysicsResetTimeline, Timeline,
+    GLOBAL_PHYSICS,
 };
 use crate::attach::{Attachment, MeshAttachment, MeshVertices, PathAttachment, RegionAttachment};
 use crate::constraint::ik::IkConstraintData;
@@ -421,6 +422,14 @@ fn parse_animation(name: &str, anim: &Value, data: &SkeletonData) -> Result<Anim
                 if keys.is_empty() {
                     continue;
                 }
+                if channel == "reset" {
+                    let times: Vec<f32> = keys.iter().map(|k| f(k, "time")).collect();
+                    duration = duration.max(times.last().copied().unwrap_or(0.0));
+                    timelines.push(Timeline::PhysicsReset(PhysicsResetTimeline::new(
+                        idx, times,
+                    )));
+                    continue;
+                }
                 let (property, default) = match channel.as_str() {
                     "inertia" => (PhysicsProperty::Inertia, 0.5),
                     "strength" => (PhysicsProperty::Strength, 100.0),
@@ -429,7 +438,7 @@ fn parse_animation(name: &str, anim: &Value, data: &SkeletonData) -> Result<Anim
                     "wind" => (PhysicsProperty::Wind, 0.0),
                     "gravity" => (PhysicsProperty::Gravity, 0.0),
                     "mix" => (PhysicsProperty::Mix, 1.0),
-                    _ => continue, // "reset" and unknown channels are skipped.
+                    _ => continue, // Unknown channels are skipped.
                 };
                 let (tl, dur) = read_curve_timeline(keys, idx, &[("value", default)]);
                 duration = duration.max(dur);
@@ -1263,6 +1272,48 @@ mod tests {
         // (strengthGlobal); "pb" keeps its setup strength (100).
         assert!((sk.physics_constraint(0).unwrap().strength - 40.0).abs() < 1e-3);
         assert!((sk.physics_constraint(1).unwrap().strength - 100.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn physics_reset_timeline_zeroes_the_offset() {
+        let json = r#"{
+            "skeleton": { "referenceScale": 100 },
+            "bones": [ { "name": "root" }, { "name": "tail", "parent": "root", "length": 20 } ],
+            "constraints": [
+                { "type": "physics", "name": "p", "bone": "tail",
+                  "y": 1, "gravity": 1, "strength": 50, "damping": 0.9, "mass": 1, "fps": 60 }
+            ],
+            "animations": {
+                "blink": { "physics": { "p": { "reset": [ { "time": 0.5 } ] } } }
+            }
+        }"#;
+        let data = from_json(json).unwrap();
+        let anim = data.find_animation("blink").unwrap().clone();
+        let mut sk = crate::skel::Skeleton::new(std::sync::Arc::new(data));
+        let mut state = crate::anim::AnimationState::new();
+        state.set_animation(anim, false);
+        let dt = 1.0 / 60.0;
+        let step = |state: &mut crate::anim::AnimationState, sk: &mut crate::skel::Skeleton| {
+            state.update(dt);
+            sk.update(dt);
+            sk.set_bones_to_setup_pose();
+            state.apply(sk);
+            sk.update_world_transform();
+        };
+        // Droop for ~0.48s, before the reset keyframe at t=0.5.
+        for _ in 0..29 {
+            step(&mut state, &mut sk);
+        }
+        let drooped = sk.bone(1).unwrap().world_y();
+        assert!(drooped < -0.2, "expected droop before reset, got {drooped}");
+        // Two more frames cross t=0.5 and fire the reset, undoing the droop.
+        step(&mut state, &mut sk);
+        step(&mut state, &mut sk);
+        let after = sk.bone(1).unwrap().world_y();
+        assert!(
+            after.abs() < 0.1,
+            "expected reset to undo the droop, got {after}"
+        );
     }
 
     #[test]

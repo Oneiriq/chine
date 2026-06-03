@@ -16,7 +16,8 @@ mod timeline;
 
 pub use state::{AnimationState, TrackEntry};
 pub(crate) use timeline::{
-    BoneTimeline, ConstraintTimeline, PhysicsProperty, Timeline, GLOBAL_PHYSICS,
+    BoneTimeline, ConstraintTimeline, PhysicsProperty, PhysicsResetTimeline, Timeline,
+    GLOBAL_PHYSICS,
 };
 
 use crate::skel::Skeleton;
@@ -63,11 +64,20 @@ impl Animation {
         self.duration
     }
 
-    /// Apply every timeline to `skeleton` at `time` (seconds), mixing with
-    /// weight `alpha` from `from`. `add` selects additive blending.
-    pub fn apply(&self, skeleton: &mut Skeleton, time: f32, alpha: f32, from: MixFrom, add: bool) {
+    /// Apply every timeline to `skeleton` over the window `(last_time, time]`
+    /// (seconds), mixing with weight `alpha` from `from`. `add` selects additive
+    /// blending. `last_time` is used only by the physics reset timeline.
+    pub fn apply(
+        &self,
+        skeleton: &mut Skeleton,
+        last_time: f32,
+        time: f32,
+        alpha: f32,
+        from: MixFrom,
+        add: bool,
+    ) {
         for timeline in &self.timelines {
-            timeline.apply(skeleton, time, alpha, from, add, false);
+            timeline.apply(skeleton, last_time, time, alpha, from, add, false);
         }
     }
 }

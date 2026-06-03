@@ -269,6 +269,20 @@ impl Skeleton {
         &mut self.physics_constraints
     }
 
+    /// Mark physics constraint `i` to reset on the next world-transform update.
+    pub(crate) fn request_physics_reset(&mut self, i: usize) {
+        if let Some(c) = self.physics_constraints.get_mut(i) {
+            c.set_pending_reset();
+        }
+    }
+
+    /// Mark every physics constraint to reset on the next world-transform update.
+    pub(crate) fn request_all_physics_reset(&mut self) {
+        for c in &mut self.physics_constraints {
+            c.set_pending_reset();
+        }
+    }
+
     /// Mutable access to a bone's local pose by index.
     pub fn bone_mut(&mut self, index: usize) -> Option<&mut Bone> {
         self.bones.get_mut(index)
@@ -380,15 +394,22 @@ impl Skeleton {
                     let pose = self.path_constraints[c];
                     path::solve(self, c, pose);
                 }
-                Updatable::Physics(c) => physics::solve(
-                    &mut self.bones,
-                    &self.data,
-                    c,
-                    &mut self.physics_constraints[c],
-                    time,
-                    reference_scale,
-                    Physics::Update,
-                ),
+                Updatable::Physics(c) => {
+                    let mode = if self.physics_constraints[c].take_pending_reset() {
+                        Physics::Reset
+                    } else {
+                        Physics::Update
+                    };
+                    physics::solve(
+                        &mut self.bones,
+                        &self.data,
+                        c,
+                        &mut self.physics_constraints[c],
+                        time,
+                        reference_scale,
+                        mode,
+                    );
+                }
             }
         }
     }
