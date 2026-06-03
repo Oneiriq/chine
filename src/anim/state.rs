@@ -1,8 +1,9 @@
-//! Single-track animation playback.
+//! Multi-track animation playback with crossfade mixing.
 //!
-//! [`AnimationState`] advances one [`TrackEntry`] and applies it to a
-//! [`Skeleton`]. Multi-track mixing and the animation queue arrive later; this
-//! is the minimal player that drives one animation.
+//! [`AnimationState`] holds a stack of tracks; each [`TrackEntry`] plays one
+//! animation, and higher tracks layer over lower ones. Setting a new animation
+//! on a track while [`AnimationState::default_mix`] is non-zero crossfades from
+//! the previous animation over that duration.
 
 use std::sync::Arc;
 
@@ -22,6 +23,11 @@ pub struct TrackEntry {
     pub alpha: f32,
     // The previous applied time, for keyframe-crossing timelines (physics reset).
     last_time: f32,
+    // Crossfade: how long to mix in over `mixing_from`, and how far along.
+    mix_duration: f32,
+    mix_time: f32,
+    // The animation being mixed out of (the previous entry on this track).
+    mixing_from: Option<Box<TrackEntry>>,
 }
 
 impl TrackEntry {
@@ -33,6 +39,9 @@ impl TrackEntry {
             looping,
             alpha: 1.0,
             last_time: -1.0,
+            mix_duration: 0.0,
+            mix_time: 0.0,
+            mixing_from: None,
         }
     }
 
@@ -52,56 +61,137 @@ impl TrackEntry {
             self.track_time
         }
     }
+
+    /// Advance this entry, and the entry it is mixing from, by `delta` seconds,
+    /// clearing the crossfade once it completes.
+    fn advance(&mut self, delta: f32) {
+        self.track_time += delta * self.time_scale;
+        if let Some(from) = self.mixing_from.as_mut() {
+            from.advance(delta);
+            self.mix_time += delta;
+            if self.mix_duration <= 0.0 || self.mix_time >= self.mix_duration {
+                self.mixing_from = None;
+            }
+        }
+    }
+
+    /// The crossfade proportion in `[0, 1]` (`1` once mixing completes).
+    fn mix(&self) -> f32 {
+        if self.mix_duration > 0.0 {
+            (self.mix_time / self.mix_duration).clamp(0.0, 1.0)
+        } else {
+            1.0
+        }
+    }
+
+    /// Apply this entry to `skeleton`. `base` selects setup-pose blending (the
+    /// lowest track) versus layering over the current pose.
+    fn apply(&mut self, skeleton: &mut Skeleton, base: bool) {
+        let base_blend = if base { MixFrom::Setup } else { MixFrom::Current };
+        if let Some(from) = self.mixing_from.as_mut() {
+            // Establish the outgoing pose, then blend the incoming one over it.
+            let from_time = from.current_time();
+            from.animation
+                .apply(skeleton, from.last_time, from_time, from.alpha, base_blend, false);
+            from.last_time = from_time;
+            let time = self.current_time();
+            self.animation.apply(
+                skeleton,
+                self.last_time,
+                time,
+                self.alpha * self.mix(),
+                MixFrom::Current,
+                false,
+            );
+            self.last_time = time;
+        } else {
+            let time = self.current_time();
+            self.animation
+                .apply(skeleton, self.last_time, time, self.alpha, base_blend, false);
+            self.last_time = time;
+        }
+    }
 }
 
-/// A minimal single-track animation player.
+/// A multi-track animation player with crossfade mixing.
 #[derive(Default)]
 pub struct AnimationState {
-    track: Option<TrackEntry>,
+    tracks: Vec<Option<TrackEntry>>,
+    /// Crossfade duration, in seconds, applied when an animation replaces
+    /// another on the same track (`0` switches instantly).
+    pub default_mix: f32,
 }
 
 impl AnimationState {
     /// An empty player.
     #[must_use]
     pub fn new() -> Self {
-        Self { track: None }
+        Self::default()
     }
 
-    /// Play `animation`, replacing any current track. Returns the new entry so
-    /// the caller can tune `time_scale`, `alpha`, etc.
+    /// Play `animation` on track 0, replacing any current animation there
+    /// (crossfading over [`Self::default_mix`] when non-zero). Returns the new
+    /// entry so the caller can tune `time_scale`, `alpha`, etc.
     pub fn set_animation(&mut self, animation: Arc<Animation>, looping: bool) -> &mut TrackEntry {
-        self.track = Some(TrackEntry::new(animation, looping));
-        self.track.as_mut().expect("just set")
+        self.set_animation_on(0, animation, looping)
     }
 
-    /// Remove the current track.
+    /// Play `animation` on `track`, layering over lower tracks and crossfading
+    /// from the track's current animation over [`Self::default_mix`].
+    pub fn set_animation_on(
+        &mut self,
+        track: usize,
+        animation: Arc<Animation>,
+        looping: bool,
+    ) -> &mut TrackEntry {
+        while self.tracks.len() <= track {
+            self.tracks.push(None);
+        }
+        let mut entry = TrackEntry::new(animation, looping);
+        if self.default_mix > 0.0 {
+            if let Some(mut current) = self.tracks[track].take() {
+                current.mixing_from = None; // collapse any in-progress crossfade
+                entry.mix_duration = self.default_mix;
+                entry.mixing_from = Some(Box::new(current));
+            }
+        }
+        self.tracks[track] = Some(entry);
+        self.tracks[track].as_mut().expect("just set")
+    }
+
+    /// Remove every track.
     pub fn clear(&mut self) {
-        self.track = None;
+        self.tracks.clear();
     }
 
-    /// The current track, if any.
-    #[must_use]
-    pub fn track(&self) -> Option<&TrackEntry> {
-        self.track.as_ref()
-    }
-
-    /// Advance playback by `delta` seconds.
-    pub fn update(&mut self, delta: f32) {
-        if let Some(t) = &mut self.track {
-            t.track_time += delta * t.time_scale;
+    /// Remove the animation on `track`.
+    pub fn clear_track(&mut self, track: usize) {
+        if let Some(slot) = self.tracks.get_mut(track) {
+            *slot = None;
         }
     }
 
-    /// Pose `skeleton` from the current track. Bones keyed by the animation are
-    /// set from their setup pose plus the keyed value; bones the animation does
-    /// not touch keep their current pose (reset to setup first for a clean
-    /// result).
+    /// The entry on `track`, if any.
+    #[must_use]
+    pub fn track(&self, track: usize) -> Option<&TrackEntry> {
+        self.tracks.get(track).and_then(Option::as_ref)
+    }
+
+    /// Advance every track by `delta` seconds.
+    pub fn update(&mut self, delta: f32) {
+        for entry in self.tracks.iter_mut().flatten() {
+            entry.advance(delta);
+        }
+    }
+
+    /// Pose `skeleton` from every track in order: track 0 from the setup pose,
+    /// higher tracks layered on top. Reset bones to setup first for a clean
+    /// result.
     pub fn apply(&mut self, skeleton: &mut Skeleton) {
-        if let Some(t) = &mut self.track {
-            let time = t.current_time();
-            t.animation
-                .apply(skeleton, t.last_time, time, t.alpha, MixFrom::Setup, false);
-            t.last_time = time;
+        for (i, slot) in self.tracks.iter_mut().enumerate() {
+            if let Some(entry) = slot {
+                entry.apply(skeleton, i == 0);
+            }
         }
     }
 }
@@ -128,6 +218,25 @@ mod tests {
         (Skeleton::new(Arc::new(data)), Arc::new(anim))
     }
 
+    /// A one-bone skeleton plus an animation that holds the bone at `rotation`.
+    fn hold(rotation: f32) -> Arc<Animation> {
+        let mut t = BoneTimeline::one_value(0, 1, 0);
+        t.set_frame1(0, 0.0, rotation);
+        Arc::new(Animation::new("hold", 0.0, vec![Timeline::Rotate(t)]))
+    }
+
+    fn one_bone() -> Skeleton {
+        let data = SkeletonData {
+            bones: vec![BoneData {
+                index: 0,
+                name: "bone".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        Skeleton::new(Arc::new(data))
+    }
+
     #[test]
     fn plays_and_loops() {
         let (mut sk, anim) = spin();
@@ -151,6 +260,48 @@ mod tests {
         state.set_animation(anim, false).time_scale = 2.0;
         state.update(0.5);
         // 0.5s at 2x -> track_time 1.0.
-        assert!((state.track().unwrap().current_time() - 1.0).abs() < 1e-4);
+        assert!((state.track(0).unwrap().current_time() - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn crossfade_blends_between_animations() {
+        let mut sk = one_bone();
+        let mut state = AnimationState::new();
+        state.default_mix = 1.0; // a one-second crossfade
+
+        // Start holding rotation 0.
+        state.set_animation(hold(0.0), true);
+        sk.set_bones_to_setup_pose();
+        state.apply(&mut sk);
+        assert!((sk.bone(0).unwrap().rotation - 0.0).abs() < 1e-4);
+
+        // Switch to rotation 90 with a crossfade; halfway is ~45.
+        state.set_animation(hold(90.0), true);
+        state.update(0.5);
+        sk.set_bones_to_setup_pose();
+        state.apply(&mut sk);
+        let mid = sk.bone(0).unwrap().rotation;
+        assert!((mid - 45.0).abs() < 2.0, "expected mid-crossfade ~45, got {mid}");
+
+        // Past the mix duration the crossfade completes at 90.
+        state.update(0.6);
+        sk.set_bones_to_setup_pose();
+        state.apply(&mut sk);
+        let done = sk.bone(0).unwrap().rotation;
+        assert!((done - 90.0).abs() < 1e-3, "expected 90 after mix, got {done}");
+    }
+
+    #[test]
+    fn higher_tracks_layer_over_lower() {
+        let mut sk = one_bone();
+        let mut state = AnimationState::new();
+        // Track 0 holds 100; track 1 layers 20 at half weight over it.
+        state.set_animation_on(0, hold(100.0), true);
+        state.set_animation_on(1, hold(20.0), true).alpha = 0.5;
+        sk.set_bones_to_setup_pose();
+        state.apply(&mut sk);
+        // base 100, then blended halfway toward 20 -> 60.
+        let r = sk.bone(0).unwrap().rotation;
+        assert!((r - 60.0).abs() < 1e-3, "expected layered 60, got {r}");
     }
 }
