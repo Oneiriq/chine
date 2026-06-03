@@ -1,0 +1,380 @@
+//! Attachments — the geometry a slot can display — and world-vertex computation.
+//!
+//! M2 covers the two renderable attachment types: [`RegionAttachment`] (a
+//! textured quad on one bone) and [`MeshAttachment`] (a textured mesh whose
+//! vertices may be weighted across several bones). Clipping, bounding-box,
+//! path, and point attachments arrive in later milestones. Animation-time mesh
+//! deformation is layered on in M4.
+
+use glam::Vec2;
+
+use crate::atlas::AtlasRegion;
+use crate::data::Color;
+use crate::skel::{Bone, Skeleton};
+
+/// Degrees-to-radians factor.
+const DEG_RAD: f32 = core::f32::consts::PI / 180.0;
+
+// Corner indices into the region offset/uv arrays (Spine's order).
+const BLX: usize = 0;
+const BLY: usize = 1;
+const ULX: usize = 2;
+const ULY: usize = 3;
+const URX: usize = 4;
+const URY: usize = 5;
+const BRX: usize = 6;
+const BRY: usize = 7;
+
+/// What a slot displays.
+#[derive(Debug, Clone)]
+pub enum Attachment {
+    /// A textured quad on a single bone.
+    Region(RegionAttachment),
+    /// A textured mesh, optionally weighted across bones.
+    Mesh(MeshAttachment),
+}
+
+/// A textured quad attached to a slot's bone.
+#[derive(Debug, Clone)]
+pub struct RegionAttachment {
+    /// Attachment name (the key within a skin).
+    pub name: String,
+    /// Atlas region name this draws (`AtlasRegion::name`).
+    pub path: String,
+    /// Local x offset from the bone.
+    pub x: f32,
+    /// Local y offset from the bone.
+    pub y: f32,
+    /// Local x scale.
+    pub scale_x: f32,
+    /// Local y scale.
+    pub scale_y: f32,
+    /// Local rotation in degrees.
+    pub rotation: f32,
+    /// Quad width in world units.
+    pub width: f32,
+    /// Quad height in world units.
+    pub height: f32,
+    /// Tint color.
+    pub color: Color,
+    /// Eight local corner offsets `[BLx, BLy, ULx, ULy, URx, URy, BRx, BRy]`,
+    /// computed by [`Self::update`].
+    offset: [f32; 8],
+    /// Eight UVs in the same corner order, computed by [`Self::update`].
+    pub uvs: [f32; 8],
+}
+
+impl RegionAttachment {
+    /// A region attachment with identity transform and the given name/path.
+    #[must_use]
+    pub fn new(name: impl Into<String>, path: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            path: path.into(),
+            x: 0.0,
+            y: 0.0,
+            scale_x: 1.0,
+            scale_y: 1.0,
+            rotation: 0.0,
+            width: 0.0,
+            height: 0.0,
+            color: Color::WHITE,
+            offset: [0.0; 8],
+            uvs: [0.0; 8],
+        }
+    }
+
+    /// Recompute the local corner offsets and UVs against an atlas region.
+    /// Call after changing the transform or binding a region. `page_w`/`page_h`
+    /// are the region's page size (to normalize UVs).
+    pub fn update(&mut self, region: &AtlasRegion, page_w: u32, page_h: u32) {
+        let mut local_x2 = self.width / 2.0;
+        let mut local_y2 = self.height / 2.0;
+        let mut local_x = -local_x2;
+        let mut local_y = -local_y2;
+
+        // Account for whitespace the packer stripped: shift/scale the quad so
+        // the trimmed region still sits where the full image would.
+        let ow = region.original_width.max(1) as f32;
+        let oh = region.original_height.max(1) as f32;
+        local_x += region.offset_x / ow * self.width;
+        local_y += region.offset_y / oh * self.height;
+        if region.degrees == 90 {
+            local_x2 = local_x + region.height as f32 / ow * self.width;
+            local_y2 = local_y + region.width as f32 / oh * self.height;
+        } else {
+            local_x2 = local_x + region.width as f32 / ow * self.width;
+            local_y2 = local_y + region.height as f32 / oh * self.height;
+        }
+
+        local_x *= self.scale_x;
+        local_y *= self.scale_y;
+        local_x2 *= self.scale_x;
+        local_y2 *= self.scale_y;
+
+        let cos = (self.rotation * DEG_RAD).cos();
+        let sin = (self.rotation * DEG_RAD).sin();
+        let lx_cos = local_x * cos + self.x;
+        let lx_sin = local_x * sin;
+        let ly_cos = local_y * cos + self.y;
+        let ly_sin = local_y * sin;
+        let lx2_cos = local_x2 * cos + self.x;
+        let lx2_sin = local_x2 * sin;
+        let ly2_cos = local_y2 * cos + self.y;
+        let ly2_sin = local_y2 * sin;
+
+        self.offset[BLX] = lx_cos - ly_sin;
+        self.offset[BLY] = ly_cos + lx_sin;
+        self.offset[ULX] = lx_cos - ly2_sin;
+        self.offset[ULY] = ly2_cos + lx_sin;
+        self.offset[URX] = lx2_cos - ly2_sin;
+        self.offset[URY] = ly2_cos + lx2_sin;
+        self.offset[BRX] = lx2_cos - ly_sin;
+        self.offset[BRY] = ly_cos + lx2_sin;
+
+        let pw = page_w.max(1) as f32;
+        let ph = page_h.max(1) as f32;
+        let u = region.x as f32 / pw;
+        let v = (region.y + region.height) as f32 / ph;
+        let u2 = (region.x + region.width) as f32 / pw;
+        let v2 = region.y as f32 / ph;
+        if region.degrees == 90 {
+            self.uvs = [u, v2, u2, v2, u2, v, u, v];
+        } else {
+            self.uvs = [u, v, u, v2, u2, v2, u2, v];
+        }
+    }
+
+    /// The four world-space corner positions, in order BL, UL, UR, BR.
+    #[must_use]
+    pub fn compute_world_vertices(&self, bone: &Bone) -> [Vec2; 4] {
+        let (a, b, c, d) = (bone.a(), bone.b(), bone.c(), bone.d());
+        let (wx, wy) = (bone.world_x(), bone.world_y());
+        let mut out = [Vec2::ZERO; 4];
+        for (i, slot) in out.iter_mut().enumerate() {
+            let ox = self.offset[i * 2];
+            let oy = self.offset[i * 2 + 1];
+            *slot = Vec2::new(ox * a + oy * b + wx, ox * c + oy * d + wy);
+        }
+        out
+    }
+}
+
+/// How a mesh's vertices are bound to bones.
+#[derive(Debug, Clone)]
+pub enum MeshVertices {
+    /// Each vertex is `[x, y]` in the slot bone's local space.
+    Unweighted(Vec<f32>),
+    /// Weighted skinning. `bones` is, per vertex, `[count, boneIndex...]`;
+    /// `vertices` is, per influence, `[vx, vy, weight]`.
+    Weighted {
+        /// Per-vertex bone-influence layout: `[count, boneIndex...]`.
+        bones: Vec<usize>,
+        /// Per-influence bind data: `[vx, vy, weight]`.
+        vertices: Vec<f32>,
+    },
+}
+
+/// A textured mesh attachment.
+#[derive(Debug, Clone)]
+pub struct MeshAttachment {
+    /// Attachment name (the key within a skin).
+    pub name: String,
+    /// Atlas region name this draws.
+    pub path: String,
+    /// Per-vertex UVs (`2 * vertex_count` values).
+    pub uvs: Vec<f32>,
+    /// Triangle index list (triples into the vertex array).
+    pub triangles: Vec<u16>,
+    /// Tint color.
+    pub color: Color,
+    /// Number of vertices forming the convex hull (for clipping).
+    pub hull_length: usize,
+    /// Bind-pose vertices.
+    vertices: MeshVertices,
+}
+
+impl MeshAttachment {
+    /// A mesh attachment from its parts.
+    #[must_use]
+    pub fn new(
+        name: impl Into<String>,
+        path: impl Into<String>,
+        vertices: MeshVertices,
+        uvs: Vec<f32>,
+        triangles: Vec<u16>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            path: path.into(),
+            uvs,
+            triangles,
+            color: Color::WHITE,
+            hull_length: 0,
+            vertices,
+        }
+    }
+
+    /// Number of vertices in the mesh.
+    #[must_use]
+    pub fn vertex_count(&self) -> usize {
+        self.uvs.len() / 2
+    }
+
+    /// Compute world-space positions for every vertex. `slot_bone` is the index
+    /// of the bone the slot follows (used for unweighted meshes).
+    #[must_use]
+    pub fn compute_world_vertices(&self, skeleton: &Skeleton, slot_bone: usize) -> Vec<Vec2> {
+        let n = self.vertex_count();
+        let mut out = Vec::with_capacity(n);
+        match &self.vertices {
+            MeshVertices::Unweighted(v) => {
+                let Some(bone) = skeleton.bone(slot_bone) else {
+                    return out;
+                };
+                let (a, b, c, d) = (bone.a(), bone.b(), bone.c(), bone.d());
+                let (wx, wy) = (bone.world_x(), bone.world_y());
+                for i in 0..n {
+                    let vx = v[i * 2];
+                    let vy = v[i * 2 + 1];
+                    out.push(Vec2::new(vx * a + vy * b + wx, vx * c + vy * d + wy));
+                }
+            }
+            MeshVertices::Weighted { bones, vertices } => {
+                let mut bi = 0;
+                let mut vi = 0;
+                for _ in 0..n {
+                    let count = bones[bi];
+                    bi += 1;
+                    let mut wx = 0.0;
+                    let mut wy = 0.0;
+                    for _ in 0..count {
+                        let bone_index = bones[bi];
+                        bi += 1;
+                        let vx = vertices[vi];
+                        let vy = vertices[vi + 1];
+                        let weight = vertices[vi + 2];
+                        vi += 3;
+                        if let Some(bone) = skeleton.bone(bone_index) {
+                            wx += (vx * bone.a() + vy * bone.b() + bone.world_x()) * weight;
+                            wy += (vx * bone.c() + vy * bone.d() + bone.world_y()) * weight;
+                        }
+                    }
+                    out.push(Vec2::new(wx, wy));
+                }
+            }
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::{BoneData, SkeletonData};
+    use std::sync::Arc;
+
+    const EPS: f32 = 1e-3;
+
+    fn close(p: Vec2, x: f32, y: f32) -> bool {
+        (p.x - x).abs() < EPS && (p.y - y).abs() < EPS
+    }
+
+    fn one_bone_at(x: f32, y: f32) -> Skeleton {
+        let data = SkeletonData {
+            bones: vec![BoneData {
+                index: 0,
+                name: "root".into(),
+                position: Vec2::new(x, y),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut sk = Skeleton::new(Arc::new(data));
+        sk.update_world_transform();
+        sk
+    }
+
+    #[test]
+    fn region_quad_corners_center_on_the_bone() {
+        let sk = one_bone_at(100.0, 50.0);
+        let region = AtlasRegion {
+            name: "r".into(),
+            page: 0,
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 10,
+            degrees: 0,
+            offset_x: 0.0,
+            offset_y: 0.0,
+            original_width: 20,
+            original_height: 10,
+            index: -1,
+        };
+        let mut att = RegionAttachment::new("r", "r");
+        att.width = 20.0;
+        att.height = 10.0;
+        att.update(&region, 64, 64);
+        let v = att.compute_world_vertices(sk.bone(0).unwrap());
+        // 20x10 quad centered on (100,50): BL(90,45) UL(90,55) UR(110,55) BR(110,45).
+        assert!(close(v[0], 90.0, 45.0), "BL {:?}", v[0]);
+        assert!(close(v[1], 90.0, 55.0), "UL {:?}", v[1]);
+        assert!(close(v[2], 110.0, 55.0), "UR {:?}", v[2]);
+        assert!(close(v[3], 110.0, 45.0), "BR {:?}", v[3]);
+    }
+
+    #[test]
+    fn unweighted_mesh_follows_its_bone() {
+        let sk = one_bone_at(10.0, 20.0);
+        let mesh = MeshAttachment::new(
+            "m",
+            "m",
+            MeshVertices::Unweighted(vec![0.0, 0.0, 5.0, 0.0, 0.0, 5.0]),
+            vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+            vec![0, 1, 2],
+        );
+        let w = mesh.compute_world_vertices(&sk, 0);
+        // identity bone at (10,20): each local vertex offset by (10,20).
+        assert!(close(w[0], 10.0, 20.0));
+        assert!(close(w[1], 15.0, 20.0));
+        assert!(close(w[2], 10.0, 25.0));
+    }
+
+    #[test]
+    fn weighted_mesh_blends_two_bones() {
+        // Two roots at (0,0) and (100,0); a vertex weighted 50/50 lands at the
+        // midpoint of where each bone places its local origin.
+        let data = SkeletonData {
+            bones: vec![
+                BoneData {
+                    index: 0,
+                    name: "a".into(),
+                    ..Default::default()
+                },
+                BoneData {
+                    index: 1,
+                    name: "b".into(),
+                    position: Vec2::new(100.0, 0.0),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let mut sk = Skeleton::new(Arc::new(data));
+        sk.update_world_transform();
+        let mesh = MeshAttachment::new(
+            "m",
+            "m",
+            MeshVertices::Weighted {
+                bones: vec![2, 0, 1],            // 1 vertex, influenced by bones 0 and 1
+                vertices: vec![0.0, 0.0, 0.5, 0.0, 0.0, 0.5], // (0,0)w.5 via bone0; (0,0)w.5 via bone1
+            },
+            vec![0.0, 0.0],
+            vec![],
+        );
+        let w = mesh.compute_world_vertices(&sk, 0);
+        assert_eq!(w.len(), 1);
+        assert!(close(w[0], 50.0, 0.0), "midpoint {:?}", w[0]);
+    }
+}

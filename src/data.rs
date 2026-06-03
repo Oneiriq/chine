@@ -7,6 +7,9 @@
 
 use glam::Vec2;
 
+use crate::attach::Attachment;
+use crate::skin::Skin;
+
 /// An RGBA color with components in `[0, 1]`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Color {
@@ -153,6 +156,10 @@ pub struct SkeletonData {
     pub bones: Vec<BoneData>,
     /// Slots in setup-pose draw order (back to front).
     pub slots: Vec<SlotData>,
+    /// The base skin holding the skeleton's default attachments.
+    pub default_skin: Skin,
+    /// Named skins (character variants) that override or extend the default.
+    pub skins: Vec<Skin>,
 }
 
 impl SkeletonData {
@@ -166,6 +173,25 @@ impl SkeletonData {
     #[must_use]
     pub fn find_slot(&self, name: &str) -> Option<usize> {
         self.slots.iter().position(|s| s.name == name)
+    }
+
+    /// Find a named skin.
+    #[must_use]
+    pub fn find_skin(&self, name: &str) -> Option<&Skin> {
+        self.skins.iter().find(|s| s.name == name)
+    }
+
+    /// Resolve the attachment for `(slot, name)`: the active `skin` if it
+    /// defines it, otherwise the default skin.
+    #[must_use]
+    pub fn attachment<'a>(
+        &'a self,
+        slot: usize,
+        name: &str,
+        skin: Option<&'a Skin>,
+    ) -> Option<&'a Attachment> {
+        skin.and_then(|s| s.attachment(slot, name))
+            .or_else(|| self.default_skin.attachment(slot, name))
     }
 }
 

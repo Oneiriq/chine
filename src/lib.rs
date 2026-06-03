@@ -26,5 +26,7 @@
 #![warn(clippy::all)]
 
 pub mod atlas;
+pub mod attach;
 pub mod data;
 pub mod skel;
+pub mod skin;
