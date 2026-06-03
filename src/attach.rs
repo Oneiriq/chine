@@ -64,6 +64,8 @@ pub struct RegionAttachment {
     offset: [f32; 8],
     /// Eight UVs in the same corner order, computed by [`Self::update`].
     pub uvs: [f32; 8],
+    /// Atlas page index (texture), set when the atlas is bound.
+    pub page: usize,
 }
 
 impl RegionAttachment {
@@ -83,6 +85,7 @@ impl RegionAttachment {
             color: Color::WHITE,
             offset: [0.0; 8],
             uvs: [0.0; 8],
+            page: 0,
         }
     }
 
@@ -194,6 +197,8 @@ pub struct MeshAttachment {
     pub hull_length: usize,
     /// Bind-pose vertices.
     vertices: MeshVertices,
+    /// Atlas page index (texture), set when the atlas is bound.
+    pub page: usize,
 }
 
 impl MeshAttachment {
@@ -214,6 +219,7 @@ impl MeshAttachment {
             color: Color::WHITE,
             hull_length: 0,
             vertices,
+            page: 0,
         }
     }
 
@@ -228,6 +234,21 @@ impl MeshAttachment {
     #[must_use]
     pub fn compute_world_vertices(&self, skeleton: &Skeleton, slot_bone: usize) -> Vec<Vec2> {
         compute_vertices(&self.vertices, self.vertex_count(), skeleton, slot_bone)
+    }
+
+    /// Remap the mesh's `[0, 1]` region-relative UVs into page space using the
+    /// bound atlas region. (Rotated regions are a follow-up.)
+    pub fn remap_uvs(&mut self, region: &AtlasRegion, page_w: u32, page_h: u32) {
+        if region.degrees == 90 {
+            return;
+        }
+        let (pw, ph) = (page_w.max(1) as f32, page_h.max(1) as f32);
+        let (rx, ry) = (region.x as f32, region.y as f32);
+        let (rw, rh) = (region.width as f32, region.height as f32);
+        for i in 0..self.vertex_count() {
+            self.uvs[i * 2] = (rx + self.uvs[i * 2] * rw) / pw;
+            self.uvs[i * 2 + 1] = (ry + self.uvs[i * 2 + 1] * rh) / ph;
+        }
     }
 }
 

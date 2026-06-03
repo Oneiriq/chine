@@ -32,5 +32,6 @@ pub mod constraint;
 pub mod data;
 #[cfg(feature = "json")]
 pub mod load;
+pub mod render;
 pub mod skel;
 pub mod skin;

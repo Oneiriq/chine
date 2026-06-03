@@ -47,6 +47,11 @@ impl Skin {
     pub fn is_empty(&self) -> bool {
         self.attachments.is_empty()
     }
+
+    /// Mutable iterator over every attachment, for binding to an atlas.
+    pub(crate) fn attachments_mut(&mut self) -> impl Iterator<Item = &mut Attachment> {
+        self.attachments.values_mut().flat_map(|m| m.values_mut())
+    }
 }
 
 #[cfg(test)]
