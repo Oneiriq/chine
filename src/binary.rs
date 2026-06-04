@@ -1150,10 +1150,24 @@ fn read_animation(
         timelines.push(Timeline::DrawOrder(tl));
     }
 
-    // Draw-order folder timelines (new in Spine 4.3): not yet parsed. Stop if
-    // present.
-    if r.var_usize() != 0 {
-        return Animation::new(name, duration, timelines);
+    // Draw-order folder timelines (new in Spine 4.3): folder-scoped slot
+    // reorders. chine has no folder timeline, so these are consumed to keep the
+    // stream aligned.
+    let folder_count = r.var_usize();
+    for _ in 0..folder_count {
+        let folder_slot_count = r.var_usize();
+        for _ in 0..folder_slot_count {
+            r.var_usize();
+        }
+        let key_count = r.var_usize();
+        for _ in 0..key_count {
+            r.float();
+            let change_count = r.var_usize();
+            for _ in 0..change_count {
+                r.var_usize();
+                r.var_usize();
+            }
+        }
     }
 
     // Event timeline: keyframes that fire named events with per-key overrides.
