@@ -13,7 +13,7 @@
 
 use glam::Vec2;
 
-use crate::data::{BoneData, Inherit, SkeletonData};
+use crate::data::{BlendMode, BoneData, Color, Inherit, SkeletonData, SlotData};
 
 /// An error from binary skeleton loading.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,8 +147,8 @@ fn inherit_from(ordinal: usize) -> Inherit {
 
 /// Parse a Spine `.skel` binary export into a [`SkeletonData`].
 ///
-/// The header and bone sections are read; further sections are added as the
-/// loader grows. A truncated stream returns [`BinaryError::Truncated`].
+/// The header, bone, and slot sections are read; further sections are added as
+/// the loader grows. A truncated stream returns [`BinaryError::Truncated`].
 ///
 /// # Errors
 /// Returns [`BinaryError::Truncated`] if the data ends mid-skeleton.
@@ -176,9 +176,9 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
     // String table: names (attachments, events, ...) the later sections refer to
     // by index. Consumed here; used once those sections are read.
     let string_count = r.var_usize();
-    for _ in 0..string_count {
-        r.string();
-    }
+    let strings: Vec<String> = (0..string_count)
+        .map(|_| r.string().unwrap_or_default())
+        .collect();
 
     // Bones: hierarchy order, the root first (and parentless).
     let bone_count = r.var_usize();
@@ -220,10 +220,74 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
         });
     }
 
+    // Slots: draw order, each with a setup color, an optional dark (two-color)
+    // tint, and the setup attachment (referenced into the string table).
+    let slot_count = r.var_usize();
+    for index in 0..slot_count {
+        let name = r.string().unwrap_or_default();
+        let bone = r.var_usize();
+        let color = color_rgba(r.u32());
+        let dark = r.u32();
+        let dark_color = (dark != 0xFFFF_FFFF).then(|| color_rgb(dark));
+        let attachment = string_ref(&mut r, &strings);
+        let blend = blend_from(r.var_usize());
+        if nonessential {
+            let _visible = r.bool();
+        }
+        data.slots.push(SlotData {
+            index,
+            name,
+            bone,
+            color,
+            dark_color,
+            attachment,
+            blend,
+        });
+    }
+
     if r.overran() {
         return Err(BinaryError::Truncated);
     }
     Ok(data)
+}
+
+/// RGBA8888 (`0xRRGGBBAA`) to a [`Color`].
+fn color_rgba(v: u32) -> Color {
+    Color::new(
+        ((v >> 24) & 0xff) as f32 / 255.0,
+        ((v >> 16) & 0xff) as f32 / 255.0,
+        ((v >> 8) & 0xff) as f32 / 255.0,
+        (v & 0xff) as f32 / 255.0,
+    )
+}
+
+/// RGB888 (`0x00RRGGBB`, opaque) to a [`Color`].
+fn color_rgb(v: u32) -> Color {
+    Color::new(
+        ((v >> 16) & 0xff) as f32 / 255.0,
+        ((v >> 8) & 0xff) as f32 / 255.0,
+        (v & 0xff) as f32 / 255.0,
+        1.0,
+    )
+}
+
+/// Map a Spine blend-mode ordinal to [`BlendMode`].
+fn blend_from(ordinal: usize) -> BlendMode {
+    match ordinal {
+        1 => BlendMode::Additive,
+        2 => BlendMode::Multiply,
+        3 => BlendMode::Screen,
+        _ => BlendMode::Normal,
+    }
+}
+
+/// Read a string-table reference: a `var_uint` index where `0` is `None` and `i`
+/// is `strings[i - 1]`.
+fn string_ref(r: &mut BinaryReader, strings: &[String]) -> Option<String> {
+    match r.var_usize() {
+        0 => None,
+        i => strings.get(i - 1).cloned(),
+    }
 }
 
 #[cfg(test)]
@@ -284,6 +348,7 @@ mod tests {
         }
         b.push(3); // inherit = NoScale
         b.push(0); // skinRequired = false
+        b.push(0); // slot count = 0
 
         let data = from_binary(&b).unwrap();
         assert_eq!(data.spine_version.as_deref(), Some("4.3.00"));
@@ -319,5 +384,20 @@ mod tests {
                 assert!(p < data.bones.len(), "bone {i} bad parent {p}");
             }
         }
+
+        // Slots: draw order back-to-front, each on a valid bone.
+        assert_eq!(data.slots.len(), 32);
+        assert_eq!(data.slots[0].name, "foot-back");
+        for s in &data.slots {
+            assert!(!s.name.is_empty());
+            assert!(
+                s.bone < data.bones.len(),
+                "slot {} bad bone {}",
+                s.name,
+                s.bone
+            );
+        }
+        // Setup attachments resolve through the string table.
+        assert!(data.slots.iter().any(|s| s.attachment.is_some()));
     }
 }
