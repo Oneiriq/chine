@@ -21,6 +21,7 @@ use crate::attach::{
     MeshVertices, PathAttachment, PointAttachment, RegionAttachment,
 };
 use crate::constraint::ik::IkConstraintData;
+use crate::constraint::slider::{SliderData, SliderProperty};
 use crate::constraint::ScaleYMode;
 use crate::data::{BlendMode, BoneData, Color, Inherit, SkeletonData, SlotData};
 use crate::event::EventData;
@@ -269,17 +270,21 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
         });
     }
 
-    // IK constraints. Spine 4.3 packs the flags into one byte and stores only
-    // non-default mix/softness; there is no explicit order (it is the read
-    // order across all constraint types).
-    // Constraints are one list; each begins with a name and a type byte
-    // (0 = IK). This WIP rig has only IK constraints.
+    // Constraints are one typed list. Each begins with a name and a one-byte
+    // type (Spine 4.3: IK=0, path=1, transform=2, physics=3, slider=4); there
+    // is no explicit order (it is the read order across all types). IK packs
+    // its flags into one byte and stores only non-default mix/softness.
     let constraint_count = r.var_usize();
     for order in 0..constraint_count {
         let name = r.string().unwrap_or_default();
         let kind = r.byte();
         match kind {
             0 => data.ik_constraints.push(parse_ik(&mut r, name, order)),
+            4 => data
+                .sliders
+                .push(parse_slider(&mut r, name, order, nonessential)),
+            // Path / transform / physics binary layouts are known but not yet
+            // parsed; stop at the first one (it would end this list anyway).
             _ => break,
         }
     }
@@ -322,12 +327,10 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
     let animation_count = r.var_usize();
     for _ in 0..animation_count {
         let aname = r.string().unwrap_or_default();
-        let anim = read_animation(&mut r, aname);
+        let anim = read_animation(&mut r, aname, nonessential);
         data.animations.push(Arc::new(anim));
     }
 
-    // A trailing file marker may remain after the last animation; it is left
-    // unread (and is harmless - `remaining()` simply stays non-zero).
     if r.overran() {
         return Err(BinaryError::Truncated);
     }
@@ -376,6 +379,53 @@ fn parse_ik(r: &mut BinaryReader, name: String, order: usize) -> IkConstraintDat
         compress: flags & 8 != 0,
         stretch: flags & 16 != 0,
     }
+}
+
+/// Parse one slider constraint (Spine 4.3 bit-packed layout). chine loads at
+/// scale 1, so the property scale factor (applied to X / Y) is the identity.
+fn parse_slider(r: &mut BinaryReader, name: String, order: usize, nonessential: bool) -> SliderData {
+    let mut data = SliderData {
+        name,
+        order,
+        ..Default::default()
+    };
+    let flags = r.byte();
+    data.skin_required = flags & 1 != 0;
+    data.looping = flags & 2 != 0;
+    data.additive = flags & 4 != 0;
+    if flags & 8 != 0 {
+        let value = r.float();
+        // When nonessential, this float is the editor maximum; otherwise it is
+        // the setup-pose slider time.
+        if nonessential && flags & 64 != 0 {
+            data.max = value;
+        } else {
+            data.time = value;
+        }
+    }
+    if flags & 16 != 0 {
+        data.mix = if flags & 32 != 0 { r.float() } else { 1.0 };
+    }
+    if flags & 64 != 0 {
+        data.local = flags & 128 != 0;
+        data.bone = Some(r.var_usize());
+        let property_offset = r.float();
+        match r.byte() {
+            0 => data.property = Some(SliderProperty::Rotate),
+            1 => data.property = Some(SliderProperty::X),
+            2 => data.property = Some(SliderProperty::Y),
+            3 => data.property = Some(SliderProperty::ScaleX),
+            4 => data.property = Some(SliderProperty::ScaleY),
+            5 => data.property = Some(SliderProperty::ShearY),
+            // An unknown property ordinal stops this constraint's property
+            // block (matching the reference's `continue`).
+            _ => return data,
+        }
+        data.property_offset = property_offset;
+        data.offset = r.float();
+        data.scale = r.float();
+    }
+    data
 }
 
 /// RGBA8888 (`0xRRGGBBAA`) to a [`Color`].
@@ -665,17 +715,19 @@ fn axis((tl, d): (BoneTimeline, f32), a: BoneAxis) -> (Timeline, f32) {
 
 /// Parse one animation. Built group by group; on an unhandled timeline type the
 /// parse stops early and returns what it has (later sections are left unread).
-fn read_animation(r: &mut BinaryReader, name: String) -> Animation {
+fn read_animation(r: &mut BinaryReader, name: String, nonessential: bool) -> Animation {
     let _timeline_count = r.var_usize();
     let mut timelines = Vec::new();
     let mut duration = 0.0_f32;
 
     // Slot timelines (not yet handled): stop if any are present.
-    if r.var_usize() != 0 {
+    let slot_groups = r.var_usize();
+    if slot_groups != 0 {
         return Animation::new(name, duration, timelines);
     }
 
-    // Bone timelines.
+    // Bone timelines: one group per animated bone, each with one or more typed
+    // timelines (rotate / translate / scale / shear and their single axes).
     let bone_groups = r.var_usize();
     for _ in 0..bone_groups {
         let bone = r.var_usize();
@@ -710,13 +762,19 @@ fn read_animation(r: &mut BinaryReader, name: String) -> Animation {
         }
     }
 
+    // A nonessential export appends the animation's editor color (RGBA8888).
+    if nonessential {
+        let _color = r.u32();
+    }
     Animation::new(name, duration, timelines)
 }
 
-/// Read a one-value bone timeline (rotate / single axis): per-frame time + value
-/// with a stepped / linear / Bezier curve between frames.
+/// Read a one-value bone timeline (rotate / single axis). The stream gives the
+/// Bezier-segment count first (curve storage), then per-frame time + value with
+/// a stepped / linear / Bezier curve between frames.
 fn read_bone_timeline1(r: &mut BinaryReader, bone: usize, frames: usize) -> (BoneTimeline, f32) {
-    let mut tl = BoneTimeline::one_value(bone, frames, frames);
+    let bezier_count = r.var_usize();
+    let mut tl = BoneTimeline::one_value(bone, frames, bezier_count);
     let mut bezier = 0;
     let mut duration = 0.0_f32;
     let mut time = r.float();
@@ -750,10 +808,12 @@ fn read_bone_timeline1(r: &mut BinaryReader, bone: usize, frames: usize) -> (Bon
     (tl, duration)
 }
 
-/// Read a two-value bone timeline (translate / scale / shear): per frame a time
-/// and two values, with two Bezier segments per curved frame.
+/// Read a two-value bone timeline (translate / scale / shear). The stream gives
+/// the Bezier-segment count first, then per frame a time and two values, with
+/// two Bezier segments per curved frame.
 fn read_bone_timeline2(r: &mut BinaryReader, bone: usize, frames: usize) -> (BoneTimeline, f32) {
-    let mut tl = BoneTimeline::two_value(bone, frames, frames * 2);
+    let bezier_count = r.var_usize();
+    let mut tl = BoneTimeline::two_value(bone, frames, bezier_count);
     let mut bezier = 0;
     let mut duration = 0.0_f32;
     let mut time = r.float();
@@ -943,10 +1003,41 @@ mod tests {
         assert_eq!(data.animations[0].name(), "animation");
     }
 
+    // Validates the binary loader against a complete Spine 4.3 project (the
+    // diamond rig) when the local fixture is present; skips otherwise. Its
+    // non-bone animation timelines are still being added, so this asserts the
+    // structural pieces that are wired up: bones, slots, the new 4.3 slider
+    // constraint, and the first (bone-only) animation parsing in full.
+    #[test]
+    fn parses_diamond_rig() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/data/diamond-pro.skel");
+        let Ok(bytes) = std::fs::read(path) else {
+            return;
+        };
+        let data = from_binary(&bytes).expect("diamond parses without overrun");
+        assert_eq!(data.bones.len(), 8);
+        assert_eq!(data.slots.len(), 30);
+
+        // The new 4.3 slider constraint ("rotation") drives a bone property.
+        assert_eq!(data.sliders.len(), 1);
+        let slider = &data.sliders[0];
+        assert_eq!(slider.name, "rotation");
+        assert!(slider.bone.is_some());
+        assert!(slider.property.is_some());
+
+        // Eight animations; the first ("appear") is bone-only and fully parses
+        // (a non-zero duration confirms its bone timelines were read).
+        assert_eq!(data.animations.len(), 8);
+        assert_eq!(data.animations[0].name(), "appear");
+        assert!(data.animations[0].duration() > 0.0);
+    }
+
     #[test]
     fn reads_a_one_value_bone_timeline() {
-        // Two rotate frames (0,0) and (1,90) with a linear curve between them.
+        // Bezier count 0, then two rotate frames (0,0) and (1,90) with a linear
+        // curve between them.
         let mut b = Vec::new();
+        b.push(0); // bezier-segment count = 0
         for v in [0.0_f32, 0.0, 1.0, 90.0] {
             b.extend_from_slice(&v.to_be_bytes());
         }

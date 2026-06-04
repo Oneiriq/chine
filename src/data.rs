@@ -14,6 +14,7 @@ use crate::attach::Attachment;
 use crate::constraint::ik::IkConstraintData;
 use crate::constraint::path::PathConstraintData;
 use crate::constraint::physics::PhysicsConstraintData;
+use crate::constraint::slider::SliderData;
 use crate::constraint::transform::TransformConstraintData;
 use crate::event::EventData;
 use crate::skin::Skin;
@@ -181,6 +182,8 @@ pub struct SkeletonData {
     pub path_constraints: Vec<PathConstraintData>,
     /// Physics constraints, applied after FK by [`crate::skel::Skeleton`].
     pub physics_constraints: Vec<PhysicsConstraintData>,
+    /// Slider constraints (Spine 4.3); loaded but not yet applied at runtime.
+    pub sliders: Vec<SliderData>,
     /// Named events that animations can fire.
     pub events: Vec<EventData>,
 }

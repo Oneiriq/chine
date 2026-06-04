@@ -8,11 +8,12 @@
 //! an applied pose; chine collapses them by re-applying the pose every frame).
 //!
 //! Each constraint kind lives in its own submodule: [`ik`], [`transform`],
-//! [`path`], and [`physics`].
+//! [`path`], [`physics`], and [`slider`].
 
 pub mod ik;
 pub mod path;
 pub mod physics;
+pub mod slider;
 pub mod transform;
 
 /// How a constraint adjusts Y scale when stretching or compressing
