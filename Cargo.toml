@@ -23,3 +23,8 @@ serde_json = { version = "1", optional = true }
 [lints.rust]
 # `skel_fixtures` is set by build.rs when the gitignored Spine rigs are present.
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(skel_fixtures)'] }
+
+# The inspect example loads a `.json` export, so it needs the `json` feature.
+[[example]]
+name = "inspect"
+required-features = ["json"]
