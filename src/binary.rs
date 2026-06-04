@@ -16,8 +16,8 @@ use std::sync::Arc;
 use glam::Vec2;
 
 use crate::anim::{
-    Animation, AttachmentTimeline, BoneAxis, BoneTimeline, ConstraintTimeline, DeformTimeline,
-    EventTimeline, Timeline,
+    compute_draw_order, Animation, AttachmentTimeline, BoneAxis, BoneTimeline, ConstraintTimeline,
+    DeformTimeline, DrawOrderTimeline, EventTimeline, Timeline,
 };
 use crate::attach::{
     Attachment, BoundingBoxAttachment, ClippingAttachment, LinkedMeshAttachment, MeshAttachment,
@@ -859,11 +859,16 @@ fn read_animation(
         }
     }
 
-    // Draw order and draw-order folder timelines: not yet parsed. Stop if any
-    // appear (the folder section is new in Spine 4.3).
-    if r.var_usize() != 0 {
-        return Animation::new(name, duration, timelines);
+    // Draw order timeline: per keyframe, a slot permutation.
+    let draw_order_count = r.var_usize();
+    if draw_order_count != 0 {
+        let (tl, d) = read_draw_order_timeline(r, draw_order_count, data.slots.len());
+        duration = duration.max(d);
+        timelines.push(Timeline::DrawOrder(tl));
     }
+
+    // Draw-order folder timelines (new in Spine 4.3): not yet parsed. Stop if
+    // present.
     if r.var_usize() != 0 {
         return Animation::new(name, duration, timelines);
     }
@@ -1214,6 +1219,38 @@ fn read_slot_attachment_timeline(
     (AttachmentTimeline::new(slot, times, names), duration)
 }
 
+/// Read a draw-order timeline: per frame a time and a set of slot moves (each a
+/// slot index and an offset), resolved into a full slot permutation. A frame
+/// with no moves keeps the setup order.
+fn read_draw_order_timeline(
+    r: &mut BinaryReader,
+    frames: usize,
+    slot_count: usize,
+) -> (DrawOrderTimeline, f32) {
+    let mut times = Vec::with_capacity(frames);
+    let mut orders = Vec::with_capacity(frames);
+    let mut duration = 0.0_f32;
+    for _ in 0..frames {
+        let time = r.float();
+        let change_count = r.var_usize();
+        let mut offsets: Vec<(usize, i32)> = Vec::with_capacity(change_count);
+        for _ in 0..change_count {
+            let slot = r.var_usize();
+            let offset = r.var_usize() as i32;
+            offsets.push((slot, offset));
+        }
+        let order = if offsets.is_empty() {
+            (0..slot_count).collect()
+        } else {
+            compute_draw_order(slot_count, &mut offsets)
+        };
+        times.push(time);
+        orders.push(order);
+        duration = duration.max(time);
+    }
+    (DrawOrderTimeline::new(times, orders), duration)
+}
+
 /// Read an event timeline: per frame a time and the fired event. Each event's
 /// base values come from the skeleton's [`EventData`] (by index) and are
 /// overridden by the keyframe; volume / balance are only stored when the event
@@ -1546,5 +1583,48 @@ mod tests {
         assert_eq!(sk.events().len(), 1);
         assert_eq!(sk.events()[0].name, "footstep");
         assert_eq!(sk.events()[0].int_value, 7);
+    }
+
+    #[test]
+    fn reads_a_draw_order_timeline() {
+        fn slot(index: usize, name: &str) -> SlotData {
+            SlotData {
+                index,
+                name: name.into(),
+                bone: 0,
+                color: Color::WHITE,
+                dark_color: None,
+                attachment: None,
+                blend: BlendMode::Normal,
+            }
+        }
+        // Three slots; one keyframe at 0.5 moves slot 0 back by 2 (to the end).
+        let data = SkeletonData {
+            bones: vec![BoneData {
+                index: 0,
+                name: "root".into(),
+                ..Default::default()
+            }],
+            slots: vec![slot(0, "a"), slot(1, "b"), slot(2, "c")],
+            ..Default::default()
+        };
+        let mut b = Vec::new();
+        b.extend_from_slice(&0.5_f32.to_be_bytes()); // time
+        b.push(1); // change count
+        b.push(0); // slot index
+        b.push(2); // offset
+        let mut r = BinaryReader::new(&b);
+        let (tl, dur) = read_draw_order_timeline(&mut r, 1, 3);
+        assert!((dur - 0.5).abs() < 1e-6);
+        assert!(!r.overran());
+
+        let anim = Animation::new("reorder", dur, vec![Timeline::DrawOrder(tl)]);
+        let mut sk = crate::skel::Skeleton::new(std::sync::Arc::new(data));
+        let mut state = crate::anim::AnimationState::new();
+        state.set_animation(std::sync::Arc::new(anim), false);
+        state.update(1.0);
+        state.apply(&mut sk);
+        // Slot 0 moved to the end: the order becomes b, c, a.
+        assert_eq!(sk.draw_order(), &[1, 2, 0]);
     }
 }

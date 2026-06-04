@@ -18,9 +18,9 @@ use glam::Vec2;
 use serde_json::Value;
 
 use crate::anim::{
-    Animation, AttachmentTimeline, BoneAxis, BoneTimeline, ConstraintTimeline, DeformTimeline,
-    DrawOrderTimeline, EventTimeline, PhysicsProperty, PhysicsResetTimeline, Timeline,
-    GLOBAL_PHYSICS,
+    compute_draw_order, Animation, AttachmentTimeline, BoneAxis, BoneTimeline, ConstraintTimeline,
+    DeformTimeline, DrawOrderTimeline, EventTimeline, PhysicsProperty, PhysicsResetTimeline,
+    Timeline, GLOBAL_PHYSICS,
 };
 use crate::attach::{
     Attachment, BoundingBoxAttachment, ClippingAttachment, LinkedMeshAttachment, MeshAttachment,
@@ -1172,40 +1172,6 @@ fn read_draw_order(k: &Value, slot_count: usize, data: &SkeletonData) -> Vec<usi
         return (0..slot_count).collect();
     }
     compute_draw_order(slot_count, &mut offsets)
-}
-
-/// Compute a draw order from slot offsets, mirroring Spine: each listed slot
-/// moves by its offset; the rest keep their relative order.
-fn compute_draw_order(slot_count: usize, offsets: &mut [(usize, i32)]) -> Vec<usize> {
-    offsets.sort_by_key(|(slot, _)| *slot);
-    let mut draw_order = vec![usize::MAX; slot_count];
-    let mut unchanged = vec![0usize; slot_count.saturating_sub(offsets.len())];
-    let mut original_index = 0;
-    let mut unchanged_index = 0;
-    for &(slot_index, offset) in offsets.iter() {
-        while original_index != slot_index && original_index < slot_count {
-            unchanged[unchanged_index] = original_index;
-            unchanged_index += 1;
-            original_index += 1;
-        }
-        let pos = original_index as i32 + offset;
-        if (0..slot_count as i32).contains(&pos) {
-            draw_order[pos as usize] = original_index;
-        }
-        original_index += 1;
-    }
-    while original_index < slot_count {
-        unchanged[unchanged_index] = original_index;
-        unchanged_index += 1;
-        original_index += 1;
-    }
-    for i in (0..slot_count).rev() {
-        if draw_order[i] == usize::MAX && unchanged_index > 0 {
-            unchanged_index -= 1;
-            draw_order[i] = unchanged[unchanged_index];
-        }
-    }
-    draw_order
 }
 
 /// Read an animation event timeline: each keyframe's event, resolving its value
