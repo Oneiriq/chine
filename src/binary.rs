@@ -2293,6 +2293,34 @@ mod tests {
         assert!((tc.properties[0].to[0].scale - 2.0).abs() < 1e-6);
     }
 
+    // Binds the diamond rig against its atlas and confirms a sequenced
+    // attachment resolved its frames to distinct UVs (the per-frame regions
+    // were found, i.e. the frame path names match the atlas). Skips if the
+    // local fixtures are absent.
+    #[test]
+    fn diamond_sequence_binds_distinct_frames() {
+        let skel = concat!(env!("CARGO_MANIFEST_DIR"), "/data/diamond-pro.skel");
+        let atlas = concat!(env!("CARGO_MANIFEST_DIR"), "/data/diamond-pro.atlas");
+        let (Ok(bytes), Ok(atlas_text)) = (std::fs::read(skel), std::fs::read_to_string(atlas))
+        else {
+            return;
+        };
+        let mut data = from_binary(&bytes).unwrap();
+        let atlas = crate::atlas::Atlas::parse(&atlas_text);
+        crate::render::bind_atlas(&mut data, &atlas);
+
+        let distinct = data.default_skin.iter().any(|(_, _, att)| {
+            let seq = match att {
+                Attachment::Region(r) => r.sequence.as_ref(),
+                Attachment::Mesh(m) => m.sequence.as_ref(),
+                _ => None,
+            };
+            seq.and_then(|s| Some((s.frame(0)?.0.to_vec(), s.frame(1)?.0.to_vec())))
+                .is_some_and(|(a, b)| a != b)
+        });
+        assert!(distinct, "a sequenced attachment should bind distinct frame UVs");
+    }
+
     #[test]
     fn applies_a_sequence_timeline() {
         use crate::anim::SequenceTimeline;
