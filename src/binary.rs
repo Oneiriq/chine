@@ -1881,6 +1881,7 @@ mod tests {
 
     // Validates the parser against a real Spine 4.3 `.skel` when the local
     // fixture is present (it is not committed); skips cleanly otherwise.
+    #[cfg_attr(not(skel_fixtures), ignore = "requires the gitignored Spine fixtures in data/")]
     #[test]
     fn parses_real_skel_header_and_bones() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/data/Spine.skel");
@@ -1956,6 +1957,7 @@ mod tests {
     // non-bone animation timelines are still being added, so this asserts the
     // structural pieces that are wired up: bones, slots, the new 4.3 slider
     // constraint, and the first (bone-only) animation parsing in full.
+    #[cfg_attr(not(skel_fixtures), ignore = "requires the gitignored Spine fixtures in data/")]
     #[test]
     fn parses_diamond_rig() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/data/diamond-pro.skel");
@@ -2001,6 +2003,7 @@ mod tests {
     // The "disappear" animation deforms the diamond mesh; loading it from binary
     // must build a real deform timeline (not silently fall back to consuming the
     // bytes). Playing it populates a slot's deform buffer.
+    #[cfg_attr(not(skel_fixtures), ignore = "requires the gitignored Spine fixtures in data/")]
     #[test]
     fn diamond_deform_timeline_applies() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/data/diamond-pro.skel");
@@ -2033,6 +2036,7 @@ mod tests {
     // Exercises the slider constraint on the real rig: playing an animation and
     // updating world transforms runs the slider, which scrubs the "rotation"
     // animation from its bone. This must pose the rig without panicking.
+    #[cfg_attr(not(skel_fixtures), ignore = "requires the gitignored Spine fixtures in data/")]
     #[test]
     fn diamond_slider_runs() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/data/diamond-pro.skel");
@@ -2369,6 +2373,7 @@ mod tests {
     // attachment resolved its frames to distinct UVs (the per-frame regions
     // were found, i.e. the frame path names match the atlas). Skips if the
     // local fixtures are absent.
+    #[cfg_attr(not(skel_fixtures), ignore = "requires the gitignored Spine fixtures in data/")]
     #[test]
     fn diamond_sequence_binds_distinct_frames() {
         let skel = concat!(env!("CARGO_MANIFEST_DIR"), "/data/diamond-pro.skel");
@@ -2397,6 +2402,7 @@ mod tests {
     // render) and confirms it produces well-formed draw commands: each carries
     // geometry with one UV pair per vertex, in-range triangle indices, and a
     // real atlas page. Skips if the local fixtures are absent.
+    #[cfg_attr(not(skel_fixtures), ignore = "requires the gitignored Spine fixtures in data/")]
     #[test]
     fn diamond_renders_end_to_end() {
         let skel = concat!(env!("CARGO_MANIFEST_DIR"), "/data/diamond-pro.skel");

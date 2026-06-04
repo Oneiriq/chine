@@ -19,3 +19,7 @@ binary = []
 glam = "0.33"
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
+
+[lints.rust]
+# `skel_fixtures` is set by build.rs when the gitignored Spine rigs are present.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(skel_fixtures)'] }
