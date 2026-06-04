@@ -201,25 +201,63 @@ pub(crate) struct DeformTimeline {
     setup: Vec<f32>,
     times: Vec<f32>,
     frames: Vec<Vec<f32>>,
+    curve: Curve,
 }
 
 impl DeformTimeline {
-    /// A deform timeline for `slot`/`attachment` with setup vertices and the
-    /// per-keyframe offset frames.
+    /// A deform timeline for `slot`/`attachment` with setup vertices, the
+    /// per-keyframe offset frames, and room for `bezier_count` Bezier segments.
     pub(crate) fn new(
         slot: usize,
         attachment: String,
         setup: Vec<f32>,
         times: Vec<f32>,
         frames: Vec<Vec<f32>>,
+        bezier_count: usize,
     ) -> Self {
+        let mut curve = Curve::new(times.len(), bezier_count, 2);
+        for (i, &t) in times.iter().enumerate() {
+            curve.set_frame1(i, t, 0.0);
+        }
         Self {
             slot,
             attachment,
             setup,
             times,
             frames,
+            curve,
         }
+    }
+
+    /// Mark `frame` as stepped (the deform snaps to the earlier keyframe).
+    pub(crate) fn set_stepped(&mut self, frame: usize) {
+        self.curve.set_stepped(frame);
+    }
+
+    /// Store a Bezier segment driving the interpolation percent at `frame`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn set_bezier(
+        &mut self,
+        bezier: usize,
+        frame: usize,
+        value: usize,
+        time1: f32,
+        value1: f32,
+        cx1: f32,
+        cy1: f32,
+        cx2: f32,
+        cy2: f32,
+        time2: f32,
+        value2: f32,
+    ) {
+        self.curve.set_bezier(
+            bezier, frame, value, time1, value1, cx1, cy1, cx2, cy2, time2, value2,
+        );
+    }
+
+    /// The curve-aware interpolation percent at `time`.
+    fn percent(&self, time: f32) -> f32 {
+        self.curve.percent(time)
     }
 }
 
@@ -1178,34 +1216,31 @@ fn apply_deform(t: &DeformTimeline, skel: &mut Skeleton, time: f32, alpha: f32, 
         }
         return;
     }
-    let offset = interp_deform(&t.times, &t.frames, time);
+    let offset = interp_deform(t, time);
     slot.deform.resize(n, 0.0);
     for (i, d) in slot.deform.iter_mut().enumerate() {
         *d = t.setup[i] + offset.get(i).copied().unwrap_or(0.0) * alpha;
     }
 }
 
-/// Linearly interpolate the deform offset frames at `time`.
-fn interp_deform(times: &[f32], frames: &[Vec<f32>], time: f32) -> Vec<f32> {
+/// Interpolate the deform offset frames at `time`, using the timeline's curve
+/// (stepped / linear / Bezier) for the interpolation percent.
+fn interp_deform(t: &DeformTimeline, time: f32) -> Vec<f32> {
+    let times = &t.times;
     let last = times.len() - 1;
     if time >= times[last] {
-        return frames[last].clone();
+        return t.frames[last].clone();
     }
     let i = search_step(times, time);
-    let (t0, t1) = (times[i], times[i + 1]);
-    let alpha = if t1 > t0 {
-        (time - t0) / (t1 - t0)
-    } else {
-        0.0
-    };
-    let a = &frames[i];
-    let b = &frames[i + 1];
+    let pct = t.percent(time);
+    let a = &t.frames[i];
+    let b = &t.frames[i + 1];
     let n = a.len().max(b.len());
     let mut out = vec![0.0; n];
     for (j, v) in out.iter_mut().enumerate() {
         let av = a.get(j).copied().unwrap_or(0.0);
         let bv = b.get(j).copied().unwrap_or(0.0);
-        *v = av + (bv - av) * alpha;
+        *v = av + (bv - av) * pct;
     }
     out
 }

@@ -679,20 +679,28 @@ fn parse_animation(name: &str, anim: &Value, data: &SkeletonData) -> Result<Anim
                         Some(v) => v.to_vec(),
                         None => vec![0.0; frame_len],
                     };
-                    let mut times = Vec::with_capacity(keys.len());
-                    let mut frames = Vec::with_capacity(keys.len());
+                    let n = keys.len();
+                    let mut times = Vec::with_capacity(n);
+                    let mut frames = Vec::with_capacity(n);
                     for k in keys {
                         times.push(f(k, "time"));
                         frames.push(read_deform_frame(k, frame_len));
                     }
                     duration = duration.max(times.last().copied().unwrap_or(0.0));
-                    timelines.push(Timeline::Deform(DeformTimeline::new(
-                        slot_idx,
-                        att_name.clone(),
-                        setup,
-                        times,
-                        frames,
-                    )));
+                    let mut tl =
+                        DeformTimeline::new(slot_idx, att_name.clone(), setup, times, frames, n);
+                    let mut bezier = 0;
+                    let mut frame = 0;
+                    while frame + 1 < n {
+                        if let Some(curve) = keys[frame].get("curve") {
+                            let time = f(&keys[frame], "time");
+                            let time2 = f(&keys[frame + 1], "time");
+                            bezier =
+                                read_curve(curve, &mut tl, bezier, frame, 0, time, time2, 0.0, 1.0);
+                        }
+                        frame += 1;
+                    }
+                    timelines.push(Timeline::Deform(tl));
                 }
             }
         }
@@ -812,6 +820,31 @@ impl CurveBuilder for BoneTimeline {
 }
 
 impl CurveBuilder for ConstraintTimeline {
+    fn stepped(&mut self, frame: usize) {
+        self.set_stepped(frame);
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn bezier(
+        &mut self,
+        bezier: usize,
+        frame: usize,
+        value: usize,
+        time1: f32,
+        value1: f32,
+        cx1: f32,
+        cy1: f32,
+        cx2: f32,
+        cy2: f32,
+        time2: f32,
+        value2: f32,
+    ) {
+        self.set_bezier(
+            bezier, frame, value, time1, value1, cx1, cy1, cx2, cy2, time2, value2,
+        );
+    }
+}
+
+impl CurveBuilder for DeformTimeline {
     fn stepped(&mut self, frame: usize) {
         self.set_stepped(frame);
     }
@@ -1965,6 +1998,39 @@ mod tests {
         assert!((d[2] - 15.0).abs() < 1e-3, "d[2]={}", d[2]);
         assert!((d[0] - 0.0).abs() < 1e-3, "d[0]={}", d[0]);
         assert!((d[5] - 10.0).abs() < 1e-3, "d[5]={}", d[5]);
+    }
+
+    #[test]
+    fn stepped_deform_snaps_to_the_earlier_frame() {
+        let json = r#"{
+            "bones": [ { "name": "root" } ],
+            "slots": [ { "name": "s", "bone": "root", "attachment": "m" } ],
+            "skins": [ { "name": "default", "attachments": { "s": { "m": {
+                "type": "mesh", "uvs": [0,0], "triangles": [], "vertices": [2, 3]
+            } } } } ],
+            "animations": {
+                "snap": {
+                    "deform": { "default": { "s": { "m": [
+                        { "time": 0, "vertices": [0, 0], "curve": "stepped" },
+                        { "time": 1, "vertices": [10, 0] }
+                    ] } } }
+                }
+            }
+        }"#;
+        let data = from_json(json).unwrap();
+        let anim = data.find_animation("snap").unwrap().clone();
+        let mut sk = crate::skel::Skeleton::new(std::sync::Arc::new(data));
+        let mut state = crate::anim::AnimationState::new();
+        state.set_animation(anim, false);
+        state.update(0.5);
+        sk.set_slots_to_setup_pose();
+        state.apply(&mut sk);
+        let d = &sk.slot(0).unwrap().deform;
+        // Stepped: at t=0.5 the deform holds frame 0 (offset 0), so it equals the
+        // setup [2, 3] rather than the linear midpoint [7, 3].
+        assert_eq!(d.len(), 2);
+        assert!((d[0] - 2.0).abs() < 1e-3, "d[0]={}", d[0]);
+        assert!((d[1] - 3.0).abs() < 1e-3, "d[1]={}", d[1]);
     }
 
     #[test]

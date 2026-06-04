@@ -162,6 +162,51 @@ impl Curve {
         y + (time - x) / (self.frames[fi] - x) * (self.frames[fi + value_offset] - y)
     }
 
+    /// The interpolation percent (0..1) within the segment containing `time`,
+    /// respecting the segment's curve type (stepped / linear / Bezier). Drives
+    /// lerps of an external value array (e.g. mesh deform), where the Bezier `y`
+    /// samples encode the percent. `time` must be `>= first_time()` and before
+    /// the last frame time. Mirrors Spine's `CurveTimeline.getCurvePercent`.
+    pub(crate) fn percent(&self, time: f32) -> f32 {
+        let entries = self.entries;
+        let i = search(&self.frames, time, entries);
+        let frame = i / entries;
+        let curve_type = self.curves[frame];
+        let x = self.frames[i];
+        let next_x = self.frames[i + entries];
+        if curve_type == LINEAR {
+            (time - x) / (next_x - x)
+        } else if curve_type == STEPPED {
+            0.0
+        } else {
+            self.bezier_percent(time, x, next_x, curve_type as usize - BEZIER)
+        }
+    }
+
+    /// Sample the Bezier percent table for one segment. The packed pairs are
+    /// `(time, percent)`; before and after the table it lerps to the segment's
+    /// endpoints (percent 0 at the start frame, 1 at the next). Mirrors the
+    /// percent branch of Spine's `getCurvePercent`.
+    fn bezier_percent(&self, time: f32, frame_x: f32, next_x: f32, seg: usize) -> f32 {
+        let curves = &self.curves;
+        if curves[seg] > time {
+            return curves[seg + 1] * (time - frame_x) / (curves[seg] - frame_x);
+        }
+        let n = seg + BEZIER_SIZE;
+        let mut i = seg + 2;
+        while i < n {
+            if curves[i] >= time {
+                let x = curves[i - 2];
+                let y = curves[i - 1];
+                return y + (time - x) / (curves[i] - x) * (curves[i + 1] - y);
+            }
+            i += 2;
+        }
+        let x = curves[n - 2];
+        let y = curves[n - 1];
+        y + (1.0 - y) * (time - x) / (next_x - x)
+    }
+
     /// Value for a property whose timeline value is **added** to the setup value
     /// (rotate / translate / shear). Spine `getRelativeValue`.
     pub(crate) fn relative_value(
@@ -305,5 +350,28 @@ mod tests {
         c.set_frame2(1, 1.0, 10.0, 20.0);
         assert!((c.value(0.5, 1) - 5.0).abs() < 1e-4);
         assert!((c.value(0.5, 2) - 10.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn percent_respects_linear_and_stepped() {
+        let mut c = Curve::new(2, 0, 2);
+        c.set_frame1(0, 0.0, 0.0);
+        c.set_frame1(1, 2.0, 0.0);
+        // Linear: halfway through the segment in time -> 0.5.
+        assert!((c.percent(1.0) - 0.5).abs() < 1e-4);
+        // Stepped: 0 until the next frame.
+        c.set_stepped(0);
+        assert!((c.percent(1.0)).abs() < 1e-4);
+        assert!((c.percent(1.9)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn percent_bezier_passes_through_midpoint() {
+        let mut c = Curve::new(2, 1, 2);
+        c.set_frame1(0, 0.0, 0.0);
+        c.set_frame1(1, 1.0, 0.0);
+        // Symmetric percent S-curve from 0 to 1 about (0.5, 0.5).
+        c.set_bezier(0, 0, 0, 0.0, 0.0, 0.25, 0.0, 0.75, 1.0, 1.0, 1.0);
+        assert!((c.percent(0.5) - 0.5).abs() < 0.05);
     }
 }
