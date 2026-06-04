@@ -1533,6 +1533,27 @@ mod tests {
         assert!(deformed, "expected a diamond animation to deform a mesh");
     }
 
+    // Exercises the slider constraint on the real rig: playing an animation and
+    // updating world transforms runs the slider, which scrubs the "rotation"
+    // animation from its bone. This must pose the rig without panicking.
+    #[test]
+    fn diamond_slider_runs() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/data/diamond-pro.skel");
+        let Ok(bytes) = std::fs::read(path) else {
+            return;
+        };
+        let data = from_binary(&bytes).unwrap();
+        let anim = data.find_animation("idle-rotating").unwrap().clone();
+        let mut sk = crate::skel::Skeleton::new(std::sync::Arc::new(data));
+        let mut state = crate::anim::AnimationState::new();
+        state.set_animation(anim, false);
+        state.update(0.5);
+        sk.set_slots_to_setup_pose();
+        state.apply(&mut sk);
+        sk.update_world_transform();
+        assert!(sk.bone(0).is_some());
+    }
+
     #[test]
     fn reads_a_one_value_bone_timeline() {
         // Bezier count 0, then two rotate frames (0,0) and (1,90) with a linear
