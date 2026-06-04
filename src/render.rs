@@ -147,6 +147,16 @@ fn sequence_frame(seq: Option<&Sequence>, slot_index: i32) -> Option<(&[f32], us
 #[must_use]
 pub fn render(skeleton: &Skeleton) -> Vec<RenderCommand> {
     let mut out = Vec::new();
+    render_into(skeleton, &mut out);
+    out
+}
+
+/// Build the skeleton's draw-order render commands into `out`, which is cleared
+/// first. A render loop should keep one buffer and call this every frame to
+/// reuse its capacity, rather than calling [`render`] and allocating a fresh
+/// `Vec` each frame.
+pub fn render_into(skeleton: &Skeleton, out: &mut Vec<RenderCommand>) {
+    out.clear();
     let mut clip: Option<Clip> = None;
     for &slot_index in skeleton.draw_order() {
         if let Some(cmd) = build_command(skeleton, slot_index, &mut clip) {
@@ -161,7 +171,6 @@ pub fn render(skeleton: &Skeleton) -> Vec<RenderCommand> {
             }
         }
     }
-    out
 }
 
 /// Build the render command for one slot, or `None` if it has no renderable
@@ -560,6 +569,44 @@ mod tests {
             "y={}",
             c.positions[0].y
         );
+    }
+
+    #[test]
+    fn render_into_clears_and_reuses_the_buffer() {
+        let region = AtlasRegion {
+            name: "r".into(),
+            page: 2,
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 10,
+            degrees: 0,
+            offset_x: 0.0,
+            offset_y: 0.0,
+            original_width: 20,
+            original_height: 10,
+            index: -1,
+        };
+        let mut r = RegionAttachment::new("r", "r");
+        r.width = 20.0;
+        r.height = 10.0;
+        r.update(&region, 64, 64);
+        r.page = region.page;
+        let mut skin = Skin::new("default");
+        skin.set(0, "r", Attachment::Region(r));
+        let sk = one_bone_skeleton(100.0, 50.0, "r", skin);
+
+        // A buffer holding stale commands is cleared, then refilled to match a
+        // fresh render.
+        let mut buf = render(&sk);
+        buf.extend(render(&sk)); // now two stale commands
+        render_into(&sk, &mut buf);
+        let fresh = render(&sk);
+        assert_eq!(buf.len(), 1, "stale commands were not cleared");
+        assert_eq!(buf.len(), fresh.len());
+        assert_eq!(buf[0].page, fresh[0].page);
+        assert_eq!(buf[0].positions.len(), fresh[0].positions.len());
+        assert_eq!(buf[0].triangles, fresh[0].triangles);
     }
 
     #[test]
