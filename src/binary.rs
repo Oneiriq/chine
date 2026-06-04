@@ -41,12 +41,28 @@ use crate::skin::Skin;
 pub enum BinaryError {
     /// The data ended before the skeleton could be read.
     Truncated,
+    /// A list declared more items than the remaining bytes could hold. Since
+    /// every item occupies at least one byte, the declared length is corrupt.
+    CorruptLength,
+    /// A constraint carried an unrecognized type tag (valid tags are 0 to 4).
+    UnknownConstraintType(u8),
+    /// An animation timeline carried an unrecognized type tag.
+    UnknownTimelineType(u8),
 }
 
 impl std::fmt::Display for BinaryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             BinaryError::Truncated => write!(f, "binary skeleton data is truncated"),
+            BinaryError::CorruptLength => {
+                write!(f, "a list length exceeds the remaining data")
+            }
+            BinaryError::UnknownConstraintType(tag) => {
+                write!(f, "unknown constraint type tag {tag}")
+            }
+            BinaryError::UnknownTimelineType(tag) => {
+                write!(f, "unknown timeline type tag {tag}")
+            }
         }
     }
 }
@@ -62,6 +78,7 @@ pub struct BinaryReader<'a> {
     data: &'a [u8],
     pos: usize,
     overran: bool,
+    error: Option<BinaryError>,
 }
 
 impl<'a> BinaryReader<'a> {
@@ -72,6 +89,7 @@ impl<'a> BinaryReader<'a> {
             data,
             pos: 0,
             overran: false,
+            error: None,
         }
     }
 
@@ -85,6 +103,34 @@ impl<'a> BinaryReader<'a> {
     #[must_use]
     pub fn remaining(&self) -> usize {
         self.data.len().saturating_sub(self.pos)
+    }
+
+    /// A var_uint list length, validated against the bytes left. Because every
+    /// list item occupies at least one byte, a length greater than the
+    /// remaining data is corrupt: this records [`BinaryError::CorruptLength`]
+    /// and returns `0`, so the caller loops a bounded number of times instead
+    /// of trusting an attacker-chosen length.
+    pub fn count(&mut self) -> usize {
+        let n = self.var_usize();
+        if n > self.remaining() {
+            self.fail(BinaryError::CorruptLength);
+            return 0;
+        }
+        n
+    }
+
+    /// Record the first structural error seen. Truncation is tracked separately
+    /// by [`Self::overran`]; later errors do not overwrite the first.
+    pub fn fail(&mut self, error: BinaryError) {
+        if self.error.is_none() {
+            self.error = Some(error);
+        }
+    }
+
+    /// The first structural error recorded, if any.
+    #[must_use]
+    pub fn error(&self) -> Option<&BinaryError> {
+        self.error.as_ref()
     }
 
     /// One byte (zero past the end).
@@ -212,13 +258,13 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
 
     // String table: names (attachments, events, ...) the later sections refer to
     // by index. Consumed here; used once those sections are read.
-    let string_count = r.var_usize();
+    let string_count = r.count();
     let strings: Vec<String> = (0..string_count)
         .map(|_| r.string().unwrap_or_default())
         .collect();
 
     // Bones: hierarchy order, the root first (and parentless).
-    let bone_count = r.var_usize();
+    let bone_count = r.count();
     for index in 0..bone_count {
         let name = r.string().unwrap_or_default();
         let parent = if index == 0 {
@@ -259,7 +305,7 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
 
     // Slots: draw order, each with a setup color, an optional dark (two-color)
     // tint, and the setup attachment (referenced into the string table).
-    let slot_count = r.var_usize();
+    let slot_count = r.count();
     for index in 0..slot_count {
         let name = r.string().unwrap_or_default();
         let bone = r.var_usize();
@@ -286,7 +332,7 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
     // type (Spine 4.3: IK=0, path=1, transform=2, physics=3, slider=4); there
     // is no explicit order (it is the read order across all types). IK packs
     // its flags into one byte and stores only non-default mix/softness.
-    let constraint_count = r.var_usize();
+    let constraint_count = r.count();
     for order in 0..constraint_count {
         let name = r.string().unwrap_or_default();
         let kind = r.byte();
@@ -302,7 +348,10 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
             4 => data
                 .sliders
                 .push(parse_slider(&mut r, name, order, nonessential)),
-            _ => break,
+            _ => {
+                r.fail(BinaryError::UnknownConstraintType(kind));
+                break;
+            }
         }
     }
 
@@ -310,14 +359,14 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
     // names and paths through the string table.
     let slot_names: Vec<String> = data.slots.iter().map(|s| s.name.clone()).collect();
     data.default_skin = read_skin(&mut r, &strings, &slot_names, true, nonessential);
-    let skin_count = r.var_usize();
+    let skin_count = r.count();
     for _ in 0..skin_count {
         let skin = read_skin(&mut r, &strings, &slot_names, false, nonessential);
         data.skins.push(skin);
     }
 
     // Events: setup-pose values for named animation events.
-    let event_count = r.var_usize();
+    let event_count = r.count();
     for _ in 0..event_count {
         let name = r.string().unwrap_or_default();
         let int_value = r.var_int();
@@ -341,7 +390,7 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
     }
 
     // Animations.
-    let animation_count = r.var_usize();
+    let animation_count = r.count();
     for _ in 0..animation_count {
         let aname = r.string().unwrap_or_default();
         let anim = read_animation(&mut r, aname, &data, &strings, nonessential);
@@ -354,6 +403,9 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
         slider.animation_index = Some(r.var_usize());
     }
 
+    if let Some(error) = r.error() {
+        return Err(error.clone());
+    }
     if r.overran() {
         return Err(BinaryError::Truncated);
     }
@@ -371,7 +423,7 @@ fn scale_y_from(ordinal: usize) -> ScaleYMode {
 
 /// Parse one IK constraint (Spine 4.3 bit-packed layout).
 fn parse_ik(r: &mut BinaryReader, name: String, order: usize) -> IkConstraintData {
-    let bone_count = r.var_usize();
+    let bone_count = r.count();
     let bones = (0..bone_count).map(|_| r.var_usize()).collect();
     let target = r.var_usize();
     let flags = r.byte();
@@ -455,7 +507,7 @@ fn parse_slider(r: &mut BinaryReader, name: String, order: usize, nonessential: 
 /// scale 1, so the fixed-position / fixed-spacing scale factors are the
 /// identity.
 fn parse_path(r: &mut BinaryReader, name: String, order: usize) -> PathConstraintData {
-    let bone_count = r.var_usize();
+    let bone_count = r.count();
     let bones = (0..bone_count).map(|_| r.var_usize()).collect();
     let slot = r.var_usize();
     let flags = r.byte();
@@ -583,7 +635,7 @@ fn to_prop_byte(b: u8) -> Option<ToProp> {
 /// byte's high bits hold the source-property count; offsets default to 0 and
 /// mixes to 1 when their flag is clear. chine loads at scale 1.
 fn parse_transform(r: &mut BinaryReader, name: String, order: usize) -> TransformConstraintData {
-    let bone_count = r.var_usize();
+    let bone_count = r.count();
     let bones = (0..bone_count).map(|_| r.var_usize()).collect();
     let source = r.var_usize();
     let flags = r.byte();
@@ -696,7 +748,7 @@ fn read_skin(
     let mut skin;
     let slot_count;
     if is_default {
-        slot_count = r.var_usize();
+        slot_count = r.count();
         skin = Skin::new("default");
         if slot_count == 0 {
             return skin;
@@ -706,19 +758,19 @@ fn read_skin(
         if nonessential {
             let _ = r.u32();
         }
-        let bone_count = r.var_usize();
+        let bone_count = r.count();
         for _ in 0..bone_count {
             r.var_usize();
         }
-        let constraint_count = r.var_usize();
+        let constraint_count = r.count();
         for _ in 0..constraint_count {
             r.var_usize();
         }
-        slot_count = r.var_usize();
+        slot_count = r.count();
     }
     for _ in 0..slot_count {
         let slot = r.var_usize();
-        let att_count = r.var_usize();
+        let att_count = r.count();
         for _ in 0..att_count {
             let placeholder = string_ref(r, strings).unwrap_or_default();
             if let Some(att) = read_attachment(r, strings, slot_names, &placeholder, nonessential) {
@@ -786,12 +838,12 @@ fn read_attachment(
             let uvs = read_float_array(r, count * 2);
             let tri_count = (count * 2).saturating_sub(hull + 2) * 3;
             let triangles = read_short_array(r, tri_count);
-            let timeline_slots = r.var_usize();
+            let timeline_slots = r.count();
             for _ in 0..timeline_slots {
                 r.var_usize();
             }
             if nonessential {
-                let edges = r.var_usize();
+                let edges = r.count();
                 for _ in 0..edges {
                     r.var_usize();
                 }
@@ -882,7 +934,7 @@ fn read_sequence(r: &mut BinaryReader, present: bool) -> Option<Sequence> {
     if !present {
         return None;
     }
-    let count = r.var_usize();
+    let count = r.count();
     let start = r.var_usize();
     let digits = r.var_usize();
     let setup_index = r.var_usize();
@@ -892,18 +944,18 @@ fn read_sequence(r: &mut BinaryReader, present: bool) -> Option<Sequence> {
 /// Read mesh/polygon vertices: unweighted (`2 * vertexCount` floats) or weighted
 /// (per-vertex bone influences). Returns the vertices and the vertex count.
 fn read_vertices(r: &mut BinaryReader, weighted: bool) -> (MeshVertices, usize) {
-    let count = r.var_usize();
+    let count = r.count();
     if !weighted {
         return (
             MeshVertices::Unweighted(read_float_array(r, count * 2)),
             count,
         );
     }
-    let total = r.var_usize();
+    let total = r.count();
     let mut bones = Vec::new();
     let mut vertices = Vec::new();
     while bones.len() < total {
-        let influences = r.var_usize();
+        let influences = r.count();
         bones.push(influences);
         for _ in 0..influences {
             bones.push(r.var_usize());
@@ -950,13 +1002,13 @@ fn read_animation(
 
     // Slot timelines: per animated slot, one or more typed timelines (color,
     // two-color, attachment; alpha is consumed but not yet applied).
-    let slot_groups = r.var_usize();
+    let slot_groups = r.count();
     for _ in 0..slot_groups {
         let slot = r.var_usize();
-        let count = r.var_usize();
+        let count = r.count();
         for _ in 0..count {
             let kind = r.byte();
-            let frames = r.var_usize();
+            let frames = r.count();
             let entry: Option<(Timeline, f32)> = match kind {
                 0 => {
                     let (tl, d) = read_slot_attachment_timeline(r, slot, frames, strings);
@@ -982,7 +1034,10 @@ fn read_animation(
                     let (tl, d) = read_slot_color_timeline(r, slot, frames, 1);
                     Some((Timeline::SlotAlpha(tl), d))
                 }
-                _ => return Animation::new(name, duration, timelines),
+                _ => {
+                    r.fail(BinaryError::UnknownTimelineType(kind));
+                    return Animation::new(name, duration, timelines);
+                }
             };
             if let Some((timeline, d)) = entry {
                 duration = duration.max(d);
@@ -993,13 +1048,13 @@ fn read_animation(
 
     // Bone timelines: one group per animated bone, each with one or more typed
     // timelines (rotate / translate / scale / shear and their single axes).
-    let bone_groups = r.var_usize();
+    let bone_groups = r.count();
     for _ in 0..bone_groups {
         let bone = r.var_usize();
-        let count = r.var_usize();
+        let count = r.count();
         for _ in 0..count {
             let kind = r.byte();
-            let frames = r.var_usize();
+            let frames = r.count();
             let (timeline, d) = match kind {
                 0 => wrap(read_bone_timeline1(r, bone, frames), Timeline::Rotate),
                 1 => wrap(read_bone_timeline2(r, bone, frames), Timeline::Translate),
@@ -1011,7 +1066,10 @@ fn read_animation(
                 7 => wrap(read_bone_timeline2(r, bone, frames), Timeline::Shear),
                 8 => axis(read_bone_timeline1(r, bone, frames), BoneAxis::ShearX),
                 9 => axis(read_bone_timeline1(r, bone, frames), BoneAxis::ShearY),
-                _ => return Animation::new(name, duration, timelines),
+                _ => {
+                    r.fail(BinaryError::UnknownTimelineType(kind));
+                    return Animation::new(name, duration, timelines);
+                }
             };
             duration = duration.max(d);
             timelines.push(timeline);
@@ -1022,33 +1080,33 @@ fn read_animation(
     // attachment/deform, draw order, draw-order folders, events): skip while
     // empty, stop at the first non-empty (not yet handled).
     // IK constraint timelines (one per animated IK constraint).
-    let ik_groups = r.var_usize();
+    let ik_groups = r.count();
     for _ in 0..ik_groups {
         let index = r.var_usize();
-        let frames = r.var_usize();
+        let frames = r.count();
         let (tl, d) = read_ik_constraint_timeline(r, index, frames);
         duration = duration.max(d);
         timelines.push(Timeline::Ik(tl));
     }
 
     // Transform constraint timelines (six mix channels).
-    let transform_groups = r.var_usize();
+    let transform_groups = r.count();
     for _ in 0..transform_groups {
         let index = r.var_usize();
-        let frames = r.var_usize();
+        let frames = r.count();
         let (tl, d) = read_curve_timeline_n(r, index, frames, 6);
         duration = duration.max(d);
         timelines.push(Timeline::TransformMix(tl));
     }
 
     // Path constraint timelines: position, spacing, or mix per inner entry.
-    let path_groups = r.var_usize();
+    let path_groups = r.count();
     for _ in 0..path_groups {
         let index = r.var_usize();
-        let count = r.var_usize();
+        let count = r.count();
         for _ in 0..count {
             let kind = r.byte();
-            let frames = r.var_usize();
+            let frames = r.count();
             let entry = match kind {
                 0 => {
                     let (tl, d) = read_curve_timeline_n(r, index, frames, 1);
@@ -1062,7 +1120,10 @@ fn read_animation(
                     let (tl, d) = read_curve_timeline_n(r, index, frames, 3);
                     Some((Timeline::PathMix(tl), d))
                 }
-                _ => return Animation::new(name, duration, timelines),
+                _ => {
+                    r.fail(BinaryError::UnknownTimelineType(kind));
+                    return Animation::new(name, duration, timelines);
+                }
             };
             if let Some((timeline, d)) = entry {
                 duration = duration.max(d);
@@ -1074,13 +1135,13 @@ fn read_animation(
     // Physics constraint timelines: one tunable (or a reset) per inner entry.
     // The stored index is one less than the stream's (a 0 marks a global
     // timeline, wrapping to the global sentinel).
-    let physics_groups = r.var_usize();
+    let physics_groups = r.count();
     for _ in 0..physics_groups {
         let index = r.var_usize().wrapping_sub(1);
-        let count = r.var_usize();
+        let count = r.count();
         for _ in 0..count {
             let kind = r.byte();
-            let frames = r.var_usize();
+            let frames = r.count();
             if kind == 8 {
                 let times: Vec<f32> = (0..frames).map(|_| r.float()).collect();
                 duration = duration.max(times.last().copied().unwrap_or(0.0));
@@ -1095,7 +1156,10 @@ fn read_animation(
                 5 => PhysicsProperty::Wind,
                 6 => PhysicsProperty::Gravity,
                 7 => PhysicsProperty::Mix,
-                _ => return Animation::new(name, duration, timelines),
+                _ => {
+                    r.fail(BinaryError::UnknownTimelineType(kind));
+                    return Animation::new(name, duration, timelines);
+                }
             };
             let (tl, d) = read_curve_timeline_n(r, index, frames, 1);
             duration = duration.max(d);
@@ -1105,19 +1169,22 @@ fn read_animation(
 
     // Slider timelines (Spine 4.3): SLIDER_TIME (0) and SLIDER_MIX (1), each a
     // one-value curve setting the slider's pose.
-    let slider_groups = r.var_usize();
+    let slider_groups = r.count();
     for _ in 0..slider_groups {
         let index = r.var_usize();
-        let count = r.var_usize();
+        let count = r.count();
         for _ in 0..count {
             let kind = r.byte();
-            let frames = r.var_usize();
+            let frames = r.count();
             let (tl, d) = read_curve_timeline_n(r, index, frames, 1);
             duration = duration.max(d);
             match kind {
                 0 => timelines.push(Timeline::SliderTime(tl)),
                 1 => timelines.push(Timeline::SliderMix(tl)),
-                _ => return Animation::new(name, duration, timelines),
+                _ => {
+                    r.fail(BinaryError::UnknownTimelineType(kind));
+                    return Animation::new(name, duration, timelines);
+                }
             }
         }
     }
@@ -1125,17 +1192,17 @@ fn read_animation(
     // Attachment timelines, nested skins -> slots -> attachments. Mesh deforms
     // are built and applied; sequence (animated attachment) timelines are
     // consumed (chine does not run sequences yet).
-    let deform_skins = r.var_usize();
+    let deform_skins = r.count();
     for _ in 0..deform_skins {
         let skin_index = r.var_usize();
-        let slots = r.var_usize();
+        let slots = r.count();
         for _ in 0..slots {
             let slot = r.var_usize();
-            let atts = r.var_usize();
+            let atts = r.count();
             for _ in 0..atts {
                 let att_name = string_ref(r, strings).unwrap_or_default();
                 let kind = r.byte();
-                let frames = r.var_usize();
+                let frames = r.count();
                 match kind {
                     0 => match deform_mesh_info(data, skin_index, slot, &att_name) {
                         Some((frame_len, setup, tl_skin)) => {
@@ -1155,14 +1222,17 @@ fn read_animation(
                         duration = duration.max(d);
                         timelines.push(Timeline::Sequence(tl));
                     }
-                    _ => return Animation::new(name, duration, timelines),
+                    _ => {
+                    r.fail(BinaryError::UnknownTimelineType(kind));
+                    return Animation::new(name, duration, timelines);
+                }
                 }
             }
         }
     }
 
     // Draw order timeline: per keyframe, a slot permutation.
-    let draw_order_count = r.var_usize();
+    let draw_order_count = r.count();
     if draw_order_count != 0 {
         let (tl, d) = read_draw_order_timeline(r, draw_order_count, data.slots.len());
         duration = duration.max(d);
@@ -1172,16 +1242,16 @@ fn read_animation(
     // Draw-order folder timelines (new in Spine 4.3): folder-scoped slot
     // reorders. chine has no folder timeline, so these are consumed to keep the
     // stream aligned.
-    let folder_count = r.var_usize();
+    let folder_count = r.count();
     for _ in 0..folder_count {
-        let folder_slot_count = r.var_usize();
+        let folder_slot_count = r.count();
         for _ in 0..folder_slot_count {
             r.var_usize();
         }
-        let key_count = r.var_usize();
+        let key_count = r.count();
         for _ in 0..key_count {
             r.float();
-            let change_count = r.var_usize();
+            let change_count = r.count();
             for _ in 0..change_count {
                 r.var_usize();
                 r.var_usize();
@@ -1190,7 +1260,7 @@ fn read_animation(
     }
 
     // Event timeline: keyframes that fire named events with per-key overrides.
-    let event_count = r.var_usize();
+    let event_count = r.count();
     if event_count != 0 {
         let (tl, d) = read_event_timeline(r, data, event_count);
         duration = duration.max(d);
@@ -1208,7 +1278,7 @@ fn read_animation(
 /// Bezier-segment count first (curve storage), then per-frame time + value with
 /// a stepped / linear / Bezier curve between frames.
 fn read_bone_timeline1(r: &mut BinaryReader, bone: usize, frames: usize) -> (BoneTimeline, f32) {
-    let bezier_count = r.var_usize();
+    let bezier_count = r.count();
     let mut tl = BoneTimeline::one_value(bone, frames, bezier_count);
     let mut bezier = 0;
     let mut duration = 0.0_f32;
@@ -1247,7 +1317,7 @@ fn read_bone_timeline1(r: &mut BinaryReader, bone: usize, frames: usize) -> (Bon
 /// the Bezier-segment count first, then per frame a time and two values, with
 /// two Bezier segments per curved frame.
 fn read_bone_timeline2(r: &mut BinaryReader, bone: usize, frames: usize) -> (BoneTimeline, f32) {
-    let bezier_count = r.var_usize();
+    let bezier_count = r.count();
     let mut tl = BoneTimeline::two_value(bone, frames, bezier_count);
     let mut bezier = 0;
     let mut duration = 0.0_f32;
@@ -1304,7 +1374,7 @@ fn read_slot_color_timeline(
     frames: usize,
     channels: usize,
 ) -> (ConstraintTimeline, f32) {
-    let bezier_count = r.var_usize();
+    let bezier_count = r.count();
     let mut tl = ConstraintTimeline::new(slot, frames, bezier_count, channels + 1);
     let mut bezier = 0;
     let mut duration = 0.0_f32;
@@ -1345,7 +1415,7 @@ fn read_slot_color_timeline(
 /// a count, a start offset, then that many float offsets (count `0` means the
 /// frame uses the setup vertices).
 fn skip_deform_frame(r: &mut BinaryReader) {
-    let end = r.var_usize();
+    let end = r.count();
     if end != 0 {
         let _start = r.var_usize();
         for _ in 0..end {
@@ -1455,7 +1525,7 @@ fn read_deform_timeline(
     frame_len: usize,
     frames: usize,
 ) -> (DeformTimeline, f32) {
-    let bezier_count = r.var_usize();
+    let bezier_count = r.count();
     let last = frames.saturating_sub(1);
     let mut times = Vec::with_capacity(frames);
     let mut offsets = Vec::with_capacity(frames);
@@ -1463,7 +1533,7 @@ fn read_deform_timeline(
     let mut time = r.float();
     for frame in 0..frames {
         let mut deform = vec![0.0_f32; frame_len];
-        let end = r.var_usize();
+        let end = r.count();
         if end != 0 {
             let start = r.var_usize();
             for i in 0..end {
@@ -1532,7 +1602,7 @@ fn read_curve_timeline_n(
     frames: usize,
     channels: usize,
 ) -> (ConstraintTimeline, f32) {
-    let bezier_count = r.var_usize();
+    let bezier_count = r.count();
     let mut tl = ConstraintTimeline::new(constraint, frames, bezier_count, channels + 1);
     let mut bezier = 0;
     let mut duration = 0.0_f32;
@@ -1578,7 +1648,7 @@ fn read_ik_constraint_timeline(
     constraint: usize,
     frames: usize,
 ) -> (ConstraintTimeline, f32) {
-    let bezier_count = r.var_usize();
+    let bezier_count = r.count();
     let mut tl = ConstraintTimeline::new(constraint, frames, bezier_count, 6);
     let mut bezier = 0;
     let mut duration = 0.0_f32;
@@ -1666,7 +1736,7 @@ fn read_draw_order_timeline(
     let mut duration = 0.0_f32;
     for _ in 0..frames {
         let time = r.float();
-        let change_count = r.var_usize();
+        let change_count = r.count();
         let mut offsets: Vec<(usize, i32)> = Vec::with_capacity(change_count);
         for _ in 0..change_count {
             let slot = r.var_usize();
@@ -2428,6 +2498,56 @@ mod tests {
         assert_eq!(data.slots.len(), 1);
         assert_eq!(data.slots[0].name, "slot");
         assert_eq!(data.slots[0].bone, 0);
+    }
+
+    // A header that declares 100 bones but provides no bone data: each bone
+    // needs many bytes, so the count exceeds the remaining data and must be
+    // rejected as corrupt rather than driving the read loop. (A real attack
+    // uses a multi-byte varint for billions; 100 with no data is the same bug.)
+    #[test]
+    fn corrupt_length_is_rejected_not_looped() {
+        let mut b = Vec::new();
+        b.extend_from_slice(&[0; 8]); // hash
+        b.push(0); // version = None
+        for v in [0.0_f32, 0.0, 0.0, 0.0, 1.0] {
+            b.extend_from_slice(&v.to_be_bytes()); // bounds + reference scale
+        }
+        b.push(0); // essential
+        b.push(0); // 0 strings
+        b.push(100); // bone count = 100, but no bone bytes follow
+        assert!(matches!(
+            from_binary(&b),
+            Err(BinaryError::CorruptLength)
+        ));
+    }
+
+    // An otherwise valid header whose single constraint carries an unknown type
+    // tag must surface as an error, not silently stop reading the constraints.
+    #[test]
+    fn unknown_constraint_type_is_an_error() {
+        let mut b = Vec::new();
+        b.extend_from_slice(&[0; 8]); // hash
+        b.push(0); // version = None
+        for v in [0.0_f32, 0.0, 0.0, 0.0, 1.0] {
+            b.extend_from_slice(&v.to_be_bytes());
+        }
+        b.push(0); // essential
+        b.push(0); // 0 strings
+        b.push(1); // 1 bone (root)
+        b.push(0); // root name = None
+        for _ in 0..8 {
+            b.extend_from_slice(&0.0_f32.to_be_bytes()); // bone transform
+        }
+        b.push(0); // inherit = Normal
+        b.push(0); // skin required = false
+        b.push(0); // 0 slots
+        b.push(1); // 1 constraint
+        b.push(0); // constraint name = None
+        b.push(99); // unknown type tag
+        assert!(matches!(
+            from_binary(&b),
+            Err(BinaryError::UnknownConstraintType(99))
+        ));
     }
 
     #[test]
