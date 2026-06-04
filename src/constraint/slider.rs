@@ -53,6 +53,9 @@ pub struct SliderData {
     pub offset: f32,
     /// Slider value scale.
     pub scale: f32,
+    /// Index (into [`crate::data::SkeletonData::animations`]) of the animation
+    /// this slider scrubs, set after the animations are loaded.
+    pub animation_index: Option<usize>,
 }
 
 impl Default for SliderData {
@@ -72,6 +75,7 @@ impl Default for SliderData {
             property_offset: 0.0,
             offset: 0.0,
             scale: 1.0,
+            animation_index: None,
         }
     }
 }

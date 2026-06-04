@@ -334,6 +334,12 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
         data.animations.push(Arc::new(anim));
     }
 
+    // After the animations, each slider constraint records the index of the
+    // animation it scrubs (read in constraint order, which is slider order).
+    for slider in &mut data.sliders {
+        slider.animation_index = Some(r.var_usize());
+    }
+
     if r.overran() {
         return Err(BinaryError::Truncated);
     }
@@ -1469,6 +1475,9 @@ mod tests {
         assert_eq!(slider.name, "rotation");
         assert!(slider.bone.is_some());
         assert!(slider.property.is_some());
+        // The slider scrubs the like-named "rotation" animation.
+        let scrubbed = slider.animation_index.expect("slider animation index");
+        assert_eq!(data.animations[scrubbed].name(), "rotation");
 
         // All eight animations parse end to end; a misaligned parse would
         // surface as a garbage or truncated name. "appear" is bone-only;
