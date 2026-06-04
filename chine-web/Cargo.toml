@@ -21,6 +21,7 @@ features = [
     "Document",
     "Element",
     "HtmlCanvasElement",
+    "HtmlImageElement",
     "WebGl2RenderingContext",
     "WebGlProgram",
     "WebGlShader",
@@ -29,8 +30,3 @@ features = [
     "WebGlUniformLocation",
     "WebGlVertexArrayObject",
 ]
-
-[profile.release]
-# Smaller WASM: optimize for size, strip, and let wasm-opt finish the job.
-opt-level = "s"
-lto = true

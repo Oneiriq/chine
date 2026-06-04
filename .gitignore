@@ -3,3 +3,8 @@
 /data
 # wasm-pack build output for the web crate.
 /chine-web/pkg
+# Spine example rigs used by the web demos are provided locally, not committed.
+/chine-web/examples/*.skel
+/chine-web/examples/*.atlas
+/chine-web/examples/*.png
+/chine-web/examples/*.json
