@@ -13,6 +13,8 @@
 
 use glam::Vec2;
 
+use crate::constraint::ik::IkConstraintData;
+use crate::constraint::ScaleYMode;
 use crate::data::{BlendMode, BoneData, Color, Inherit, SkeletonData, SlotData};
 
 /// An error from binary skeleton loading.
@@ -147,8 +149,9 @@ fn inherit_from(ordinal: usize) -> Inherit {
 
 /// Parse a Spine `.skel` binary export into a [`SkeletonData`].
 ///
-/// The header, bone, and slot sections are read; further sections are added as
-/// the loader grows. A truncated stream returns [`BinaryError::Truncated`].
+/// The header, bone, slot, and IK-constraint sections are read; further sections
+/// are added as the loader grows. A truncated stream returns
+/// [`BinaryError::Truncated`].
 ///
 /// # Errors
 /// Returns [`BinaryError::Truncated`] if the data ends mid-skeleton.
@@ -245,10 +248,64 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
         });
     }
 
+    // IK constraints. Spine 4.3 packs the flags into one byte and stores only
+    // non-default mix/softness; there is no explicit order (it is the read
+    // order across all constraint types).
+    let ik_count = r.var_usize();
+    for _ in 0..ik_count {
+        data.ik_constraints.push(parse_ik(&mut r));
+    }
+
     if r.overran() {
         return Err(BinaryError::Truncated);
     }
     Ok(data)
+}
+
+/// Map a scale-Y-mode ordinal to [`ScaleYMode`].
+fn scale_y_from(ordinal: usize) -> ScaleYMode {
+    match ordinal {
+        1 => ScaleYMode::Uniform,
+        2 => ScaleYMode::Volume,
+        _ => ScaleYMode::None,
+    }
+}
+
+/// Parse one IK constraint (Spine 4.3 bit-packed layout).
+fn parse_ik(r: &mut BinaryReader) -> IkConstraintData {
+    let name = r.string().unwrap_or_default();
+    let order = r.var_usize();
+    let bone_count = r.var_usize();
+    let bones = (0..bone_count).map(|_| r.var_usize()).collect();
+    let target = r.var_usize();
+    let flags = r.byte();
+    let scale_y_mode = if flags & 2 != 0 {
+        scale_y_from(r.byte() as usize)
+    } else {
+        ScaleYMode::None
+    };
+    let mix = if flags & 32 != 0 {
+        if flags & 64 != 0 {
+            r.float()
+        } else {
+            1.0
+        }
+    } else {
+        1.0
+    };
+    let softness = if flags & 128 != 0 { r.float() } else { 0.0 };
+    IkConstraintData {
+        name,
+        order,
+        bones,
+        target,
+        scale_y_mode,
+        mix,
+        softness,
+        bend_direction: if flags & 4 != 0 { -1 } else { 1 },
+        compress: flags & 8 != 0,
+        stretch: flags & 16 != 0,
+    }
 }
 
 /// RGBA8888 (`0xRRGGBBAA`) to a [`Color`].
@@ -349,6 +406,7 @@ mod tests {
         b.push(3); // inherit = NoScale
         b.push(0); // skinRequired = false
         b.push(0); // slot count = 0
+        b.push(0); // ik constraint count = 0
 
         let data = from_binary(&b).unwrap();
         assert_eq!(data.spine_version.as_deref(), Some("4.3.00"));
@@ -399,5 +457,17 @@ mod tests {
         }
         // Setup attachments resolve through the string table.
         assert!(data.slots.iter().any(|s| s.attachment.is_some()));
+
+        // IK constraints (the rig's three foot/leg IK chains).
+        assert_eq!(data.ik_constraints.len(), 3);
+        let ik = &data.ik_constraints[0];
+        assert_eq!(ik.name, "leg-front-IK");
+        assert_eq!(ik.bones, vec![3, 4]);
+        assert_eq!(ik.target, 37);
+        for c in &data.ik_constraints {
+            assert!((c.mix - 1.0).abs() < 1e-6, "{} mix={}", c.name, c.mix);
+            assert!(c.target < data.bones.len());
+            assert!(c.bones.iter().all(|&b| b < data.bones.len()));
+        }
     }
 }
