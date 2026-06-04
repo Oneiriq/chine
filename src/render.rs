@@ -85,7 +85,7 @@ pub fn render(skeleton: &Skeleton) -> Vec<RenderCommand> {
     for &slot_index in skeleton.draw_order() {
         if let Some(cmd) = build_command(skeleton, slot_index, &mut clip) {
             match &clip {
-                Some(c) => out.extend(clip_command(cmd, &c.polygon)),
+                Some(c) => out.extend(clip_command(cmd, &c.polygons)),
                 None => out.push(cmd),
             }
         }
@@ -133,11 +133,11 @@ fn build_command(
             blend: setup.blend,
         }),
         Attachment::Clipping(c) => {
-            let poly = c.compute_world_vertices(skeleton, setup.bone);
-            if poly.len() >= 3 {
+            let pieces = clip_pieces(c.compute_world_vertices(skeleton, setup.bone));
+            if !pieces.is_empty() {
                 let end = data.find_slot(&c.end_slot).unwrap_or(usize::MAX);
                 *clip = Some(Clip {
-                    polygon: make_ccw(poly),
+                    polygons: pieces,
                     end_slot: end,
                 });
             }
@@ -150,16 +150,18 @@ fn build_command(
     }
 }
 
-/// An active clip region: a convex (CCW) polygon in world space and the
-/// draw-order slot index after which clipping stops.
+/// An active clip region: one or more convex (CCW) polygons in world space (a
+/// concave clip is decomposed into several) and the draw-order slot index after
+/// which clipping stops.
 struct Clip {
-    polygon: Vec<Vec2>,
+    polygons: Vec<Vec<Vec2>>,
     end_slot: usize,
 }
 
-/// Clip a command's triangles against the convex `polygon`, interpolating UVs at
-/// the new edges. Returns `None` if nothing survives.
-fn clip_command(cmd: RenderCommand, polygon: &[Vec2]) -> Option<RenderCommand> {
+/// Clip a command's triangles against the convex `polygons` (a decomposed clip
+/// region), interpolating UVs at the new edges and unioning the pieces. Returns
+/// `None` if nothing survives.
+fn clip_command(cmd: RenderCommand, polygons: &[Vec<Vec2>]) -> Option<RenderCommand> {
     let mut positions = Vec::new();
     let mut uvs = Vec::new();
     let mut triangles = Vec::new();
@@ -175,18 +177,20 @@ fn clip_command(cmd: RenderCommand, polygon: &[Vec2]) -> Option<RenderCommand> {
             (cmd.uvs[idx[1] * 2], cmd.uvs[idx[1] * 2 + 1]),
             (cmd.uvs[idx[2] * 2], cmd.uvs[idx[2] * 2 + 1]),
         ];
-        let clipped = clip_triangle(&p, &uv, polygon);
-        if clipped.len() < 3 {
-            continue;
-        }
-        let base = positions.len() as u16;
-        for (pt, (u, v)) in &clipped {
-            positions.push(*pt);
-            uvs.push(*u);
-            uvs.push(*v);
-        }
-        for k in 1..clipped.len() as u16 - 1 {
-            triangles.extend_from_slice(&[base, base + k, base + k + 1]);
+        for polygon in polygons {
+            let clipped = clip_triangle(&p, &uv, polygon);
+            if clipped.len() < 3 {
+                continue;
+            }
+            let base = positions.len() as u16;
+            for (pt, (u, v)) in &clipped {
+                positions.push(*pt);
+                uvs.push(*u);
+                uvs.push(*v);
+            }
+            for k in 1..clipped.len() as u16 - 1 {
+                triangles.extend_from_slice(&[base, base + k, base + k + 1]);
+            }
         }
     }
     if triangles.is_empty() {
@@ -287,6 +291,93 @@ fn make_ccw(mut poly: Vec<Vec2>) -> Vec<Vec2> {
         poly.reverse();
     }
     poly
+}
+
+/// Decompose a clip polygon into convex CCW pieces: the polygon itself when it is
+/// already convex, otherwise an ear-clipping triangulation. Empty if degenerate.
+fn clip_pieces(poly: Vec<Vec2>) -> Vec<Vec<Vec2>> {
+    if poly.len() < 3 {
+        return Vec::new();
+    }
+    let poly = make_ccw(poly);
+    if is_convex(&poly) {
+        vec![poly]
+    } else {
+        triangulate(&poly)
+    }
+}
+
+/// Whether `poly`'s corners all turn the same way (it is convex).
+fn is_convex(poly: &[Vec2]) -> bool {
+    let n = poly.len();
+    let mut sign = 0.0_f32;
+    for i in 0..n {
+        let a = poly[i];
+        let b = poly[(i + 1) % n];
+        let c = poly[(i + 2) % n];
+        let cross = (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x);
+        if cross.abs() > 1e-6 {
+            if sign == 0.0 {
+                sign = cross.signum();
+            } else if cross.signum() != sign {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Ear-clipping triangulation of a simple CCW polygon into CCW triangles.
+fn triangulate(poly: &[Vec2]) -> Vec<Vec<Vec2>> {
+    let mut indices: Vec<usize> = (0..poly.len()).collect();
+    let mut tris = Vec::new();
+    while indices.len() > 3 {
+        let m = indices.len();
+        let mut ear = None;
+        for i in 0..m {
+            let a = poly[indices[(i + m - 1) % m]];
+            let b = poly[indices[i]];
+            let c = poly[indices[(i + 1) % m]];
+            // A convex corner with no other vertex inside triangle a,b,c is an ear.
+            if (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x) <= 0.0 {
+                continue;
+            }
+            let clear = indices.iter().enumerate().all(|(j, &vi)| {
+                j == (i + m - 1) % m
+                    || j == i
+                    || j == (i + 1) % m
+                    || !point_in_triangle(poly[vi], a, b, c)
+            });
+            if clear {
+                ear = Some((i, [a, b, c]));
+                break;
+            }
+        }
+        let Some((i, tri)) = ear else {
+            break; // degenerate polygon: stop with what we have
+        };
+        tris.push(tri.to_vec());
+        indices.remove(i);
+    }
+    if indices.len() == 3 {
+        tris.push(vec![poly[indices[0]], poly[indices[1]], poly[indices[2]]]);
+    }
+    tris
+}
+
+/// Whether point `p` lies within triangle `a, b, c` (inclusive of edges).
+fn point_in_triangle(p: Vec2, a: Vec2, b: Vec2, c: Vec2) -> bool {
+    let d1 = tri_sign(p, a, b);
+    let d2 = tri_sign(p, b, c);
+    let d3 = tri_sign(p, c, a);
+    let has_neg = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
+    let has_pos = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
+    !(has_neg && has_pos)
+}
+
+/// Signed area (doubled) of triangle `p, a, b`; its sign gives the turn side.
+fn tri_sign(p: Vec2, a: Vec2, b: Vec2) -> f32 {
+    (p.x - b.x) * (a.y - b.y) - (a.x - b.x) * (p.y - b.y)
 }
 
 /// Component-wise color multiply (slot tint times attachment tint).
@@ -519,5 +610,60 @@ mod tests {
                 "{p:?}"
             );
         }
+    }
+
+    #[test]
+    fn convex_clip_stays_one_piece() {
+        let square = vec![
+            Vec2::new(0.0, 0.0),
+            Vec2::new(10.0, 0.0),
+            Vec2::new(10.0, 10.0),
+            Vec2::new(0.0, 10.0),
+        ];
+        assert!(is_convex(&square));
+        assert_eq!(clip_pieces(square).len(), 1);
+    }
+
+    #[test]
+    fn concave_clip_decomposes_and_excludes_the_notch() {
+        // L-shape (concave); the top-right region (x>4, y>4) is outside it.
+        let l = vec![
+            Vec2::new(0.0, 0.0),
+            Vec2::new(10.0, 0.0),
+            Vec2::new(10.0, 4.0),
+            Vec2::new(4.0, 4.0),
+            Vec2::new(4.0, 10.0),
+            Vec2::new(0.0, 10.0),
+        ];
+        assert!(!is_convex(&l));
+        let pieces = clip_pieces(l);
+        assert!(
+            pieces.len() >= 2,
+            "concave clip should decompose: {}",
+            pieces.len()
+        );
+        let uv = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)];
+        // A triangle entirely in the notch survives against no piece.
+        let notch = [
+            Vec2::new(6.0, 6.0),
+            Vec2::new(9.0, 6.0),
+            Vec2::new(6.0, 9.0),
+        ];
+        let hits = pieces
+            .iter()
+            .filter(|poly| clip_triangle(&notch, &uv, poly).len() >= 3)
+            .count();
+        assert_eq!(hits, 0, "notch triangle must be fully clipped");
+        // A triangle inside the L survives against at least one piece.
+        let inside = [
+            Vec2::new(1.0, 1.0),
+            Vec2::new(3.0, 1.0),
+            Vec2::new(1.0, 3.0),
+        ];
+        let hits2 = pieces
+            .iter()
+            .filter(|poly| clip_triangle(&inside, &uv, poly).len() >= 3)
+            .count();
+        assert!(hits2 >= 1, "inside triangle must survive");
     }
 }
