@@ -365,6 +365,10 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
         data.skins.push(skin);
     }
 
+    // Resolve linked meshes before animations so deform timelines bind to the
+    // resolved (parent-shared) geometry rather than unresolved links.
+    crate::link::resolve_linked_meshes(&mut data);
+
     // Events: setup-pose values for named animation events.
     let event_count = r.count();
     for _ in 0..event_count {

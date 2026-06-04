@@ -33,6 +33,7 @@ pub mod binary;
 pub(crate) mod constraint;
 pub mod data;
 pub(crate) mod event;
+pub(crate) mod link;
 #[cfg(feature = "json")]
 pub mod load;
 pub mod render;

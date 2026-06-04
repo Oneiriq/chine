@@ -9,7 +9,6 @@
 //! are filled in once an [`crate::atlas::Atlas`] is bound (the UV/offset layout
 //! depends on the packed region).
 
-use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
@@ -206,7 +205,7 @@ pub fn from_json(text: &str) -> Result<SkeletonData, LoadError> {
 
     // Resolve linked meshes before animations so deform timelines bind to the
     // resolved (parent-shared) geometry rather than unresolved links.
-    resolve_linked_meshes(&mut data);
+    crate::link::resolve_linked_meshes(&mut data);
 
     if let Some(anims) = root.get("animations").and_then(Value::as_object) {
         for (name, anim) in anims {
@@ -311,54 +310,6 @@ fn parse_attachment(name: &str, v: &Value) -> Option<Attachment> {
             )))
         }
         _ => None,
-    }
-}
-
-/// Resolve every linked mesh to its parent mesh's geometry, once all skins are
-/// parsed. A linked mesh whose parent is missing is left in place (and skipped
-/// at render and atlas-binding time).
-fn resolve_linked_meshes(data: &mut SkeletonData) {
-    let mut parents: HashMap<(String, usize, String), MeshAttachment> = HashMap::new();
-    collect_meshes(&data.default_skin, &mut parents);
-    for skin in &data.skins {
-        collect_meshes(skin, &mut parents);
-    }
-    resolve_skin(&mut data.default_skin, &parents);
-    for skin in &mut data.skins {
-        resolve_skin(skin, &parents);
-    }
-}
-
-/// Record every mesh attachment keyed by `(skin, slot, name)` so linked meshes
-/// can find their parent geometry.
-fn collect_meshes(skin: &Skin, out: &mut HashMap<(String, usize, String), MeshAttachment>) {
-    for (slot, name, att) in skin.iter() {
-        if let Attachment::Mesh(m) = att {
-            out.insert((skin.name.clone(), slot, name.to_string()), m.clone());
-        }
-    }
-}
-
-/// Replace each linked mesh in `skin` with the concrete mesh it resolves to.
-fn resolve_skin(skin: &mut Skin, parents: &HashMap<(String, usize, String), MeshAttachment>) {
-    let skin_name = skin.name.clone();
-    for (slot, _name, att) in skin.iter_mut() {
-        if let Attachment::LinkedMesh(lm) = att {
-            let parent_skin = lm.skin.clone().unwrap_or_else(|| skin_name.clone());
-            if let Some(parent) = parents.get(&(parent_skin, slot, lm.parent.clone())) {
-                let mut m = lm.resolve(parent);
-                // An inheriting link shares the parent's deform source; otherwise
-                // it uses its own skin's deforms.
-                m.deform_skin = if lm.inherit_deform {
-                    parent.deform_skin.clone()
-                } else if skin_name == "default" {
-                    None
-                } else {
-                    Some(skin_name.clone())
-                };
-                *att = Attachment::Mesh(m);
-            }
-        }
     }
 }
 

@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::anim::GLOBAL_PHYSICS;
+
 /// Wrap a parsed bone timeline in its [`Timeline`] variant.
 fn wrap((tl, d): (BoneTimeline, f32), make: fn(BoneTimeline) -> Timeline) -> (Timeline, f32) {
     (make(tl), d)
@@ -160,7 +162,10 @@ pub(super) fn read_animation(
     // timeline, wrapping to the global sentinel).
     let physics_groups = r.count();
     for _ in 0..physics_groups {
-        let index = r.var_usize().wrapping_sub(1);
+        // A stream index of 0 marks a global timeline (the GLOBAL_PHYSICS
+        // sentinel); any other value is one-based.
+        let raw = r.var_usize();
+        let index = if raw == 0 { GLOBAL_PHYSICS } else { raw - 1 };
         let count = r.count();
         for _ in 0..count {
             let kind = r.byte();

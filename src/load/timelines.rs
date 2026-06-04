@@ -3,7 +3,7 @@ use super::*;
 use crate::anim::{
     compute_draw_order, Animation, AttachmentTimeline, BoneAxis, BoneTimeline, ConstraintTimeline,
     DeformTimeline, DrawOrderTimeline, EventTimeline, PhysicsProperty, PhysicsResetTimeline,
-    Timeline, GLOBAL_PHYSICS, PATH_MIX, PATH_POSITION, PATH_SPACING, TRANSFORM_MIX,
+    SequenceTimeline, Timeline, GLOBAL_PHYSICS, PATH_MIX, PATH_POSITION, PATH_SPACING, TRANSFORM_MIX,
 };
 use crate::event::Event;
 
@@ -246,6 +246,12 @@ pub(super) fn parse_animation(name: &str, anim: &Value, data: &SkeletonData) -> 
                             idx, times, names,
                         )));
                     }
+                    "alpha" => {
+                        // A one-channel value curve over the slot tint's alpha.
+                        let (tl, dur) = read_curve_timeline(keys, idx, &[("value", 0.0)]);
+                        duration = duration.max(dur);
+                        timelines.push(Timeline::SlotAlpha(tl));
+                    }
                     _ => {} // unknown slot channels are skipped.
                 }
             }
@@ -353,7 +359,112 @@ pub(super) fn parse_animation(name: &str, anim: &Value, data: &SkeletonData) -> 
         }
     }
 
+    // Slider constraint timelines (Spine 4.3): "time" and "mix", each a
+    // one-value curve keyed by slider name.
+    if let Some(sliders) = anim.get("slider").and_then(Value::as_object) {
+        for (slider_name, channels) in sliders {
+            let idx = data
+                .sliders
+                .iter()
+                .position(|s| s.name == *slider_name)
+                .ok_or_else(|| LoadError::BadReference(slider_name.clone()))?;
+            let Some(channels) = channels.as_object() else {
+                continue;
+            };
+            for (channel, keys) in channels {
+                let Some(keys) = keys.as_array() else {
+                    continue;
+                };
+                if keys.is_empty() {
+                    continue;
+                }
+                match channel.as_str() {
+                    "time" => {
+                        let (tl, dur) = read_curve_timeline(keys, idx, &[("value", 1.0)]);
+                        duration = duration.max(dur);
+                        timelines.push(Timeline::SliderTime(tl));
+                    }
+                    "mix" => {
+                        let (tl, dur) = read_curve_timeline(keys, idx, &[("value", 1.0)]);
+                        duration = duration.max(dur);
+                        timelines.push(Timeline::SliderMix(tl));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // Attachment sequence (flipbook) timelines: skin -> slot -> attachment ->
+    // "sequence", each keyframe a packed mode/index plus a hold delay.
+    if let Some(attachments) = anim.get("attachments").and_then(Value::as_object) {
+        for (skin_name, slots) in attachments {
+            let skin = if skin_name == "default" {
+                None
+            } else {
+                data.find_skin(skin_name)
+            };
+            let Some(slots) = slots.as_object() else {
+                continue;
+            };
+            for (slot_name, atts) in slots {
+                let Some(slot_idx) = data.find_slot(slot_name) else {
+                    continue;
+                };
+                let Some(atts) = atts.as_object() else {
+                    continue;
+                };
+                for (att_name, channels) in atts {
+                    let Some(seq_keys) = channels.get("sequence").and_then(Value::as_array) else {
+                        continue;
+                    };
+                    if seq_keys.is_empty() {
+                        continue;
+                    }
+                    let count = match data.attachment(slot_idx, att_name, skin) {
+                        Some(Attachment::Region(r)) => r.sequence.as_ref().map_or(0, |s| s.count),
+                        Some(Attachment::Mesh(m)) => m.sequence.as_ref().map_or(0, |s| s.count),
+                        _ => 0,
+                    };
+                    let n = seq_keys.len();
+                    let mut times = Vec::with_capacity(n);
+                    let mut mode_and_index = Vec::with_capacity(n);
+                    let mut delays = Vec::with_capacity(n);
+                    for k in seq_keys {
+                        let index = k.get("index").and_then(Value::as_u64).unwrap_or(0) as u32;
+                        let mode = sequence_mode(k.get("mode").and_then(Value::as_str));
+                        times.push(f(k, "time"));
+                        mode_and_index.push((index << 4) | mode);
+                        delays.push(f(k, "delay"));
+                    }
+                    duration = duration.max(times.last().copied().unwrap_or(0.0));
+                    timelines.push(Timeline::Sequence(SequenceTimeline::new(
+                        slot_idx,
+                        att_name.clone(),
+                        count,
+                        times,
+                        mode_and_index,
+                        delays,
+                    )));
+                }
+            }
+        }
+    }
+
     Ok(Animation::new(name, duration, timelines))
+}
+
+/// Map a Spine sequence mode name to its ordinal (`hold` = 0 by default).
+fn sequence_mode(name: Option<&str>) -> u32 {
+    match name {
+        Some("once") => 1,
+        Some("loop") => 2,
+        Some("pingpong") => 3,
+        Some("onceReverse") => 4,
+        Some("loopReverse") => 5,
+        Some("pingpongReverse") => 6,
+        _ => 0, // hold
+    }
 }
 
 /// Read a one-value (rotate) timeline. Returns the timeline and its last
