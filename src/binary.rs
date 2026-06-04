@@ -20,6 +20,7 @@ use crate::attach::{
 use crate::constraint::ik::IkConstraintData;
 use crate::constraint::ScaleYMode;
 use crate::data::{BlendMode, BoneData, Color, Inherit, SkeletonData, SlotData};
+use crate::event::EventData;
 use crate::skin::Skin;
 
 /// An error from binary skeleton loading.
@@ -119,6 +120,12 @@ impl<'a> BinaryReader<'a> {
         self.var_uint() as usize
     }
 
+    /// A zig-zag-encoded signed variable-length integer (Spine's `readInt(false)`).
+    pub fn var_int(&mut self) -> i32 {
+        let v = self.var_uint();
+        ((v >> 1) ^ (v & 1).wrapping_neg()) as i32
+    }
+
     /// A length-prefixed UTF-8 string: `var_uint` length where `0` is `None`,
     /// `1` is the empty string, and `n` is `n - 1` following bytes.
     pub fn string(&mut self) -> Option<String> {
@@ -154,9 +161,9 @@ fn inherit_from(ordinal: usize) -> Inherit {
 
 /// Parse a Spine `.skel` binary export into a [`SkeletonData`].
 ///
-/// The header, bone, slot, constraint, and skin (attachment) sections are read;
-/// events and animations are added as the loader grows. A truncated stream
-/// returns [`BinaryError::Truncated`].
+/// The header, bone, slot, constraint, skin (attachment), and event sections are
+/// read; animations are added as the loader grows. A truncated stream returns
+/// [`BinaryError::Truncated`].
 ///
 /// # Errors
 /// Returns [`BinaryError::Truncated`] if the data ends mid-skeleton.
@@ -276,6 +283,30 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
     for _ in 0..skin_count {
         let skin = read_skin(&mut r, &strings, &slot_names, false, nonessential);
         data.skins.push(skin);
+    }
+
+    // Events: setup-pose values for named animation events.
+    let event_count = r.var_usize();
+    for _ in 0..event_count {
+        let name = r.string().unwrap_or_default();
+        let int_value = r.var_int();
+        let float_value = r.float();
+        let string_value = r.string().unwrap_or_default();
+        let audio_path = r.string();
+        let (volume, balance) = if audio_path.is_some() {
+            (r.float(), r.float())
+        } else {
+            (1.0, 0.0)
+        };
+        data.events.push(EventData {
+            name,
+            int_value,
+            float_value,
+            string_value,
+            audio_path,
+            volume,
+            balance,
+        });
     }
 
     if r.overran() {
@@ -665,6 +696,7 @@ mod tests {
         b.push(0); // constraint count = 0
         b.push(0); // default skin slot count = 0
         b.push(0); // named skin count = 0
+        b.push(0); // event count = 0
 
         let data = from_binary(&b).unwrap();
         assert_eq!(data.spine_version.as_deref(), Some("4.3.00"));
