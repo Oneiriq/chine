@@ -28,6 +28,9 @@ use crate::constraint::ik::IkConstraintData;
 use crate::constraint::path::{PathConstraintData, PositionMode, RotateMode, SpacingMode};
 use crate::constraint::physics::PhysicsConstraintData;
 use crate::constraint::slider::{SliderData, SliderProperty};
+use crate::constraint::transform::{
+    FromMapping, FromProp, ToMapping, ToProp, TransformConstraintData,
+};
 use crate::constraint::ScaleYMode;
 use crate::data::{BlendMode, BoneData, Color, Inherit, SkeletonData, SlotData};
 use crate::event::{Event, EventData};
@@ -287,13 +290,15 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
         match kind {
             0 => data.ik_constraints.push(parse_ik(&mut r, name, order)),
             1 => data.path_constraints.push(parse_path(&mut r, name, order)),
+            2 => data
+                .transform_constraints
+                .push(parse_transform(&mut r, name, order)),
             3 => data
                 .physics_constraints
                 .push(parse_physics(&mut r, name, order)),
             4 => data
                 .sliders
                 .push(parse_slider(&mut r, name, order, nonessential)),
-            // Transform constraints (type 2) are not yet parsed; stop at one.
             _ => break,
         }
     }
@@ -542,6 +547,98 @@ fn parse_physics(r: &mut BinaryReader, name: String, order: usize) -> PhysicsCon
         wind_global: global & 16 != 0,
         gravity_global: global & 32 != 0,
         mix_global: global & 64 != 0,
+    }
+}
+
+/// Map a transform source-property ordinal to a [`FromProp`].
+fn from_prop_byte(b: u8) -> Option<FromProp> {
+    Some(match b {
+        0 => FromProp::Rotate,
+        1 => FromProp::X,
+        2 => FromProp::Y,
+        3 => FromProp::ScaleX,
+        4 => FromProp::ScaleY,
+        5 => FromProp::ShearY,
+        _ => return None,
+    })
+}
+
+/// Map a transform target-property ordinal to a [`ToProp`].
+fn to_prop_byte(b: u8) -> Option<ToProp> {
+    Some(match b {
+        0 => ToProp::Rotate,
+        1 => ToProp::X,
+        2 => ToProp::Y,
+        3 => ToProp::ScaleX,
+        4 => ToProp::ScaleY,
+        5 => ToProp::ShearY,
+        _ => return None,
+    })
+}
+
+/// Parse one transform constraint (Spine 4.3 property-mapping layout). The flags
+/// byte's high bits hold the source-property count; offsets default to 0 and
+/// mixes to 1 when their flag is clear. chine loads at scale 1.
+fn parse_transform(r: &mut BinaryReader, name: String, order: usize) -> TransformConstraintData {
+    let bone_count = r.var_usize();
+    let bones = (0..bone_count).map(|_| r.var_usize()).collect();
+    let source = r.var_usize();
+    let flags = r.byte();
+    let local_source = flags & 2 != 0;
+    let local_target = flags & 4 != 0;
+    let additive = flags & 8 != 0;
+    let clamp = flags & 16 != 0;
+    let property_count = (flags >> 5) as usize;
+    let mut properties = Vec::with_capacity(property_count);
+    for _ in 0..property_count {
+        let Some(property) = from_prop_byte(r.byte()) else {
+            continue;
+        };
+        let offset = r.float();
+        let to_count = usize::from(r.byte());
+        let mut to = Vec::with_capacity(to_count);
+        for _ in 0..to_count {
+            let Some(to_property) = to_prop_byte(r.byte()) else {
+                continue;
+            };
+            to.push(ToMapping {
+                property: to_property,
+                offset: r.float(),
+                max: r.float(),
+                scale: r.float(),
+            });
+        }
+        properties.push(FromMapping {
+            property,
+            offset,
+            to,
+        });
+    }
+    let off_flags = r.byte();
+    let mut offsets = [0.0_f32; 6];
+    for (i, offset) in offsets.iter_mut().enumerate() {
+        if off_flags & (1 << i) != 0 {
+            *offset = r.float();
+        }
+    }
+    let mix_flags = r.byte();
+    TransformConstraintData {
+        name,
+        order,
+        bones,
+        source,
+        offsets,
+        local_source,
+        local_target,
+        additive,
+        clamp,
+        properties,
+        mix_rotate: if mix_flags & 1 != 0 { r.float() } else { 1.0 },
+        mix_x: if mix_flags & 2 != 0 { r.float() } else { 1.0 },
+        mix_y: if mix_flags & 4 != 0 { r.float() } else { 1.0 },
+        mix_scale_x: if mix_flags & 8 != 0 { r.float() } else { 1.0 },
+        mix_scale_y: if mix_flags & 16 != 0 { r.float() } else { 1.0 },
+        mix_shear_y: if mix_flags & 32 != 0 { r.float() } else { 1.0 },
     }
 }
 
@@ -2118,5 +2215,43 @@ mod tests {
         assert!((pc.mix - 1.0).abs() < 1e-6);
         assert!((pc.limit - 5000.0).abs() < 1e-3);
         assert!((pc.mass_inverse - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn parses_a_transform_constraint() {
+        // 1 bone, source 0, no property mappings, no offsets, default mixes.
+        let b = vec![1_u8, 0, 0, 0, 0, 0];
+        let mut r = BinaryReader::new(&b);
+        let tc = parse_transform(&mut r, "tf".into(), 2);
+        assert!(!r.overran());
+        assert_eq!(tc.bones, vec![0]);
+        assert_eq!(tc.source, 0);
+        assert!(tc.properties.is_empty());
+        assert!((tc.mix_rotate - 1.0).abs() < 1e-6);
+        assert!(tc.offsets[0].abs() < 1e-6);
+    }
+
+    #[test]
+    fn parses_a_transform_constraint_with_a_property() {
+        // flags 32 -> one source property; rotation -> rotation, scale 2.
+        let mut b = vec![1_u8, 0, 0, 32];
+        b.push(0); // from property: Rotate
+        b.extend_from_slice(&0.5_f32.to_be_bytes()); // from offset
+        b.push(1); // to count
+        b.push(0); // to property: Rotate
+        b.extend_from_slice(&0.0_f32.to_be_bytes()); // to offset
+        b.extend_from_slice(&1.0_f32.to_be_bytes()); // to max
+        b.extend_from_slice(&2.0_f32.to_be_bytes()); // to scale
+        b.push(0); // offset flags
+        b.push(0); // mix flags
+        let mut r = BinaryReader::new(&b);
+        let tc = parse_transform(&mut r, "tf".into(), 2);
+        assert!(!r.overran());
+        assert_eq!(tc.properties.len(), 1);
+        assert_eq!(tc.properties[0].property, FromProp::Rotate);
+        assert!((tc.properties[0].offset - 0.5).abs() < 1e-6);
+        assert_eq!(tc.properties[0].to.len(), 1);
+        assert_eq!(tc.properties[0].to[0].property, ToProp::Rotate);
+        assert!((tc.properties[0].to[0].scale - 2.0).abs() < 1e-6);
     }
 }
