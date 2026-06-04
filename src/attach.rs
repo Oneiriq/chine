@@ -4,7 +4,8 @@
 //! textured mesh whose vertices may be weighted across several bones) are the
 //! renderable types; [`PathAttachment`] holds the Bezier control points that
 //! path constraints follow. Bounding-box and point attachments are exposed as
-//! geometry/transform data; clipping attachments arrive later.
+//! geometry/transform data; linked meshes resolve to their parent's geometry at
+//! load time. Clipping attachments arrive later.
 
 use glam::Vec2;
 
@@ -38,6 +39,8 @@ pub enum Attachment {
     BoundingBox(BoundingBoxAttachment),
     /// A point with a position and rotation on a bone (not rendered).
     Point(PointAttachment),
+    /// A mesh that borrows a parent mesh's geometry (resolved to `Mesh` at load).
+    LinkedMesh(LinkedMeshAttachment),
 }
 
 /// A textured quad attached to a slot's bone.
@@ -487,6 +490,56 @@ impl PointAttachment {
     }
 }
 
+/// A linked mesh: a mesh that borrows its geometry from a parent mesh in some
+/// skin, supplying only its own texture path and tint. Resolved to a plain
+/// [`MeshAttachment`] at load time, once every skin is parsed.
+#[derive(Debug, Clone)]
+pub struct LinkedMeshAttachment {
+    /// Attachment name (the key within a skin).
+    pub name: String,
+    /// Atlas region name this draws.
+    pub path: String,
+    /// Skin holding the parent mesh, or `None` for the linked mesh's own skin.
+    pub skin: Option<String>,
+    /// Parent attachment name (within the linked mesh's slot).
+    pub parent: String,
+    /// Tint color.
+    pub color: Color,
+}
+
+impl LinkedMeshAttachment {
+    /// A linked-mesh reference from its parts.
+    #[must_use]
+    pub fn new(
+        name: impl Into<String>,
+        path: impl Into<String>,
+        skin: Option<String>,
+        parent: impl Into<String>,
+        color: Color,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            path: path.into(),
+            skin,
+            parent: parent.into(),
+            color,
+        }
+    }
+
+    /// Resolve to a concrete mesh by borrowing `parent`'s geometry (vertices,
+    /// UVs, triangles, hull) while keeping this link's own name, path, and tint.
+    /// The page is reset so atlas binding re-resolves it against this path.
+    #[must_use]
+    pub fn resolve(&self, parent: &MeshAttachment) -> MeshAttachment {
+        let mut m = parent.clone();
+        m.name = self.name.clone();
+        m.path = self.path.clone();
+        m.color = self.color;
+        m.page = 0;
+        m
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -676,5 +729,25 @@ mod tests {
         assert!(close(pos, 15.0, 20.0), "pos {:?}", pos);
         // identity bone: world rotation equals the point's local rotation.
         assert!((p.compute_world_rotation(bone) - 90.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn linked_mesh_borrows_parent_geometry() {
+        let mut parent = MeshAttachment::new(
+            "wing",
+            "wing",
+            MeshVertices::Unweighted(vec![0.0, 0.0, 10.0, 0.0, 0.0, 10.0]),
+            vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+            vec![0, 1, 2],
+        );
+        parent.hull_length = 3;
+        let link = LinkedMeshAttachment::new("wing-blue", "wing-blue", None, "wing", Color::WHITE);
+        let m = link.resolve(&parent);
+        // Identity stays the link's own; geometry is borrowed from the parent.
+        assert_eq!(m.name, "wing-blue");
+        assert_eq!(m.path, "wing-blue");
+        assert_eq!(m.triangles, parent.triangles);
+        assert_eq!(m.hull_length, 3);
+        assert_eq!(m.vertex_count(), 3);
     }
 }

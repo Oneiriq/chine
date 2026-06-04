@@ -52,6 +52,21 @@ impl Skin {
     pub(crate) fn attachments_mut(&mut self) -> impl Iterator<Item = &mut Attachment> {
         self.attachments.values_mut().flat_map(|m| m.values_mut())
     }
+
+    /// Iterate every `(slot, name, attachment)` this skin defines.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (usize, &str, &Attachment)> {
+        self.attachments
+            .iter()
+            .flat_map(|(slot, m)| m.iter().map(move |(name, att)| (*slot, name.as_str(), att)))
+    }
+
+    /// Mutably iterate every `(slot, name, attachment)` this skin defines.
+    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = (usize, &str, &mut Attachment)> {
+        self.attachments.iter_mut().flat_map(|(slot, m)| {
+            m.iter_mut()
+                .map(move |(name, att)| (*slot, name.as_str(), att))
+        })
+    }
 }
 
 #[cfg(test)]

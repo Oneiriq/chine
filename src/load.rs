@@ -9,6 +9,7 @@
 //! are filled in once an [`crate::atlas::Atlas`] is bound (the UV/offset layout
 //! depends on the packed region).
 
+use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
@@ -22,8 +23,8 @@ use crate::anim::{
     GLOBAL_PHYSICS,
 };
 use crate::attach::{
-    Attachment, BoundingBoxAttachment, MeshAttachment, MeshVertices, PathAttachment,
-    PointAttachment, RegionAttachment,
+    Attachment, BoundingBoxAttachment, LinkedMeshAttachment, MeshAttachment, MeshVertices,
+    PathAttachment, PointAttachment, RegionAttachment,
 };
 use crate::constraint::ik::IkConstraintData;
 use crate::constraint::path::{PathConstraintData, PositionMode, RotateMode, SpacingMode};
@@ -210,6 +211,7 @@ pub fn from_json(text: &str) -> Result<SkeletonData, LoadError> {
         }
     }
 
+    resolve_linked_meshes(&mut data);
     Ok(data)
 }
 
@@ -281,8 +283,53 @@ fn parse_attachment(name: &str, v: &Value) -> Option<Attachment> {
             f(v, "y"),
             f(v, "rotation"),
         ))),
-        // linkedmesh / clipping arrive later.
+        "linkedmesh" => Some(Attachment::LinkedMesh(LinkedMeshAttachment::new(
+            name,
+            path,
+            v.get("skin").and_then(Value::as_str).map(str::to_string),
+            v.get("parent").and_then(Value::as_str).unwrap_or(name),
+            parse_color(v.get("color").and_then(Value::as_str), Color::WHITE),
+        ))),
+        // clipping arrives later.
         _ => None,
+    }
+}
+
+/// Resolve every linked mesh to its parent mesh's geometry, once all skins are
+/// parsed. A linked mesh whose parent is missing is left in place (and skipped
+/// at render and atlas-binding time).
+fn resolve_linked_meshes(data: &mut SkeletonData) {
+    let mut parents: HashMap<(String, usize, String), MeshAttachment> = HashMap::new();
+    collect_meshes(&data.default_skin, &mut parents);
+    for skin in &data.skins {
+        collect_meshes(skin, &mut parents);
+    }
+    resolve_skin(&mut data.default_skin, &parents);
+    for skin in &mut data.skins {
+        resolve_skin(skin, &parents);
+    }
+}
+
+/// Record every mesh attachment keyed by `(skin, slot, name)` so linked meshes
+/// can find their parent geometry.
+fn collect_meshes(skin: &Skin, out: &mut HashMap<(String, usize, String), MeshAttachment>) {
+    for (slot, name, att) in skin.iter() {
+        if let Attachment::Mesh(m) = att {
+            out.insert((skin.name.clone(), slot, name.to_string()), m.clone());
+        }
+    }
+}
+
+/// Replace each linked mesh in `skin` with the concrete mesh it resolves to.
+fn resolve_skin(skin: &mut Skin, parents: &HashMap<(String, usize, String), MeshAttachment>) {
+    let skin_name = skin.name.clone();
+    for (slot, _name, att) in skin.iter_mut() {
+        if let Attachment::LinkedMesh(lm) = att {
+            let parent_skin = lm.skin.clone().unwrap_or_else(|| skin_name.clone());
+            if let Some(parent) = parents.get(&(parent_skin, slot, lm.parent.clone())) {
+                *att = Attachment::Mesh(lm.resolve(parent));
+            }
+        }
     }
 }
 
@@ -2120,6 +2167,37 @@ mod tests {
                 assert!((p.rotation - 30.0).abs() < 1e-4);
             }
             other => panic!("expected point, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolves_linked_mesh_to_parent_geometry() {
+        let json = r#"{
+            "skeleton": { "spine": "4.3" },
+            "bones": [ { "name": "root" } ],
+            "slots": [ { "name": "wing", "bone": "root" } ],
+            "skins": [
+                { "name": "default", "attachments": { "wing": { "wing": {
+                    "type": "mesh", "uvs": [0,0, 1,0, 0,1], "triangles": [0,1,2],
+                    "vertices": [0,0, 10,0, 0,10], "hull": 3
+                } } } },
+                { "name": "blue", "attachments": { "wing": { "wing-blue": {
+                    "type": "linkedmesh", "skin": "default", "parent": "wing"
+                } } } }
+            ]
+        }"#;
+        let data = from_json(json).unwrap();
+        let blue = data.skins.iter().find(|s| s.name == "blue").unwrap();
+        match blue.attachment(0, "wing-blue") {
+            // The link resolved to a concrete mesh borrowing the parent's
+            // geometry, while keeping its own name.
+            Some(Attachment::Mesh(m)) => {
+                assert_eq!(m.triangles, vec![0, 1, 2]);
+                assert_eq!(m.vertex_count(), 3);
+                assert_eq!(m.hull_length, 3);
+                assert_eq!(m.name, "wing-blue");
+            }
+            other => panic!("expected resolved mesh, got {other:?}"),
         }
     }
 }
