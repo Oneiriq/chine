@@ -173,6 +173,13 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
         let _audio_path = r.string();
     }
 
+    // String table: names (attachments, events, ...) the later sections refer to
+    // by index. Consumed here; used once those sections are read.
+    let string_count = r.var_usize();
+    for _ in 0..string_count {
+        r.string();
+    }
+
     // Bones: hierarchy order, the root first (and parentless).
     let bone_count = r.var_usize();
     for index in 0..bone_count {
@@ -190,10 +197,15 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
         let shear_x = r.float();
         let shear_y = r.float();
         let length = r.float();
-        let inherit = inherit_from(r.var_usize());
+        let inherit = inherit_from(r.byte() as usize);
         let _skin_required = r.bool();
         if nonessential {
             let _color = r.u32();
+            let _icon = r.string();
+            // Spine 4.3 added two editor-only bone floats here; consume them.
+            let _f0 = r.float();
+            let _f1 = r.float();
+            let _visible = r.bool();
         }
         data.bones.push(BoneData {
             index,
@@ -263,6 +275,7 @@ mod tests {
             b.extend_from_slice(&v.to_be_bytes()); // x, y, width, height, referenceScale
         }
         b.push(0); // nonessential = false
+        b.push(0); // string table count = 0
         b.push(1); // bone count = 1
         enc_str(&mut b, "root");
         // rotation, x, y, scaleX, scaleY, shearX, shearY, length
@@ -282,5 +295,29 @@ mod tests {
         assert!((root.position.x - 10.0).abs() < 1e-6);
         assert!((root.scale.x - 1.0).abs() < 1e-6);
         assert_eq!(root.inherit, Inherit::NoScale);
+    }
+
+    // Validates the parser against a real Spine 4.3 `.skel` when the local
+    // fixture is present (it is not committed); skips cleanly otherwise.
+    #[test]
+    fn parses_real_skel_header_and_bones() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/data/Spine.skel");
+        let Ok(bytes) = std::fs::read(path) else {
+            return;
+        };
+        let data = from_binary(&bytes).unwrap();
+        assert_eq!(data.spine_version.as_deref(), Some("4.3.13"));
+        assert_eq!(data.bones.len(), 40);
+        assert_eq!(data.bones[0].name, "root");
+        assert_eq!(data.bones[0].parent, None);
+        assert_eq!(data.bones[1].name, "skeleton-control");
+        assert_eq!(data.bones[1].parent, Some(0));
+        // Every bone has a non-empty name and a valid parent index.
+        for (i, b) in data.bones.iter().enumerate() {
+            assert!(!b.name.is_empty(), "bone {i} has empty name");
+            if let Some(p) = b.parent {
+                assert!(p < data.bones.len(), "bone {i} bad parent {p}");
+            }
+        }
     }
 }
