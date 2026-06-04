@@ -13,6 +13,7 @@ use std::sync::Arc;
 use crate::constraint::ik::{self, IkConstraint, IkConstraintData};
 use crate::constraint::path::{self, PathConstraint, PathConstraintData};
 use crate::constraint::physics::{self, Physics, PhysicsConstraint, PhysicsConstraintData};
+use crate::constraint::slider::{self, SliderData};
 use crate::constraint::transform::{self, TransformConstraint, TransformConstraintData};
 use crate::data::{BoneData, Color, Inherit, SkeletonData, SlotData};
 use crate::event::Event;
@@ -535,6 +536,7 @@ impl Skeleton {
                         mode,
                     );
                 }
+                Updatable::Slider(c) => slider::solve(self, c),
             }
         }
     }
@@ -713,6 +715,8 @@ enum Updatable {
     Path(usize),
     /// Apply the physics constraint at this index.
     Physics(usize),
+    /// Apply the slider constraint at this index.
+    Slider(usize),
 }
 
 /// Build the ordered update cache: a topological interleaving of bone
@@ -742,6 +746,9 @@ fn build_update_cache(data: &SkeletonData) -> Vec<Updatable> {
     }
     for (i, pc) in data.physics_constraints.iter().enumerate() {
         ordered.push((pc.order, Updatable::Physics(i)));
+    }
+    for (i, sl) in data.sliders.iter().enumerate() {
+        ordered.push((sl.order, Updatable::Slider(i)));
     }
     ordered.sort_by_key(|(order, _)| *order);
 
@@ -791,6 +798,9 @@ fn build_update_cache(data: &SkeletonData) -> Vec<Updatable> {
                     &mut sorted,
                     &mut cache,
                 );
+            }
+            Updatable::Slider(i) => {
+                sort_slider(&data.sliders[i], i, &parents, &mut sorted, &mut cache);
             }
             Updatable::Bone(_) => {}
         }
@@ -908,6 +918,22 @@ fn sort_bone(
     }
     sorted[bone] = true;
     cache.push(Updatable::Bone(bone));
+}
+
+/// Sort a slider into the cache: its source bone is computed before it so its
+/// property can be read; the animation it scrubs is applied when the slider
+/// runs.
+fn sort_slider(
+    slider: &SliderData,
+    i: usize,
+    parents: &[Option<usize>],
+    sorted: &mut [bool],
+    cache: &mut Vec<Updatable>,
+) {
+    if let Some(bone) = slider.bone {
+        sort_bone(bone, parents, sorted, cache);
+    }
+    cache.push(Updatable::Slider(i));
 }
 
 /// Mark `bone`'s descendants unsorted so they are recomputed after a constraint.
