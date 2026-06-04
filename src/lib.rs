@@ -27,6 +27,8 @@
 pub mod anim;
 pub mod atlas;
 pub mod attach;
+#[cfg(feature = "binary")]
+pub mod binary;
 pub mod constraint;
 pub mod data;
 pub mod event;
