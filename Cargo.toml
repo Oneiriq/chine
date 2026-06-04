@@ -9,10 +9,10 @@ keywords = ["spine", "animation", "skeletal", "2d", "gamedev"]
 categories = ["game-development", "graphics"]
 
 [features]
-default = ["json"]
+default = ["json", "binary"]
 # Load `.json` skeleton exports.
 json = ["dep:serde", "dep:serde_json"]
-# Load `.skel` binary skeleton exports.
+# Load `.skel` binary skeleton exports (no extra dependencies).
 binary = []
 
 [dependencies]
