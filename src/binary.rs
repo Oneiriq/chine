@@ -1095,17 +1095,22 @@ fn read_animation(
         }
     }
 
-    // Slider timelines (Spine 4.3): SLIDER_TIME / SLIDER_MIX, each a one-value
-    // curve. chine does not run sliders yet, so these are consumed to keep the
-    // stream aligned.
+    // Slider timelines (Spine 4.3): SLIDER_TIME (0) and SLIDER_MIX (1), each a
+    // one-value curve setting the slider's pose.
     let slider_groups = r.var_usize();
     for _ in 0..slider_groups {
-        let _slider = r.var_usize();
+        let index = r.var_usize();
         let count = r.var_usize();
         for _ in 0..count {
-            let _kind = r.byte();
+            let kind = r.byte();
             let frames = r.var_usize();
-            skip_timeline1(r, frames);
+            let (tl, d) = read_curve_timeline_n(r, index, frames, 1);
+            duration = duration.max(d);
+            match kind {
+                0 => timelines.push(Timeline::SliderTime(tl)),
+                1 => timelines.push(Timeline::SliderMix(tl)),
+                _ => return Animation::new(name, duration, timelines),
+            }
         }
     }
 
@@ -1320,29 +1325,6 @@ fn read_slot_color_timeline(
         vals = vals2;
     }
     (tl, duration)
-}
-
-/// Consume a one-value curve timeline (Bezier count, then time + value per
-/// frame with stepped / linear / Bezier curves) without building anything. Used
-/// for timeline kinds chine parses but does not yet apply (e.g. sliders).
-fn skip_timeline1(r: &mut BinaryReader, frames: usize) {
-    let _bezier_count = r.var_usize();
-    r.float(); // first frame time
-    r.float(); // first frame value
-    let last = frames.saturating_sub(1);
-    for frame in 0..frames {
-        if frame == last {
-            break;
-        }
-        r.float(); // time
-        r.float(); // value
-        if r.byte() == 2 {
-            // Bezier: four control floats.
-            for _ in 0..4 {
-                r.float();
-            }
-        }
-    }
 }
 
 /// Consume one mesh-deform timeline frame: a run of changed vertices encoded as

@@ -82,6 +82,27 @@ impl Default for SliderData {
     }
 }
 
+/// A runtime slider pose: its current scrub time and mix, both animatable (by
+/// the SLIDER_TIME and SLIDER_MIX timelines).
+#[derive(Debug, Clone, Copy)]
+pub struct SliderPose {
+    /// Scrub time, used directly when the slider has no driving bone.
+    pub time: f32,
+    /// Mix weight in `[0, 1]`.
+    pub mix: f32,
+}
+
+impl SliderPose {
+    /// Build a runtime pose from setup data.
+    #[must_use]
+    pub(crate) fn from_data(data: &SliderData) -> Self {
+        Self {
+            time: data.time,
+            mix: data.mix,
+        }
+    }
+}
+
 /// Read the local property value a slider maps to its scrub time.
 fn read_bone_property(bone: &Bone, property: SliderProperty) -> f32 {
     match property {
@@ -99,30 +120,35 @@ fn read_bone_property(bone: &Bone, property: SliderProperty) -> f32 {
 /// against the driven animation's duration), and apply that animation at the
 /// scrub time. Sliders with no bone, property, or driven animation do nothing.
 pub(crate) fn solve(skel: &mut Skeleton, c: usize) {
-    let data = skel.data().sliders[c].clone();
-    if data.mix == 0.0 {
+    let pose = skel.slider_pose(c);
+    if pose.mix == 0.0 {
         return;
     }
-    let (Some(animation_index), Some(bone_index), Some(property)) =
-        (data.animation_index, data.bone, data.property)
-    else {
+    let data = skel.data().sliders[c].clone();
+    let Some(animation_index) = data.animation_index else {
         return;
-    };
-    let value = match skel.bone(bone_index) {
-        Some(bone) => read_bone_property(bone, property),
-        None => return,
     };
     let Some(animation) = skel.data().animations.get(animation_index).cloned() else {
         return;
     };
     let duration = animation.duration();
-    let mut time = data.offset + (value - data.property_offset) * data.scale;
+    // A driving bone computes the scrub time from its property; otherwise the
+    // (possibly animated) pose time is used directly.
+    let mut time = if let (Some(bone_index), Some(property)) = (data.bone, data.property) {
+        let value = match skel.bone(bone_index) {
+            Some(bone) => read_bone_property(bone, property),
+            None => return,
+        };
+        data.offset + (value - data.property_offset) * data.scale
+    } else {
+        pose.time
+    };
     if data.looping && duration > 0.0 {
         time = duration + (time % duration);
     } else {
         time = time.max(0.0);
     }
-    animation.apply(skel, time, time, data.mix, MixFrom::Current, data.additive);
+    animation.apply(skel, time, time, pose.mix, MixFrom::Current, data.additive);
 }
 
 #[cfg(test)]
@@ -176,6 +202,60 @@ mod tests {
         sk.bone_mut(0).unwrap().rotation = 0.5;
         sk.update_world_transform();
         // The scrubbed animation rotated bone 1 to ~45 degrees.
+        let target = sk.bone(1).unwrap().rotation;
+        assert!((target - 45.0).abs() < 1.0, "target rotation = {target}");
+    }
+
+    #[test]
+    fn slider_time_timeline_scrubs_a_bone_less_slider() {
+        use crate::anim::{AnimationState, ConstraintTimeline};
+
+        // Scrubbed animation rotates bone 1 from 0 to 90 over time 0..1.
+        let mut rot = BoneTimeline::one_value(1, 2, 0);
+        rot.set_frame1(0, 0.0, 0.0);
+        rot.set_frame1(1, 1.0, 90.0);
+        let scrub = Animation::new("scrub", 1.0, vec![Timeline::Rotate(rot)]);
+
+        // A bone-less slider scrubbing that animation; its time comes from a
+        // SLIDER_TIME timeline rather than a bone.
+        let slider = SliderData {
+            name: "s".into(),
+            animation_index: Some(0),
+            mix: 1.0,
+            scale: 1.0,
+            ..Default::default()
+        };
+        let data = SkeletonData {
+            bones: vec![
+                BoneData {
+                    index: 0,
+                    name: "root".into(),
+                    ..Default::default()
+                },
+                BoneData {
+                    index: 1,
+                    name: "target".into(),
+                    parent: Some(0),
+                    ..Default::default()
+                },
+            ],
+            sliders: vec![slider],
+            animations: vec![Arc::new(scrub)],
+            ..Default::default()
+        };
+
+        // A SLIDER_TIME timeline sets the slider's scrub time to 0.5.
+        let mut st = ConstraintTimeline::new(0, 1, 0, 2);
+        st.set_frame(0, 0.0, &[0.5]);
+        let control = Animation::new("control", 0.0, vec![Timeline::SliderTime(st)]);
+
+        let mut sk = Skeleton::new(Arc::new(data));
+        let mut state = AnimationState::new();
+        state.set_animation(Arc::new(control), false);
+        state.update(0.0);
+        state.apply(&mut sk);
+        sk.update_world_transform();
+        // Scrub time 0.5 rotated bone 1 to ~45 degrees.
         let target = sk.bone(1).unwrap().rotation;
         assert!((target - 45.0).abs() < 1.0, "target rotation = {target}");
     }

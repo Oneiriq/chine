@@ -13,7 +13,7 @@ use std::sync::Arc;
 use crate::constraint::ik::{self, IkConstraint, IkConstraintData};
 use crate::constraint::path::{self, PathConstraint, PathConstraintData};
 use crate::constraint::physics::{self, Physics, PhysicsConstraint, PhysicsConstraintData};
-use crate::constraint::slider::{self, SliderData};
+use crate::constraint::slider::{self, SliderData, SliderPose};
 use crate::constraint::transform::{self, TransformConstraint, TransformConstraintData};
 use crate::data::{BoneData, Color, Inherit, SkeletonData, SlotData};
 use crate::event::Event;
@@ -215,6 +215,7 @@ pub struct Skeleton {
     transform_constraints: Vec<TransformConstraint>,
     path_constraints: Vec<PathConstraint>,
     physics_constraints: Vec<PhysicsConstraint>,
+    sliders: Vec<SliderPose>,
     slots: Vec<Slot>,
     draw_order: Vec<usize>,
     // Active named skin (index into `data.skins`); `None` uses the default skin.
@@ -258,6 +259,7 @@ impl Skeleton {
             .iter()
             .map(PhysicsConstraint::from_data)
             .collect();
+        let sliders = data.sliders.iter().map(SliderPose::from_data).collect();
         let slots = data.slots.iter().map(Slot::from_data).collect();
         let draw_order: Vec<usize> = (0..data.slots.len()).collect();
         let update_cache = build_update_cache(&data);
@@ -268,6 +270,7 @@ impl Skeleton {
             transform_constraints,
             path_constraints,
             physics_constraints,
+            sliders,
             slots,
             draw_order,
             skin: None,
@@ -410,6 +413,22 @@ impl Skeleton {
         let setup = self.data.slots.get(i)?;
         let slot = self.slots.get_mut(i)?;
         Some((slot, setup))
+    }
+
+    /// A slider's runtime pose (its current scrub time and mix).
+    pub(crate) fn slider_pose(&self, c: usize) -> SliderPose {
+        self.sliders[c]
+    }
+
+    /// A slider's mutable pose paired with its setup data, for the animation
+    /// system (the SLIDER_TIME / SLIDER_MIX timelines).
+    pub(crate) fn slider_pose_and_setup(
+        &mut self,
+        i: usize,
+    ) -> Option<(&mut SliderPose, &SliderData)> {
+        let setup = self.data.sliders.get(i)?;
+        let pose = self.sliders.get_mut(i)?;
+        Some((pose, setup))
     }
 
     /// An IK constraint's mutable pose paired with its setup data, for the

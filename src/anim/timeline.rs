@@ -367,6 +367,10 @@ pub(crate) enum Timeline {
     Physics(ConstraintTimeline, PhysicsProperty),
     /// Physics constraint reset, fired on keyframe crossings.
     PhysicsReset(PhysicsResetTimeline),
+    /// Slider scrub time (drives a bone-less slider's animation playhead).
+    SliderTime(ConstraintTimeline),
+    /// Slider mix.
+    SliderMix(ConstraintTimeline),
     /// Slot tint color; the index is the slot, the flag whether alpha is keyed
     /// (RGBA vs RGB).
     SlotColor(ConstraintTimeline, bool),
@@ -417,6 +421,8 @@ impl Timeline {
                 apply_physics(t, *property, skeleton, time, alpha, from, add);
             }
             Timeline::PhysicsReset(t) => apply_physics_reset(t, skeleton, last_time, time),
+            Timeline::SliderTime(t) => apply_slider_time(t, skeleton, time, alpha, from, add),
+            Timeline::SliderMix(t) => apply_slider_mix(t, skeleton, time, alpha, from, add),
             Timeline::SlotColor(t, has_alpha) => {
                 apply_slot_color(t, *has_alpha, skeleton, time, alpha, from, add);
             }
@@ -1097,6 +1103,39 @@ fn apply_slot_color(
             slot.color.a,
             setup.color.a,
         );
+    }
+}
+
+/// Slider scrub-time timeline: sets the slider's pose time (used when the slider
+/// has no driving bone).
+fn apply_slider_time(
+    t: &ConstraintTimeline,
+    skel: &mut Skeleton,
+    time: f32,
+    alpha: f32,
+    from: MixFrom,
+    add: bool,
+) {
+    if let Some((pose, setup)) = skel.slider_pose_and_setup(t.constraint) {
+        pose.time = t
+            .curve
+            .absolute_value(time, alpha, from, add, pose.time, setup.time);
+    }
+}
+
+/// Slider mix timeline: blends the slider's pose mix from its setup value.
+fn apply_slider_mix(
+    t: &ConstraintTimeline,
+    skel: &mut Skeleton,
+    time: f32,
+    alpha: f32,
+    from: MixFrom,
+    add: bool,
+) {
+    if let Some((pose, setup)) = skel.slider_pose_and_setup(t.constraint) {
+        pose.mix = t
+            .curve
+            .absolute_value(time, alpha, from, add, pose.mix, setup.mix);
     }
 }
 
