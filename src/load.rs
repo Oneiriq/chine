@@ -21,7 +21,10 @@ use crate::anim::{
     DrawOrderTimeline, EventTimeline, PhysicsProperty, PhysicsResetTimeline, Timeline,
     GLOBAL_PHYSICS,
 };
-use crate::attach::{Attachment, MeshAttachment, MeshVertices, PathAttachment, RegionAttachment};
+use crate::attach::{
+    Attachment, BoundingBoxAttachment, MeshAttachment, MeshVertices, PathAttachment,
+    PointAttachment, RegionAttachment,
+};
 use crate::constraint::ik::IkConstraintData;
 use crate::constraint::path::{PathConstraintData, PositionMode, RotateMode, SpacingMode};
 use crate::constraint::physics::PhysicsConstraintData;
@@ -260,7 +263,25 @@ fn parse_attachment(name: &str, v: &Value) -> Option<Attachment> {
                 bool_or(v, "constantSpeed", true),
             )))
         }
-        // linkedmesh / boundingbox / clipping / point arrive later.
+        "boundingbox" => {
+            let count = v.get("vertexCount").and_then(Value::as_u64).unwrap_or(0) as usize;
+            let raw = f_array(v, "vertices");
+            let vertices = if raw.len() == count * 2 {
+                MeshVertices::Unweighted(raw)
+            } else {
+                parse_weighted(&raw)
+            };
+            Some(Attachment::BoundingBox(BoundingBoxAttachment::new(
+                name, vertices, count,
+            )))
+        }
+        "point" => Some(Attachment::Point(PointAttachment::new(
+            name,
+            f(v, "x"),
+            f(v, "y"),
+            f(v, "rotation"),
+        ))),
+        // linkedmesh / clipping arrive later.
         _ => None,
     }
 }
@@ -2078,5 +2099,27 @@ mod tests {
         let aim_bone = sk.bone(aim).unwrap();
         assert!(aim_bone.a().abs() < 1e-2, "a={}", aim_bone.a());
         assert!((aim_bone.c() - 1.0).abs() < 1e-2, "c={}", aim_bone.c());
+    }
+
+    #[test]
+    fn parses_boundingbox_and_point_attachments() {
+        let bb: Value = serde_json::from_str(
+            r#"{"type":"boundingbox","vertexCount":3,"vertices":[0,0,10,0,10,10]}"#,
+        )
+        .unwrap();
+        match parse_attachment("hit", &bb) {
+            Some(Attachment::BoundingBox(b)) => assert_eq!(b.vertex_count(), 3),
+            other => panic!("expected boundingbox, got {other:?}"),
+        }
+        let pt: Value =
+            serde_json::from_str(r#"{"type":"point","x":5,"y":6,"rotation":30}"#).unwrap();
+        match parse_attachment("muzzle", &pt) {
+            Some(Attachment::Point(p)) => {
+                assert!((p.x - 5.0).abs() < 1e-4);
+                assert!((p.y - 6.0).abs() < 1e-4);
+                assert!((p.rotation - 30.0).abs() < 1e-4);
+            }
+            other => panic!("expected point, got {other:?}"),
+        }
     }
 }

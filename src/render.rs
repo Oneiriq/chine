@@ -63,7 +63,7 @@ fn bind_skin(skin: &mut Skin, atlas: &Atlas) {
                     m.remap_uvs(region, pw, ph);
                 }
             }
-            Attachment::Path(_) => {}
+            Attachment::Path(_) | Attachment::BoundingBox(_) | Attachment::Point(_) => {}
         }
     }
 }
@@ -115,7 +115,7 @@ pub fn render(skeleton: &Skeleton) -> Vec<RenderCommand> {
                     blend: setup.blend,
                 });
             }
-            Attachment::Path(_) => {}
+            Attachment::Path(_) | Attachment::BoundingBox(_) | Attachment::Point(_) => {}
         }
     }
     out

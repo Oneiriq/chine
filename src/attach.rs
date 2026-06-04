@@ -3,8 +3,8 @@
 //! [`RegionAttachment`] (a textured quad on one bone) and [`MeshAttachment`] (a
 //! textured mesh whose vertices may be weighted across several bones) are the
 //! renderable types; [`PathAttachment`] holds the Bezier control points that
-//! path constraints follow. Clipping, bounding-box, and point attachments
-//! arrive in later milestones.
+//! path constraints follow. Bounding-box and point attachments are exposed as
+//! geometry/transform data; clipping attachments arrive later.
 
 use glam::Vec2;
 
@@ -34,6 +34,10 @@ pub enum Attachment {
     Mesh(MeshAttachment),
     /// A composite Bezier path that path constraints follow.
     Path(PathAttachment),
+    /// A collision/hit polygon (not rendered).
+    BoundingBox(BoundingBoxAttachment),
+    /// A point with a position and rotation on a bone (not rendered).
+    Point(PointAttachment),
 }
 
 /// A textured quad attached to a slot's bone.
@@ -402,6 +406,87 @@ impl PathAttachment {
     }
 }
 
+/// A bounding-box attachment: a (weighted or unweighted) polygon used for
+/// collision/hit queries. Not rendered; the host transforms it to world space.
+#[derive(Debug, Clone)]
+pub struct BoundingBoxAttachment {
+    /// Attachment name (the key within a skin).
+    pub name: String,
+    /// Polygon vertices (bind pose).
+    vertices: MeshVertices,
+    /// Number of polygon vertices.
+    vertex_count: usize,
+}
+
+impl BoundingBoxAttachment {
+    /// A bounding-box attachment from its parts.
+    #[must_use]
+    pub fn new(name: impl Into<String>, vertices: MeshVertices, vertex_count: usize) -> Self {
+        Self {
+            name: name.into(),
+            vertices,
+            vertex_count,
+        }
+    }
+
+    /// Number of polygon vertices.
+    #[must_use]
+    pub fn vertex_count(&self) -> usize {
+        self.vertex_count
+    }
+
+    /// Compute world-space positions for every polygon vertex.
+    #[must_use]
+    pub fn compute_world_vertices(&self, skeleton: &Skeleton, slot_bone: usize) -> Vec<Vec2> {
+        compute_vertices(&self.vertices, self.vertex_count, skeleton, slot_bone, &[])
+    }
+}
+
+/// A point attachment: a position and rotation on a bone (a handle for spawning
+/// effects, aiming, and similar). Not rendered.
+#[derive(Debug, Clone)]
+pub struct PointAttachment {
+    /// Attachment name (the key within a skin).
+    pub name: String,
+    /// Local x offset from the bone.
+    pub x: f32,
+    /// Local y offset from the bone.
+    pub y: f32,
+    /// Local rotation, in degrees.
+    pub rotation: f32,
+}
+
+impl PointAttachment {
+    /// A point attachment from its parts.
+    #[must_use]
+    pub fn new(name: impl Into<String>, x: f32, y: f32, rotation: f32) -> Self {
+        Self {
+            name: name.into(),
+            x,
+            y,
+            rotation,
+        }
+    }
+
+    /// The point's world-space position on `bone`.
+    #[must_use]
+    pub fn compute_world_position(&self, bone: &Bone) -> Vec2 {
+        Vec2::new(
+            self.x * bone.a() + self.y * bone.b() + bone.world_x(),
+            self.x * bone.c() + self.y * bone.d() + bone.world_y(),
+        )
+    }
+
+    /// The point's world-space rotation on `bone`, in degrees.
+    #[must_use]
+    pub fn compute_world_rotation(&self, bone: &Bone) -> f32 {
+        let (sin, cos) = (self.rotation * DEG_RAD).sin_cos();
+        let x = cos * bone.a() + sin * bone.b();
+        let y = cos * bone.c() + sin * bone.d();
+        y.atan2(x).to_degrees()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -563,5 +648,33 @@ mod tests {
         // (1,1) -> u=(10+0)/100=0.1, v=(20+40)/100=0.6.
         assert!((m.uvs[2] - 0.1).abs() < 1e-4, "u1={}", m.uvs[2]);
         assert!((m.uvs[3] - 0.6).abs() < 1e-4, "v1={}", m.uvs[3]);
+    }
+
+    #[test]
+    fn bounding_box_polygon_follows_its_bone() {
+        let sk = one_bone_at(10.0, 0.0);
+        let bb = BoundingBoxAttachment::new(
+            "bb",
+            MeshVertices::Unweighted(vec![0.0, 0.0, 10.0, 0.0, 10.0, 10.0]),
+            3,
+        );
+        assert_eq!(bb.vertex_count(), 3);
+        let w = bb.compute_world_vertices(&sk, 0);
+        assert_eq!(w.len(), 3);
+        // bone at (10,0): each polygon vertex offset by +10 in x.
+        assert!(close(w[0], 10.0, 0.0), "{:?}", w[0]);
+        assert!(close(w[1], 20.0, 0.0), "{:?}", w[1]);
+        assert!(close(w[2], 20.0, 10.0), "{:?}", w[2]);
+    }
+
+    #[test]
+    fn point_attachment_transforms_with_its_bone() {
+        let sk = one_bone_at(10.0, 20.0);
+        let bone = sk.bone(0).unwrap();
+        let p = PointAttachment::new("p", 5.0, 0.0, 90.0);
+        let pos = p.compute_world_position(bone);
+        assert!(close(pos, 15.0, 20.0), "pos {:?}", pos);
+        // identity bone: world rotation equals the point's local rotation.
+        assert!((p.compute_world_rotation(bone) - 90.0).abs() < 1e-3);
     }
 }
