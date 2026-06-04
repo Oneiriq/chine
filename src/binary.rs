@@ -766,10 +766,8 @@ fn read_animation(
                     Some((Timeline::SlotTwoColor(tl, false), d))
                 }
                 5 => {
-                    // Alpha-only: chine has no alpha slot timeline yet; consume
-                    // the bytes so the stream stays aligned.
-                    read_slot_color_timeline(r, slot, frames, 1);
-                    None
+                    let (tl, d) = read_slot_color_timeline(r, slot, frames, 1);
+                    Some((Timeline::SlotAlpha(tl), d))
                 }
                 _ => return Animation::new(name, duration, timelines),
             };
@@ -1656,5 +1654,50 @@ mod tests {
         state.apply(&mut sk);
         // Slot 0 moved to the end: the order becomes b, c, a.
         assert_eq!(sk.draw_order(), &[1, 2, 0]);
+    }
+
+    #[test]
+    fn reads_a_slot_alpha_timeline() {
+        let data = SkeletonData {
+            bones: vec![BoneData {
+                index: 0,
+                name: "root".into(),
+                ..Default::default()
+            }],
+            slots: vec![SlotData {
+                index: 0,
+                name: "s".into(),
+                bone: 0,
+                color: Color::WHITE,
+                dark_color: None,
+                attachment: None,
+                blend: BlendMode::Normal,
+            }],
+            ..Default::default()
+        };
+        // Alpha 1.0 -> 0.0 over time 0 -> 1, linear (one byte per alpha channel).
+        let mut b = Vec::new();
+        b.push(0); // bezier-segment count
+        b.extend_from_slice(&0.0_f32.to_be_bytes());
+        b.push(255); // alpha 1.0
+        b.extend_from_slice(&1.0_f32.to_be_bytes());
+        b.push(0); // alpha 0.0
+        b.push(0); // linear curve
+        let mut r = BinaryReader::new(&b);
+        let (tl, dur) = read_slot_color_timeline(&mut r, 0, 2, 1);
+        assert!((dur - 1.0).abs() < 1e-6);
+        assert!(!r.overran());
+
+        let anim = Animation::new("fade", dur, vec![Timeline::SlotAlpha(tl)]);
+        let mut sk = crate::skel::Skeleton::new(std::sync::Arc::new(data));
+        let mut state = crate::anim::AnimationState::new();
+        state.set_animation(std::sync::Arc::new(anim), false);
+        state.update(0.5);
+        sk.set_slots_to_setup_pose();
+        state.apply(&mut sk);
+        // Half-way the alpha is ~0.5; red stays at the setup white.
+        let c = sk.slot(0).unwrap().color;
+        assert!((c.a - 0.5).abs() < 0.05, "alpha={}", c.a);
+        assert!((c.r - 1.0).abs() < 1e-3, "r={}", c.r);
     }
 }

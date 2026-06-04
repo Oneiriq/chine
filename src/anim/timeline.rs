@@ -370,6 +370,8 @@ pub(crate) enum Timeline {
     /// Slot tint color; the index is the slot, the flag whether alpha is keyed
     /// (RGBA vs RGB).
     SlotColor(ConstraintTimeline, bool),
+    /// Slot tint alpha only (the slot color's alpha channel).
+    SlotAlpha(ConstraintTimeline),
     /// Slot two-color (light + dark); the flag is whether the light has alpha
     /// (RGBA2 vs RGB2).
     SlotTwoColor(ConstraintTimeline, bool),
@@ -418,6 +420,7 @@ impl Timeline {
             Timeline::SlotColor(t, has_alpha) => {
                 apply_slot_color(t, *has_alpha, skeleton, time, alpha, from, add);
             }
+            Timeline::SlotAlpha(t) => apply_slot_alpha(t, skeleton, time, alpha, from, add),
             Timeline::SlotTwoColor(t, light_alpha) => {
                 apply_slot_two_color(t, *light_alpha, skeleton, time, alpha, from, add);
             }
@@ -1095,6 +1098,37 @@ fn apply_slot_color(
             setup.color.a,
         );
     }
+}
+
+/// Slot alpha timeline: blends only the slot tint's alpha channel from its setup
+/// value toward the keyed alpha.
+fn apply_slot_alpha(
+    t: &ConstraintTimeline,
+    skel: &mut Skeleton,
+    time: f32,
+    alpha: f32,
+    from: MixFrom,
+    add: bool,
+) {
+    let Some((slot, setup)) = skel.slot_pose_and_setup(t.constraint) else {
+        return;
+    };
+    if time < t.curve.first_time() {
+        match from {
+            MixFrom::Setup => slot.color.a = setup.color.a,
+            MixFrom::First => slot.color.a += (setup.color.a - slot.color.a) * alpha,
+            MixFrom::Current => {}
+        }
+        return;
+    }
+    slot.color.a = absolute_value_with(
+        t.curve.value(time, 1),
+        alpha,
+        from,
+        add,
+        slot.color.a,
+        setup.color.a,
+    );
 }
 
 /// Slot two-color timeline: blends the slot's light (RGB or RGBA) and dark (RGB)
