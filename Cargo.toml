@@ -8,6 +8,10 @@ repository = "https://github.com/Oneiriq/chine"
 keywords = ["spine", "animation", "skeletal", "2d", "gamedev"]
 categories = ["game-development", "graphics"]
 
+[workspace]
+members = ["chine-web"]
+resolver = "2"
+
 [features]
 default = ["json", "binary"]
 # Load `.json` skeleton exports.

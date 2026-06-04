@@ -1,0 +1,36 @@
+[package]
+name = "chine-web"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "WebAssembly + WebGL2 web-component runtime for the chine Spine 4.3 runtime."
+repository = "https://github.com/Oneiriq/chine"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+chine = { path = ".." }
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+
+[dependencies.web-sys]
+version = "0.3"
+features = [
+    "Window",
+    "Document",
+    "Element",
+    "HtmlCanvasElement",
+    "WebGl2RenderingContext",
+    "WebGlProgram",
+    "WebGlShader",
+    "WebGlBuffer",
+    "WebGlTexture",
+    "WebGlUniformLocation",
+    "WebGlVertexArrayObject",
+]
+
+[profile.release]
+# Smaller WASM: optimize for size, strip, and let wasm-opt finish the job.
+opt-level = "s"
+lto = true

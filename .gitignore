@@ -1,3 +1,5 @@
 /target
 # Local Spine export reference material (skeletons, atlases, images, logs).
 /data
+# wasm-pack build output for the web crate.
+/chine-web/pkg
