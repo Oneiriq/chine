@@ -1,481 +1,6 @@
-//! Bone-property animation timelines (rotate / translate / scale).
-//!
-//! Each timeline keys one bone over time via a [`Curve`]. The apply logic is
-//! transcribed from Spine 4.3: rotate/translate values are **added** to the
-//! setup pose, scale values **multiply** it (with sign-adjusted mixing).
+use super::*;
 
-use super::curve::{absolute_value_with, Curve};
-use super::MixFrom;
-use crate::attach::Attachment;
-use crate::constraint::physics::{PhysicsConstraint, PhysicsConstraintData};
-use crate::data::Color;
-use crate::event::Event;
-use crate::skel::Skeleton;
-
-/// A bone index plus its keyframe curve. The [`Timeline`] variant selects how
-/// the curve value combines with the bone's setup pose.
-#[derive(Debug, Clone)]
-pub(crate) struct BoneTimeline {
-    bone: usize,
-    curve: Curve,
-}
-
-impl BoneTimeline {
-    /// A one-value timeline (rotate) for `bone`.
-    pub(crate) fn one_value(bone: usize, frame_count: usize, bezier_count: usize) -> Self {
-        Self {
-            bone,
-            curve: Curve::new(frame_count, bezier_count, 2),
-        }
-    }
-
-    /// A two-value timeline (translate / scale) for `bone`.
-    pub(crate) fn two_value(bone: usize, frame_count: usize, bezier_count: usize) -> Self {
-        Self {
-            bone,
-            curve: Curve::new(frame_count, bezier_count, 3),
-        }
-    }
-
-    /// Set a one-value frame.
-    pub(crate) fn set_frame1(&mut self, frame: usize, time: f32, value: f32) {
-        self.curve.set_frame1(frame, time, value);
-    }
-
-    /// Set a two-value frame.
-    pub(crate) fn set_frame2(&mut self, frame: usize, time: f32, value1: f32, value2: f32) {
-        self.curve.set_frame2(frame, time, value1, value2);
-    }
-
-    /// Mark `frame` as stepped.
-    pub(crate) fn set_stepped(&mut self, frame: usize) {
-        self.curve.set_stepped(frame);
-    }
-
-    /// Store a Bezier segment table for `frame`'s value ordinal `value`.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn set_bezier(
-        &mut self,
-        bezier: usize,
-        frame: usize,
-        value: usize,
-        time1: f32,
-        value1: f32,
-        cx1: f32,
-        cy1: f32,
-        cx2: f32,
-        cy2: f32,
-        time2: f32,
-        value2: f32,
-    ) {
-        self.curve.set_bezier(
-            bezier, frame, value, time1, value1, cx1, cy1, cx2, cy2, time2, value2,
-        );
-    }
-}
-
-/// A keyframed set of constraint-mix channels (IK / transform / path). The
-/// [`Timeline`] variant selects which constraint and channels it drives.
-#[derive(Debug, Clone)]
-pub(crate) struct ConstraintTimeline {
-    constraint: usize,
-    curve: Curve,
-}
-
-impl ConstraintTimeline {
-    /// A constraint timeline for `constraint` with `entries` floats per frame
-    /// (1 time + N channels).
-    pub(crate) fn new(
-        constraint: usize,
-        frame_count: usize,
-        bezier_count: usize,
-        entries: usize,
-    ) -> Self {
-        Self {
-            constraint,
-            curve: Curve::new(frame_count, bezier_count, entries),
-        }
-    }
-
-    /// Set a frame: `time` followed by one value per channel.
-    pub(crate) fn set_frame(&mut self, frame: usize, time: f32, values: &[f32]) {
-        self.curve.set_frame_n(frame, time, values);
-    }
-
-    /// Mark `frame` as stepped.
-    pub(crate) fn set_stepped(&mut self, frame: usize) {
-        self.curve.set_stepped(frame);
-    }
-
-    /// Store a Bezier segment table for `frame`'s channel `value`.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn set_bezier(
-        &mut self,
-        bezier: usize,
-        frame: usize,
-        value: usize,
-        time1: f32,
-        value1: f32,
-        cx1: f32,
-        cy1: f32,
-        cx2: f32,
-        cy2: f32,
-        time2: f32,
-        value2: f32,
-    ) {
-        self.curve.set_bezier(
-            bezier, frame, value, time1, value1, cx1, cy1, cx2, cy2, time2, value2,
-        );
-    }
-}
-
-/// A physics constraint reset timeline: keyframe times that, when crossed, reset
-/// the target constraint's simulation state (or every physics constraint when
-/// the target is [`GLOBAL_PHYSICS`]).
-#[derive(Debug, Clone)]
-pub(crate) struct PhysicsResetTimeline {
-    constraint: usize,
-    times: Vec<f32>,
-}
-
-impl PhysicsResetTimeline {
-    /// A reset timeline for `constraint` firing at each time in `times`.
-    pub(crate) fn new(constraint: usize, times: Vec<f32>) -> Self {
-        Self { constraint, times }
-    }
-}
-
-/// A slot attachment timeline: stepped `(time, name)` pairs selecting which
-/// attachment a slot shows (`None` hides it).
-#[derive(Debug, Clone)]
-pub(crate) struct AttachmentTimeline {
-    slot: usize,
-    times: Vec<f32>,
-    names: Vec<Option<String>>,
-}
-
-impl AttachmentTimeline {
-    /// An attachment timeline for `slot`.
-    pub(crate) fn new(slot: usize, times: Vec<f32>, names: Vec<Option<String>>) -> Self {
-        Self { slot, times, names }
-    }
-}
-
-/// A draw-order timeline: stepped per-keyframe slot orderings (each a full
-/// permutation of slot indices, back to front).
-#[derive(Debug, Clone)]
-pub(crate) struct DrawOrderTimeline {
-    times: Vec<f32>,
-    orders: Vec<Vec<usize>>,
-}
-
-impl DrawOrderTimeline {
-    /// A draw-order timeline from per-keyframe orderings.
-    pub(crate) fn new(times: Vec<f32>, orders: Vec<Vec<usize>>) -> Self {
-        Self { times, orders }
-    }
-}
-
-/// Compute a draw order from slot offsets, mirroring Spine: each listed slot
-/// moves by its offset; the rest keep their relative order. Shared by the JSON
-/// and binary loaders.
-pub(crate) fn compute_draw_order(slot_count: usize, offsets: &mut [(usize, i32)]) -> Vec<usize> {
-    offsets.sort_by_key(|(slot, _)| *slot);
-    let mut draw_order = vec![usize::MAX; slot_count];
-    let mut unchanged = vec![0usize; slot_count.saturating_sub(offsets.len())];
-    let mut original_index = 0;
-    let mut unchanged_index = 0;
-    for &(slot_index, offset) in offsets.iter() {
-        while original_index != slot_index && original_index < slot_count {
-            unchanged[unchanged_index] = original_index;
-            unchanged_index += 1;
-            original_index += 1;
-        }
-        let pos = original_index as i32 + offset;
-        if (0..slot_count as i32).contains(&pos) {
-            draw_order[pos as usize] = original_index;
-        }
-        original_index += 1;
-    }
-    while original_index < slot_count {
-        unchanged[unchanged_index] = original_index;
-        unchanged_index += 1;
-        original_index += 1;
-    }
-    for i in (0..slot_count).rev() {
-        if draw_order[i] == usize::MAX && unchanged_index > 0 {
-            unchanged_index -= 1;
-            draw_order[i] = unchanged[unchanged_index];
-        }
-    }
-    draw_order
-}
-
-/// An event timeline: keyframe times and the [`Event`] fired at each (with
-/// keyframe-overridden values resolved at load time).
-#[derive(Debug, Clone)]
-pub(crate) struct EventTimeline {
-    times: Vec<f32>,
-    events: Vec<Event>,
-}
-
-impl EventTimeline {
-    /// An event timeline from keyframe times and their resolved events.
-    pub(crate) fn new(times: Vec<f32>, events: Vec<Event>) -> Self {
-        Self { times, events }
-    }
-}
-
-/// A sequence (flipbook) timeline: per keyframe a time, a packed mode-and-index,
-/// and a delay. The shown region index advances from the active keyframe by the
-/// elapsed time over the delay, wrapped per the sequence mode.
-#[derive(Debug, Clone)]
-pub(crate) struct SequenceTimeline {
-    slot: usize,
-    attachment: String,
-    count: usize,
-    times: Vec<f32>,
-    mode_and_index: Vec<u32>,
-    delays: Vec<f32>,
-}
-
-impl SequenceTimeline {
-    /// A sequence timeline for `slot` / `attachment` over `count` regions.
-    pub(crate) fn new(
-        slot: usize,
-        attachment: String,
-        count: usize,
-        times: Vec<f32>,
-        mode_and_index: Vec<u32>,
-        delays: Vec<f32>,
-    ) -> Self {
-        Self {
-            slot,
-            attachment,
-            count,
-            times,
-            mode_and_index,
-            delays,
-        }
-    }
-}
-
-/// A mesh deform timeline: per-keyframe vertex offsets. For an unweighted mesh
-/// they add to the setup vertices; for a weighted mesh the setup is zero and the
-/// offsets add per-influence in `compute_vertices`. Only applies while the slot
-/// shows the matching attachment.
-#[derive(Debug, Clone)]
-pub(crate) struct DeformTimeline {
-    slot: usize,
-    attachment: String,
-    skin: Option<String>,
-    setup: Vec<f32>,
-    times: Vec<f32>,
-    frames: Vec<Vec<f32>>,
-    curve: Curve,
-}
-
-impl DeformTimeline {
-    /// A deform timeline for `slot`/`attachment` with setup vertices, the
-    /// per-keyframe offset frames, and room for `bezier_count` Bezier segments.
-    pub(crate) fn new(
-        slot: usize,
-        attachment: String,
-        skin: Option<String>,
-        setup: Vec<f32>,
-        times: Vec<f32>,
-        frames: Vec<Vec<f32>>,
-        bezier_count: usize,
-    ) -> Self {
-        let mut curve = Curve::new(times.len(), bezier_count, 2);
-        for (i, &t) in times.iter().enumerate() {
-            curve.set_frame1(i, t, 0.0);
-        }
-        Self {
-            slot,
-            attachment,
-            skin,
-            setup,
-            times,
-            frames,
-            curve,
-        }
-    }
-
-    /// Mark `frame` as stepped (the deform snaps to the earlier keyframe).
-    pub(crate) fn set_stepped(&mut self, frame: usize) {
-        self.curve.set_stepped(frame);
-    }
-
-    /// Store a Bezier segment driving the interpolation percent at `frame`.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn set_bezier(
-        &mut self,
-        bezier: usize,
-        frame: usize,
-        value: usize,
-        time1: f32,
-        value1: f32,
-        cx1: f32,
-        cy1: f32,
-        cx2: f32,
-        cy2: f32,
-        time2: f32,
-        value2: f32,
-    ) {
-        self.curve.set_bezier(
-            bezier, frame, value, time1, value1, cx1, cy1, cx2, cy2, time2, value2,
-        );
-    }
-
-    /// The curve-aware interpolation percent at `time`.
-    fn percent(&self, time: f32) -> f32 {
-        self.curve.percent(time)
-    }
-}
-
-/// Sentinel constraint index marking a physics timeline as global: it drives
-/// every physics constraint whose matching global flag is set.
-pub(crate) const GLOBAL_PHYSICS: usize = usize::MAX;
-
-/// Which tunable a physics constraint timeline drives.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PhysicsProperty {
-    /// Inertia.
-    Inertia,
-    /// Spring strength.
-    Strength,
-    /// Damping.
-    Damping,
-    /// Mass (animated as a mass value, stored inverted).
-    Mass,
-    /// Wind (blended additively).
-    Wind,
-    /// Gravity (blended additively).
-    Gravity,
-    /// Mix.
-    Mix,
-}
-
-/// A single bone axis driven by a one-value timeline.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BoneAxis {
-    /// Local x translation.
-    TranslateX,
-    /// Local y translation.
-    TranslateY,
-    /// Local x scale.
-    ScaleX,
-    /// Local y scale.
-    ScaleY,
-    /// Local x shear.
-    ShearX,
-    /// Local y shear.
-    ShearY,
-}
-
-/// A keyframed animation channel for one bone property or constraint mix.
-#[derive(Debug, Clone)]
-pub(crate) enum Timeline {
-    /// Local rotation (degrees).
-    Rotate(BoneTimeline),
-    /// Local translation (x, y).
-    Translate(BoneTimeline),
-    /// Local scale (x, y).
-    Scale(BoneTimeline),
-    /// Local shear (x, y).
-    Shear(BoneTimeline),
-    /// A single bone axis (translateX/Y, scaleX/Y, shearX/Y).
-    BoneAxis(BoneTimeline, BoneAxis),
-    /// IK constraint mix / softness / bend / compress / stretch.
-    Ik(ConstraintTimeline),
-    /// Transform constraint mixes (rotate / x / y / scaleX / scaleY / shearY).
-    TransformMix(ConstraintTimeline),
-    /// Path constraint position.
-    PathPosition(ConstraintTimeline),
-    /// Path constraint spacing.
-    PathSpacing(ConstraintTimeline),
-    /// Path constraint mixes (rotate / x / y).
-    PathMix(ConstraintTimeline),
-    /// Physics constraint tunable (the selected [`PhysicsProperty`]).
-    Physics(ConstraintTimeline, PhysicsProperty),
-    /// Physics constraint reset, fired on keyframe crossings.
-    PhysicsReset(PhysicsResetTimeline),
-    /// Slider scrub time (drives a bone-less slider's animation playhead).
-    SliderTime(ConstraintTimeline),
-    /// Slider mix.
-    SliderMix(ConstraintTimeline),
-    /// Slot tint color; the index is the slot, the flag whether alpha is keyed
-    /// (RGBA vs RGB).
-    SlotColor(ConstraintTimeline, bool),
-    /// Slot tint alpha only (the slot color's alpha channel).
-    SlotAlpha(ConstraintTimeline),
-    /// Slot two-color (light + dark); the flag is whether the light has alpha
-    /// (RGBA2 vs RGB2).
-    SlotTwoColor(ConstraintTimeline, bool),
-    /// Slot attachment swap (stepped).
-    Attachment(AttachmentTimeline),
-    /// Slot draw order (stepped permutations).
-    DrawOrder(DrawOrderTimeline),
-    /// Animation events fired on keyframe crossings.
-    Event(EventTimeline),
-    /// Mesh deform (unweighted local-vertex offsets).
-    Deform(DeformTimeline),
-    /// Slot sequence (flipbook) frame index.
-    Sequence(SequenceTimeline),
-}
-
-impl Timeline {
-    /// Apply this timeline to `skeleton` over the window `(last_time, time]`.
-    /// `from`/`add`/`out` follow Spine's mix semantics; `out` only affects
-    /// scale; `last_time` is used only by the physics reset timeline.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn apply(
-        &self,
-        skeleton: &mut Skeleton,
-        last_time: f32,
-        time: f32,
-        alpha: f32,
-        from: MixFrom,
-        add: bool,
-        out: bool,
-    ) {
-        match self {
-            Timeline::Rotate(t) => apply_rotate(t, skeleton, time, alpha, from, add),
-            Timeline::Translate(t) => apply_translate(t, skeleton, time, alpha, from, add),
-            Timeline::Scale(t) => apply_scale(t, skeleton, time, alpha, from, add, out),
-            Timeline::Shear(t) => apply_shear(t, skeleton, time, alpha, from, add),
-            Timeline::BoneAxis(t, axis) => {
-                apply_bone_axis(t, *axis, skeleton, time, alpha, from, add, out);
-            }
-            Timeline::Ik(t) => apply_ik(t, skeleton, time, alpha, from, out),
-            Timeline::TransformMix(t) => apply_transform_mix(t, skeleton, time, alpha, from, add),
-            Timeline::PathPosition(t) => apply_path_position(t, skeleton, time, alpha, from, add),
-            Timeline::PathSpacing(t) => apply_path_spacing(t, skeleton, time, alpha, from),
-            Timeline::PathMix(t) => apply_path_mix(t, skeleton, time, alpha, from, add),
-            Timeline::Physics(t, property) => {
-                apply_physics(t, *property, skeleton, time, alpha, from, add);
-            }
-            Timeline::PhysicsReset(t) => apply_physics_reset(t, skeleton, last_time, time),
-            Timeline::SliderTime(t) => apply_slider_time(t, skeleton, time, alpha, from, add),
-            Timeline::SliderMix(t) => apply_slider_mix(t, skeleton, time, alpha, from, add),
-            Timeline::SlotColor(t, has_alpha) => {
-                apply_slot_color(t, *has_alpha, skeleton, time, alpha, from, add);
-            }
-            Timeline::SlotAlpha(t) => apply_slot_alpha(t, skeleton, time, alpha, from, add),
-            Timeline::SlotTwoColor(t, light_alpha) => {
-                apply_slot_two_color(t, *light_alpha, skeleton, time, alpha, from, add);
-            }
-            Timeline::Attachment(t) => apply_attachment(t, skeleton, time, from),
-            Timeline::DrawOrder(t) => apply_draw_order(t, skeleton, time),
-            Timeline::Event(t) => apply_event(t, skeleton, last_time, time),
-            Timeline::Deform(t) => apply_deform(t, skeleton, time, alpha, from),
-            Timeline::Sequence(t) => apply_sequence(t, skeleton, time),
-        }
-    }
-}
-
-fn apply_rotate(
+pub(super) fn apply_rotate(
     t: &BoneTimeline,
     skel: &mut Skeleton,
     time: f32,
@@ -490,7 +15,7 @@ fn apply_rotate(
     }
 }
 
-fn apply_translate(
+pub(super) fn apply_translate(
     t: &BoneTimeline,
     skel: &mut Skeleton,
     time: f32,
@@ -530,7 +55,7 @@ fn apply_translate(
 }
 
 #[allow(clippy::similar_names)]
-fn apply_scale(
+pub(super) fn apply_scale(
     t: &BoneTimeline,
     skel: &mut Skeleton,
     time: f32,
@@ -594,7 +119,7 @@ fn signum(x: f32) -> f32 {
     }
 }
 
-fn apply_shear(
+pub(super) fn apply_shear(
     t: &BoneTimeline,
     skel: &mut Skeleton,
     time: f32,
@@ -636,7 +161,7 @@ fn apply_shear(
 /// Apply a single-axis bone timeline. Translation and shear axes add to the
 /// setup; scale axes multiply it with sign-aware mixing.
 #[allow(clippy::too_many_arguments)]
-fn apply_bone_axis(
+pub(super) fn apply_bone_axis(
     t: &BoneTimeline,
     axis: BoneAxis,
     skel: &mut Skeleton,
@@ -704,7 +229,7 @@ fn apply_bone_axis(
 }
 
 /// Reset one scale channel toward its setup value (the before-first-frame case).
-fn apply_scale_setup(scale: &mut f32, setup: f32, alpha: f32, from: MixFrom) {
+pub(super) fn apply_scale_setup(scale: &mut f32, setup: f32, alpha: f32, from: MixFrom) {
     match from {
         MixFrom::Setup => *scale = setup,
         MixFrom::First => *scale += (setup - *scale) * alpha,
@@ -744,7 +269,7 @@ fn scale_channel(
 
 /// IK constraint timeline: mix and softness are interpolated; bend direction,
 /// compress, and stretch are stepped (read from the frame).
-fn apply_ik(
+pub(super) fn apply_ik(
     t: &ConstraintTimeline,
     skel: &mut Skeleton,
     time: f32,
@@ -798,7 +323,7 @@ fn apply_ik(
 }
 
 /// Transform constraint timeline: six interpolated mixes.
-fn apply_transform_mix(
+pub(super) fn apply_transform_mix(
     t: &ConstraintTimeline,
     skel: &mut Skeleton,
     time: f32,
@@ -882,7 +407,7 @@ fn apply_transform_mix(
 }
 
 /// Path constraint position timeline (single absolute value).
-fn apply_path_position(
+pub(super) fn apply_path_position(
     t: &ConstraintTimeline,
     skel: &mut Skeleton,
     time: f32,
@@ -898,7 +423,7 @@ fn apply_path_position(
 }
 
 /// Path constraint spacing timeline (single absolute value, never additive).
-fn apply_path_spacing(
+pub(super) fn apply_path_spacing(
     t: &ConstraintTimeline,
     skel: &mut Skeleton,
     time: f32,
@@ -913,7 +438,7 @@ fn apply_path_spacing(
 }
 
 /// Path constraint mix timeline (rotate / x / y).
-fn apply_path_mix(
+pub(super) fn apply_path_mix(
     t: &ConstraintTimeline,
     skel: &mut Skeleton,
     time: f32,
@@ -969,7 +494,7 @@ fn apply_path_mix(
 /// Physics constraint timeline: drives one tunable on one constraint, or on
 /// every constraint whose matching global flag is set when the target is
 /// [`GLOBAL_PHYSICS`].
-fn apply_physics(
+pub(super) fn apply_physics(
     t: &ConstraintTimeline,
     property: PhysicsProperty,
     skel: &mut Skeleton,
@@ -1011,7 +536,7 @@ fn property_global(data: &PhysicsConstraintData, property: PhysicsProperty) -> b
 /// Apply one physics tunable to a single constraint pose. Mass is animated as a
 /// mass value but stored inverted; wind and gravity blend additively.
 #[allow(clippy::too_many_arguments)]
-fn apply_physics_one(
+pub(super) fn apply_physics_one(
     pose: &mut PhysicsConstraint,
     setup: &PhysicsConstraintData,
     property: PhysicsProperty,
@@ -1055,7 +580,7 @@ fn apply_physics_one(
 /// Physics reset timeline: if a keyframe time falls in the window
 /// `(last_time, time]` (handling a loop wrap where `time < last_time`), reset
 /// the target constraint, or every physics constraint when global.
-fn apply_physics_reset(t: &PhysicsResetTimeline, skel: &mut Skeleton, last_time: f32, time: f32) {
+pub(super) fn apply_physics_reset(t: &PhysicsResetTimeline, skel: &mut Skeleton, last_time: f32, time: f32) {
     let fired = if time >= last_time {
         t.times.iter().any(|&kt| kt > last_time && kt <= time)
     } else {
@@ -1073,7 +598,7 @@ fn apply_physics_reset(t: &PhysicsResetTimeline, skel: &mut Skeleton, last_time:
 
 /// Slot color timeline: blends the slot's RGB (and alpha when `has_alpha`) tint
 /// from its setup color toward the keyed colors. The index is the slot.
-fn apply_slot_color(
+pub(super) fn apply_slot_color(
     t: &ConstraintTimeline,
     has_alpha: bool,
     skel: &mut Skeleton,
@@ -1145,7 +670,7 @@ fn apply_slot_color(
 
 /// Slider scrub-time timeline: sets the slider's pose time (used when the slider
 /// has no driving bone).
-fn apply_slider_time(
+pub(super) fn apply_slider_time(
     t: &ConstraintTimeline,
     skel: &mut Skeleton,
     time: f32,
@@ -1161,7 +686,7 @@ fn apply_slider_time(
 }
 
 /// Slider mix timeline: blends the slider's pose mix from its setup value.
-fn apply_slider_mix(
+pub(super) fn apply_slider_mix(
     t: &ConstraintTimeline,
     skel: &mut Skeleton,
     time: f32,
@@ -1178,7 +703,7 @@ fn apply_slider_mix(
 
 /// Slot alpha timeline: blends only the slot tint's alpha channel from its setup
 /// value toward the keyed alpha.
-fn apply_slot_alpha(
+pub(super) fn apply_slot_alpha(
     t: &ConstraintTimeline,
     skel: &mut Skeleton,
     time: f32,
@@ -1209,7 +734,7 @@ fn apply_slot_alpha(
 
 /// Slot two-color timeline: blends the slot's light (RGB or RGBA) and dark (RGB)
 /// tints from their setup colors toward the keyed colors.
-fn apply_slot_two_color(
+pub(super) fn apply_slot_two_color(
     t: &ConstraintTimeline,
     light_alpha: bool,
     skel: &mut Skeleton,
@@ -1309,7 +834,7 @@ fn apply_slot_two_color(
 }
 
 /// Slot attachment timeline: a stepped switch to the keyed attachment name.
-fn apply_attachment(t: &AttachmentTimeline, skel: &mut Skeleton, time: f32, from: MixFrom) {
+pub(super) fn apply_attachment(t: &AttachmentTimeline, skel: &mut Skeleton, time: f32, from: MixFrom) {
     let Some((slot, setup)) = skel.slot_pose_and_setup(t.slot) else {
         return;
     };
@@ -1324,7 +849,7 @@ fn apply_attachment(t: &AttachmentTimeline, skel: &mut Skeleton, time: f32, from
 }
 
 /// Draw-order timeline: a stepped switch to the keyed slot ordering.
-fn apply_draw_order(t: &DrawOrderTimeline, skel: &mut Skeleton, time: f32) {
+pub(super) fn apply_draw_order(t: &DrawOrderTimeline, skel: &mut Skeleton, time: f32) {
     if t.times.is_empty() || time < t.times[0] {
         return; // before the first key: keep the setup order
     }
@@ -1334,7 +859,7 @@ fn apply_draw_order(t: &DrawOrderTimeline, skel: &mut Skeleton, time: f32) {
 
 /// Event timeline: fire each event whose keyframe time falls in the window
 /// `(last_time, time]` (handling a loop wrap), collecting it on the skeleton.
-fn apply_event(t: &EventTimeline, skel: &mut Skeleton, last_time: f32, time: f32) {
+pub(super) fn apply_event(t: &EventTimeline, skel: &mut Skeleton, last_time: f32, time: f32) {
     let wrapped = time < last_time;
     for (i, &kt) in t.times.iter().enumerate() {
         let fired = if wrapped {
@@ -1351,7 +876,7 @@ fn apply_event(t: &EventTimeline, skel: &mut Skeleton, last_time: f32, time: f32
 /// Mesh deform timeline: set the slot's deform buffer to the setup vertices plus
 /// the interpolated keyframe offsets (scaled by `alpha`). Only applies while the
 /// slot shows the timeline's attachment.
-fn apply_deform(t: &DeformTimeline, skel: &mut Skeleton, time: f32, alpha: f32, from: MixFrom) {
+pub(super) fn apply_deform(t: &DeformTimeline, skel: &mut Skeleton, time: f32, alpha: f32, from: MixFrom) {
     let Some(slot) = skel.slot(t.slot) else {
         return;
     };
@@ -1391,7 +916,7 @@ fn apply_deform(t: &DeformTimeline, skel: &mut Skeleton, time: f32, alpha: f32, 
 /// Sequence timeline: advance the slot's sequence frame index from the active
 /// keyframe by the elapsed time over the delay, wrapped per the sequence mode.
 /// Applies only while the slot shows the timeline's attachment.
-fn apply_sequence(t: &SequenceTimeline, skel: &mut Skeleton, time: f32) {
+pub(super) fn apply_sequence(t: &SequenceTimeline, skel: &mut Skeleton, time: f32) {
     if t.count == 0 || t.times.is_empty() || time < t.times[0] {
         return;
     }
@@ -1458,84 +983,4 @@ fn interp_deform(t: &DeformTimeline, time: f32) -> Vec<f32> {
 /// Index of the last keyframe at or before `time` (assumes `time >= times[0]`).
 fn search_step(times: &[f32], time: f32) -> usize {
     times.iter().rposition(|&t| t <= time).unwrap_or(0)
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use super::*;
-    use crate::data::{BoneData, SkeletonData};
-
-    fn skeleton(setup_rotation: f32) -> Skeleton {
-        let data = SkeletonData {
-            bones: vec![BoneData {
-                index: 0,
-                name: "bone".into(),
-                rotation: setup_rotation,
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        Skeleton::new(Arc::new(data))
-    }
-
-    fn rotation(sk: &Skeleton) -> f32 {
-        sk.bone(0).unwrap().rotation
-    }
-
-    #[test]
-    fn rotate_adds_curve_value_to_setup() {
-        let mut sk = skeleton(0.0);
-        let mut t = BoneTimeline::one_value(0, 2, 0);
-        t.set_frame1(0, 0.0, 0.0);
-        t.set_frame1(1, 1.0, 90.0);
-        Timeline::Rotate(t).apply(&mut sk, -1.0, 0.5, 1.0, MixFrom::Setup, false, false);
-        assert!((rotation(&sk) - 45.0).abs() < 1e-4);
-    }
-
-    #[test]
-    fn rotate_respects_setup_offset_and_alpha() {
-        // Setup rotation 30; animation keys +60 at full; mix at half weight.
-        let mut sk = skeleton(30.0);
-        let mut t = BoneTimeline::one_value(0, 2, 0);
-        t.set_frame1(0, 0.0, 0.0);
-        t.set_frame1(1, 1.0, 60.0);
-        Timeline::Rotate(t).apply(&mut sk, -1.0, 1.0, 0.5, MixFrom::Setup, false, false);
-        // setup + value*alpha = 30 + 60*0.5 = 60.
-        assert!((rotation(&sk) - 60.0).abs() < 1e-4);
-    }
-
-    #[test]
-    fn before_first_frame_setup_resets_to_setup() {
-        let mut sk = skeleton(30.0);
-        sk.bone_mut(0).unwrap().rotation = 99.0;
-        let mut t = BoneTimeline::one_value(0, 2, 0);
-        t.set_frame1(0, 1.0, 0.0);
-        t.set_frame1(1, 2.0, 90.0);
-        Timeline::Rotate(t).apply(&mut sk, -1.0, 0.0, 1.0, MixFrom::Setup, false, false);
-        assert!((rotation(&sk) - 30.0).abs() < 1e-4);
-    }
-
-    #[test]
-    fn translate_adds_offsets_to_setup_position() {
-        let mut sk = skeleton(0.0);
-        let mut t = BoneTimeline::two_value(0, 2, 0);
-        t.set_frame2(0, 0.0, 0.0, 0.0);
-        t.set_frame2(1, 1.0, 10.0, 20.0);
-        Timeline::Translate(t).apply(&mut sk, -1.0, 0.5, 1.0, MixFrom::Setup, false, false);
-        let b = sk.bone(0).unwrap();
-        assert!((b.x - 5.0).abs() < 1e-4 && (b.y - 10.0).abs() < 1e-4);
-    }
-
-    #[test]
-    fn scale_multiplies_setup_scale() {
-        let mut sk = skeleton(0.0); // setup scale defaults to (1, 1)
-        let mut t = BoneTimeline::two_value(0, 2, 0);
-        t.set_frame2(0, 0.0, 1.0, 1.0);
-        t.set_frame2(1, 1.0, 2.0, 2.0);
-        Timeline::Scale(t).apply(&mut sk, -1.0, 0.5, 1.0, MixFrom::Setup, false, false);
-        let b = sk.bone(0).unwrap();
-        assert!((b.scale_x - 1.5).abs() < 1e-4 && (b.scale_y - 1.5).abs() < 1e-4);
-    }
 }
