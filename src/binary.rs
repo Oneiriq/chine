@@ -25,6 +25,8 @@ use crate::attach::{
     MeshVertices, PathAttachment, PointAttachment, RegionAttachment,
 };
 use crate::constraint::ik::IkConstraintData;
+use crate::constraint::path::{PathConstraintData, PositionMode, RotateMode, SpacingMode};
+use crate::constraint::physics::PhysicsConstraintData;
 use crate::constraint::slider::{SliderData, SliderProperty};
 use crate::constraint::ScaleYMode;
 use crate::data::{BlendMode, BoneData, Color, Inherit, SkeletonData, SlotData};
@@ -284,11 +286,14 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
         let kind = r.byte();
         match kind {
             0 => data.ik_constraints.push(parse_ik(&mut r, name, order)),
+            1 => data.path_constraints.push(parse_path(&mut r, name, order)),
+            3 => data
+                .physics_constraints
+                .push(parse_physics(&mut r, name, order)),
             4 => data
                 .sliders
                 .push(parse_slider(&mut r, name, order, nonessential)),
-            // Path / transform / physics binary layouts are known but not yet
-            // parsed; stop at the first one (it would end this list anyway).
+            // Transform constraints (type 2) are not yet parsed; stop at one.
             _ => break,
         }
     }
@@ -436,6 +441,108 @@ fn parse_slider(r: &mut BinaryReader, name: String, order: usize, nonessential: 
         data.scale = r.float();
     }
     data
+}
+
+/// Parse one path constraint (Spine 4.3 bit-packed layout). chine loads at
+/// scale 1, so the fixed-position / fixed-spacing scale factors are the
+/// identity.
+fn parse_path(r: &mut BinaryReader, name: String, order: usize) -> PathConstraintData {
+    let bone_count = r.var_usize();
+    let bones = (0..bone_count).map(|_| r.var_usize()).collect();
+    let slot = r.var_usize();
+    let flags = r.byte();
+    let position_mode = if (flags >> 1) & 1 == 0 {
+        PositionMode::Fixed
+    } else {
+        PositionMode::Percent
+    };
+    let spacing_mode = match (flags >> 2) & 0b11 {
+        0 => SpacingMode::Length,
+        1 => SpacingMode::Fixed,
+        3 => SpacingMode::Proportional,
+        _ => SpacingMode::Percent,
+    };
+    let rotate_mode = match (flags >> 4) & 0b11 {
+        0 => RotateMode::Tangent,
+        2 => RotateMode::ChainScale,
+        _ => RotateMode::Chain,
+    };
+    let offset_rotation = if flags & 128 != 0 { r.float() } else { 0.0 };
+    PathConstraintData {
+        name,
+        order,
+        bones,
+        slot,
+        position_mode,
+        spacing_mode,
+        rotate_mode,
+        offset_rotation,
+        position: r.float(),
+        spacing: r.float(),
+        mix_rotate: r.float(),
+        mix_x: r.float(),
+        mix_y: r.float(),
+    }
+}
+
+/// Parse one physics constraint (Spine 4.3 bit-packed layout). A negative packed
+/// scale-X encodes the Y-scale mode; chine loads at scale 1.
+fn parse_physics(r: &mut BinaryReader, name: String, order: usize) -> PhysicsConstraintData {
+    let bone = r.var_usize();
+    let flags = r.byte();
+    let x = if flags & 2 != 0 { r.float() } else { 0.0 };
+    let y = if flags & 4 != 0 { r.float() } else { 0.0 };
+    let rotate = if flags & 8 != 0 { r.float() } else { 0.0 };
+    let (scale_x, scale_y_mode) = if flags & 16 != 0 {
+        let raw = r.float();
+        if raw < -2.0 {
+            (-2.0 - raw, ScaleYMode::Volume)
+        } else if raw < 0.0 {
+            (-1.0 - raw, ScaleYMode::Uniform)
+        } else {
+            (raw, ScaleYMode::None)
+        }
+    } else {
+        (0.0, ScaleYMode::None)
+    };
+    let shear_x = if flags & 32 != 0 { r.float() } else { 0.0 };
+    let limit = if flags & 64 != 0 { r.float() } else { 5000.0 };
+    let step = 1.0 / f32::from(r.byte());
+    let inertia = r.float();
+    let strength = r.float();
+    let damping = r.float();
+    let mass_inverse = if flags & 128 != 0 { r.float() } else { 1.0 };
+    let wind = r.float();
+    let gravity = r.float();
+    let global = r.byte();
+    let mix = if global & 128 != 0 { r.float() } else { 1.0 };
+    PhysicsConstraintData {
+        name,
+        order,
+        bone,
+        x,
+        y,
+        rotate,
+        scale_x,
+        shear_x,
+        limit,
+        step,
+        scale_y_mode,
+        inertia,
+        strength,
+        damping,
+        mass_inverse,
+        wind,
+        gravity,
+        mix,
+        inertia_global: global & 1 != 0,
+        strength_global: global & 2 != 0,
+        damping_global: global & 4 != 0,
+        mass_global: global & 8 != 0,
+        wind_global: global & 16 != 0,
+        gravity_global: global & 32 != 0,
+        mix_global: global & 64 != 0,
+    }
 }
 
 /// RGBA8888 (`0xRRGGBBAA`) to a [`Color`].
@@ -1972,5 +2079,44 @@ mod tests {
         let (_tl, dur) = read_curve_timeline_n(&mut r, 0, 2, 6);
         assert!((dur - 1.0).abs() < 1e-6);
         assert!(!r.overran());
+    }
+
+    #[test]
+    fn parses_a_path_constraint() {
+        // bone count 1, bone 0, slot 0, flags (position/spacing Percent, rotate
+        // Chain).
+        let mut b = vec![1_u8, 0, 0, 26];
+        for v in [0.5_f32, 10.0, 1.0, 1.0, 1.0] {
+            b.extend_from_slice(&v.to_be_bytes());
+        }
+        let mut r = BinaryReader::new(&b);
+        let pc = parse_path(&mut r, "path".into(), 2);
+        assert!(!r.overran());
+        assert_eq!(pc.slot, 0);
+        assert_eq!(pc.position_mode, PositionMode::Percent);
+        assert_eq!(pc.spacing_mode, SpacingMode::Percent);
+        assert_eq!(pc.rotate_mode, RotateMode::Chain);
+        assert!((pc.position - 0.5).abs() < 1e-6);
+        assert!((pc.spacing - 10.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn parses_a_physics_constraint() {
+        // bone 0, flags (none), step divisor 30 -> 1/30.
+        let mut b = vec![0_u8, 0, 30];
+        for v in [0.5_f32, 1.0, 0.9, 0.0, -10.0] {
+            b.extend_from_slice(&v.to_be_bytes()); // inertia, strength, damping, wind, gravity
+        }
+        b.push(0); // global flags (mix defaults to 1)
+        let mut r = BinaryReader::new(&b);
+        let pc = parse_physics(&mut r, "phys".into(), 3);
+        assert!(!r.overran());
+        assert_eq!(pc.bone, 0);
+        assert!((pc.step - 1.0 / 30.0).abs() < 1e-6);
+        assert!((pc.inertia - 0.5).abs() < 1e-6);
+        assert!((pc.gravity + 10.0).abs() < 1e-6);
+        assert!((pc.mix - 1.0).abs() < 1e-6);
+        assert!((pc.limit - 5000.0).abs() < 1e-3);
+        assert!((pc.mass_inverse - 1.0).abs() < 1e-6);
     }
 }
