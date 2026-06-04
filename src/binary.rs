@@ -13,9 +13,14 @@
 
 use glam::Vec2;
 
+use crate::attach::{
+    Attachment, BoundingBoxAttachment, ClippingAttachment, LinkedMeshAttachment, MeshAttachment,
+    MeshVertices, PathAttachment, PointAttachment, RegionAttachment,
+};
 use crate::constraint::ik::IkConstraintData;
 use crate::constraint::ScaleYMode;
 use crate::data::{BlendMode, BoneData, Color, Inherit, SkeletonData, SlotData};
+use crate::skin::Skin;
 
 /// An error from binary skeleton loading.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,9 +154,9 @@ fn inherit_from(ordinal: usize) -> Inherit {
 
 /// Parse a Spine `.skel` binary export into a [`SkeletonData`].
 ///
-/// The header, bone, slot, and IK-constraint sections are read; further sections
-/// are added as the loader grows. A truncated stream returns
-/// [`BinaryError::Truncated`].
+/// The header, bone, slot, constraint, and skin (attachment) sections are read;
+/// events and animations are added as the loader grows. A truncated stream
+/// returns [`BinaryError::Truncated`].
 ///
 /// # Errors
 /// Returns [`BinaryError::Truncated`] if the data ends mid-skeleton.
@@ -263,6 +268,16 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
         }
     }
 
+    // Skins: the default skin, then named skins. Attachments resolve their
+    // names and paths through the string table.
+    let slot_names: Vec<String> = data.slots.iter().map(|s| s.name.clone()).collect();
+    data.default_skin = read_skin(&mut r, &strings, &slot_names, true, nonessential);
+    let skin_count = r.var_usize();
+    for _ in 0..skin_count {
+        let skin = read_skin(&mut r, &strings, &slot_names, false, nonessential);
+        data.skins.push(skin);
+    }
+
     if r.overran() {
         return Err(BinaryError::Truncated);
     }
@@ -352,6 +367,242 @@ fn string_ref(r: &mut BinaryReader, strings: &[String]) -> Option<String> {
     }
 }
 
+/// Read a skin: the default skin (`is_default`, a slot count then attachments)
+/// or a named skin (name, bone/constraint index lists, then attachments).
+fn read_skin(
+    r: &mut BinaryReader,
+    strings: &[String],
+    slot_names: &[String],
+    is_default: bool,
+    nonessential: bool,
+) -> Skin {
+    let mut skin;
+    let slot_count;
+    if is_default {
+        slot_count = r.var_usize();
+        skin = Skin::new("default");
+        if slot_count == 0 {
+            return skin;
+        }
+    } else {
+        skin = Skin::new(r.string().unwrap_or_default());
+        if nonessential {
+            let _ = r.u32();
+        }
+        let bone_count = r.var_usize();
+        for _ in 0..bone_count {
+            r.var_usize();
+        }
+        let constraint_count = r.var_usize();
+        for _ in 0..constraint_count {
+            r.var_usize();
+        }
+        slot_count = r.var_usize();
+    }
+    for _ in 0..slot_count {
+        let slot = r.var_usize();
+        let att_count = r.var_usize();
+        for _ in 0..att_count {
+            let placeholder = string_ref(r, strings).unwrap_or_default();
+            if let Some(att) = read_attachment(r, strings, slot_names, &placeholder, nonessential) {
+                skin.set(slot, placeholder, att);
+            }
+        }
+    }
+    skin
+}
+
+/// Read one attachment (Spine 4.3): a flags byte selects the type (low 3 bits)
+/// and which optional fields follow.
+fn read_attachment(
+    r: &mut BinaryReader,
+    strings: &[String],
+    slot_names: &[String],
+    placeholder: &str,
+    nonessential: bool,
+) -> Option<Attachment> {
+    let flags = r.byte();
+    let name = if flags & 8 != 0 {
+        string_ref(r, strings).unwrap_or_default()
+    } else {
+        placeholder.to_string()
+    };
+    match flags & 0b111 {
+        0 => {
+            let path = if flags & 16 != 0 {
+                string_ref(r, strings).unwrap_or_else(|| name.clone())
+            } else {
+                name.clone()
+            };
+            let color = read_att_color(r, flags & 32 != 0);
+            read_sequence(r, flags & 64 != 0);
+            let rotation = if flags & 128 != 0 { r.float() } else { 0.0 };
+            let mut reg = RegionAttachment::new(name, path);
+            reg.x = r.float();
+            reg.y = r.float();
+            reg.scale_x = r.float();
+            reg.scale_y = r.float();
+            reg.width = r.float();
+            reg.height = r.float();
+            reg.rotation = rotation;
+            reg.color = color;
+            Some(Attachment::Region(reg))
+        }
+        1 => {
+            let (vertices, count) = read_vertices(r, flags & 16 != 0);
+            skip_nonessential_color(r, nonessential);
+            Some(Attachment::BoundingBox(BoundingBoxAttachment::new(
+                name, vertices, count,
+            )))
+        }
+        2 => {
+            let path = if flags & 16 != 0 {
+                string_ref(r, strings).unwrap_or_else(|| name.clone())
+            } else {
+                name.clone()
+            };
+            let color = read_att_color(r, flags & 32 != 0);
+            read_sequence(r, flags & 64 != 0);
+            let hull = r.var_usize();
+            let (vertices, count) = read_vertices(r, flags & 128 != 0);
+            let uvs = read_float_array(r, count * 2);
+            let tri_count = (count * 2).saturating_sub(hull + 2) * 3;
+            let triangles = read_short_array(r, tri_count);
+            let timeline_slots = r.var_usize();
+            for _ in 0..timeline_slots {
+                r.var_usize();
+            }
+            if nonessential {
+                let edges = r.var_usize();
+                for _ in 0..edges {
+                    r.var_usize();
+                }
+                let _ = r.float();
+                let _ = r.float();
+            }
+            let mut m = MeshAttachment::new(name, path, vertices, uvs, triangles);
+            m.hull_length = hull;
+            m.color = color;
+            Some(Attachment::Mesh(m))
+        }
+        3 => {
+            let path = if flags & 16 != 0 {
+                string_ref(r, strings).unwrap_or_else(|| name.clone())
+            } else {
+                name.clone()
+            };
+            let color = read_att_color(r, flags & 32 != 0);
+            read_sequence(r, flags & 64 != 0);
+            let inherit = flags & 128 != 0;
+            let _source_index = r.var_usize();
+            let _skin_index = r.var_usize();
+            let parent = string_ref(r, strings).unwrap_or_default();
+            if nonessential {
+                let _ = r.float();
+                let _ = r.float();
+            }
+            Some(Attachment::LinkedMesh(LinkedMeshAttachment::new(
+                name, path, None, parent, color, inherit,
+            )))
+        }
+        4 => {
+            let closed = flags & 16 != 0;
+            let constant_speed = flags & 32 != 0;
+            let (vertices, count) = read_vertices(r, flags & 64 != 0);
+            let lengths = read_float_array(r, count / 3);
+            skip_nonessential_color(r, nonessential);
+            Some(Attachment::Path(PathAttachment::new(
+                name,
+                vertices,
+                count,
+                lengths,
+                closed,
+                constant_speed,
+            )))
+        }
+        5 => {
+            let rotation = r.float();
+            let x = r.float();
+            let y = r.float();
+            skip_nonessential_color(r, nonessential);
+            Some(Attachment::Point(PointAttachment::new(
+                name, x, y, rotation,
+            )))
+        }
+        6 => {
+            let end = r.var_usize();
+            let (vertices, count) = read_vertices(r, flags & 16 != 0);
+            skip_nonessential_color(r, nonessential);
+            let end_slot = slot_names.get(end).cloned().unwrap_or_default();
+            Some(Attachment::Clipping(ClippingAttachment::new(
+                name, end_slot, vertices, count,
+            )))
+        }
+        _ => None,
+    }
+}
+
+/// Read an attachment color (RGBA8888) when present, else opaque white.
+fn read_att_color(r: &mut BinaryReader, present: bool) -> Color {
+    if present {
+        color_rgba(r.u32())
+    } else {
+        Color::WHITE
+    }
+}
+
+/// Consume the trailing editor-only color int present on some attachments.
+fn skip_nonessential_color(r: &mut BinaryReader, nonessential: bool) {
+    if nonessential {
+        let _ = r.u32();
+    }
+}
+
+/// Consume an animation `Sequence` (4 varints) when the attachment has one.
+fn read_sequence(r: &mut BinaryReader, present: bool) {
+    if present {
+        for _ in 0..4 {
+            r.var_usize();
+        }
+    }
+}
+
+/// Read mesh/polygon vertices: unweighted (`2 * vertexCount` floats) or weighted
+/// (per-vertex bone influences). Returns the vertices and the vertex count.
+fn read_vertices(r: &mut BinaryReader, weighted: bool) -> (MeshVertices, usize) {
+    let count = r.var_usize();
+    if !weighted {
+        return (
+            MeshVertices::Unweighted(read_float_array(r, count * 2)),
+            count,
+        );
+    }
+    let total = r.var_usize();
+    let mut bones = Vec::new();
+    let mut vertices = Vec::new();
+    while bones.len() < total {
+        let influences = r.var_usize();
+        bones.push(influences);
+        for _ in 0..influences {
+            bones.push(r.var_usize());
+            vertices.push(r.float());
+            vertices.push(r.float());
+            vertices.push(r.float());
+        }
+    }
+    (MeshVertices::Weighted { bones, vertices }, count)
+}
+
+/// Read `n` big-endian floats.
+fn read_float_array(r: &mut BinaryReader, n: usize) -> Vec<f32> {
+    (0..n).map(|_| r.float()).collect()
+}
+
+/// Read `n` var-uint shorts (triangle / edge indices).
+fn read_short_array(r: &mut BinaryReader, n: usize) -> Vec<u16> {
+    (0..n).map(|_| r.var_usize() as u16).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -411,7 +662,9 @@ mod tests {
         b.push(3); // inherit = NoScale
         b.push(0); // skinRequired = false
         b.push(0); // slot count = 0
-        b.push(0); // ik constraint count = 0
+        b.push(0); // constraint count = 0
+        b.push(0); // default skin slot count = 0
+        b.push(0); // named skin count = 0
 
         let data = from_binary(&b).unwrap();
         assert_eq!(data.spine_version.as_deref(), Some("4.3.00"));
@@ -474,5 +727,22 @@ mod tests {
             assert!(c.target < data.bones.len());
             assert!(c.bones.iter().all(|&b| b < data.bones.len()));
         }
+
+        // Default skin: one attachment per slot, meshes with valid triangles.
+        assert_eq!(data.default_skin.iter().count(), 32);
+        assert!(data.skins.is_empty());
+        let mesh = data
+            .default_skin
+            .iter()
+            .find_map(|(_, _, a)| match a {
+                Attachment::Mesh(m) => Some(m),
+                _ => None,
+            })
+            .expect("a mesh attachment");
+        assert!(mesh.vertex_count() > 0);
+        assert!(mesh
+            .triangles
+            .iter()
+            .all(|&t| (t as usize) < mesh.vertex_count()));
     }
 }
