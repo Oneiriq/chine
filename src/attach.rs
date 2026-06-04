@@ -208,6 +208,9 @@ pub struct MeshAttachment {
     vertices: MeshVertices,
     /// Atlas page index (texture), set when the atlas is bound.
     pub page: usize,
+    /// Skin whose deform timelines drive this mesh (`None` = default skin). For
+    /// an inheriting linked mesh this points at the parent's skin.
+    pub deform_skin: Option<String>,
 }
 
 impl MeshAttachment {
@@ -229,6 +232,7 @@ impl MeshAttachment {
             hull_length: 0,
             vertices,
             page: 0,
+            deform_skin: None,
         }
     }
 
@@ -507,6 +511,8 @@ pub struct LinkedMeshAttachment {
     pub parent: String,
     /// Tint color.
     pub color: Color,
+    /// Whether this link shares its parent's deform timelines (Spine `deform`).
+    pub inherit_deform: bool,
 }
 
 impl LinkedMeshAttachment {
@@ -518,6 +524,7 @@ impl LinkedMeshAttachment {
         skin: Option<String>,
         parent: impl Into<String>,
         color: Color,
+        inherit_deform: bool,
     ) -> Self {
         Self {
             name: name.into(),
@@ -525,6 +532,7 @@ impl LinkedMeshAttachment {
             skin,
             parent: parent.into(),
             color,
+            inherit_deform,
         }
     }
 
@@ -788,7 +796,8 @@ mod tests {
             vec![0, 1, 2],
         );
         parent.hull_length = 3;
-        let link = LinkedMeshAttachment::new("wing-blue", "wing-blue", None, "wing", Color::WHITE);
+        let link =
+            LinkedMeshAttachment::new("wing-blue", "wing-blue", None, "wing", Color::WHITE, true);
         let m = link.resolve(&parent);
         // Identity stays the link's own; geometry is borrowed from the parent.
         assert_eq!(m.name, "wing-blue");

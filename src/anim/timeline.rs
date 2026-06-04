@@ -6,6 +6,7 @@
 
 use super::curve::{absolute_value_with, Curve};
 use super::MixFrom;
+use crate::attach::Attachment;
 use crate::constraint::physics::{PhysicsConstraint, PhysicsConstraintData};
 use crate::data::Color;
 use crate::event::Event;
@@ -198,6 +199,7 @@ impl EventTimeline {
 pub(crate) struct DeformTimeline {
     slot: usize,
     attachment: String,
+    skin: Option<String>,
     setup: Vec<f32>,
     times: Vec<f32>,
     frames: Vec<Vec<f32>>,
@@ -210,6 +212,7 @@ impl DeformTimeline {
     pub(crate) fn new(
         slot: usize,
         attachment: String,
+        skin: Option<String>,
         setup: Vec<f32>,
         times: Vec<f32>,
         frames: Vec<Vec<f32>>,
@@ -222,6 +225,7 @@ impl DeformTimeline {
         Self {
             slot,
             attachment,
+            skin,
             setup,
             times,
             frames,
@@ -1203,12 +1207,28 @@ fn apply_event(t: &EventTimeline, skel: &mut Skeleton, last_time: f32, time: f32
 /// the interpolated keyframe offsets (scaled by `alpha`). Only applies while the
 /// slot shows the timeline's attachment.
 fn apply_deform(t: &DeformTimeline, skel: &mut Skeleton, time: f32, alpha: f32, from: MixFrom) {
-    let Some((slot, _)) = skel.slot_pose_and_setup(t.slot) else {
+    let Some(slot) = skel.slot(t.slot) else {
         return;
     };
     if slot.attachment.as_deref() != Some(t.attachment.as_str()) {
         return;
     }
+    // Skin-aware: apply only if the slot's current attachment draws its deform
+    // from this timeline's authoring skin (so per-skin deforms and
+    // non-inheriting linked meshes do not cross over).
+    let same_skin = match skel
+        .data()
+        .attachment(t.slot, &t.attachment, skel.active_skin())
+    {
+        Some(Attachment::Mesh(m)) => m.deform_skin.as_deref() == t.skin.as_deref(),
+        _ => t.skin.is_none(),
+    };
+    if !same_skin {
+        return;
+    }
+    let Some((slot, _)) = skel.slot_pose_and_setup(t.slot) else {
+        return;
+    };
     let n = t.setup.len();
     if t.times.is_empty() || time < t.times[0] {
         if matches!(from, MixFrom::Setup) {

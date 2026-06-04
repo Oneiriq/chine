@@ -147,7 +147,12 @@ pub fn from_json(text: &str) -> Result<SkeletonData, LoadError> {
                         .ok_or_else(|| LoadError::BadReference(slot_name.clone()))?;
                     if let Some(atts) = atts.as_object() {
                         for (att_name, att) in atts {
-                            if let Some(attachment) = parse_attachment(att_name, att) {
+                            if let Some(mut attachment) = parse_attachment(att_name, att) {
+                                if let Attachment::Mesh(m) = &mut attachment {
+                                    if skin_name != "default" {
+                                        m.deform_skin = Some(skin_name.clone());
+                                    }
+                                }
                                 skin.set(slot, att_name.clone(), attachment);
                             }
                         }
@@ -204,14 +209,16 @@ pub fn from_json(text: &str) -> Result<SkeletonData, LoadError> {
         }
     }
 
+    // Resolve linked meshes before animations so deform timelines bind to the
+    // resolved (parent-shared) geometry rather than unresolved links.
+    resolve_linked_meshes(&mut data);
+
     if let Some(anims) = root.get("animations").and_then(Value::as_object) {
         for (name, anim) in anims {
             let animation = parse_animation(name, anim, &data)?;
             data.animations.push(Arc::new(animation));
         }
     }
-
-    resolve_linked_meshes(&mut data);
     Ok(data)
 }
 
@@ -289,6 +296,7 @@ fn parse_attachment(name: &str, v: &Value) -> Option<Attachment> {
             v.get("skin").and_then(Value::as_str).map(str::to_string),
             v.get("parent").and_then(Value::as_str).unwrap_or(name),
             parse_color(v.get("color").and_then(Value::as_str), Color::WHITE),
+            v.get("deform").and_then(Value::as_bool).unwrap_or(true),
         ))),
         "clipping" => {
             let count = v.get("vertexCount").and_then(Value::as_u64).unwrap_or(0) as usize;
@@ -343,7 +351,17 @@ fn resolve_skin(skin: &mut Skin, parents: &HashMap<(String, usize, String), Mesh
         if let Attachment::LinkedMesh(lm) = att {
             let parent_skin = lm.skin.clone().unwrap_or_else(|| skin_name.clone());
             if let Some(parent) = parents.get(&(parent_skin, slot, lm.parent.clone())) {
-                *att = Attachment::Mesh(lm.resolve(parent));
+                let mut m = lm.resolve(parent);
+                // An inheriting link shares the parent's deform source; otherwise
+                // it uses its own skin's deforms.
+                m.deform_skin = if lm.inherit_deform {
+                    parent.deform_skin.clone()
+                } else if skin_name == "default" {
+                    None
+                } else {
+                    Some(skin_name.clone())
+                };
+                *att = Attachment::Mesh(m);
             }
         }
     }
@@ -703,8 +721,20 @@ fn parse_animation(name: &str, anim: &Value, data: &SkeletonData) -> Result<Anim
                         frames.push(read_deform_frame(k, frame_len));
                     }
                     duration = duration.max(times.last().copied().unwrap_or(0.0));
-                    let mut tl =
-                        DeformTimeline::new(slot_idx, att_name.clone(), setup, times, frames, n);
+                    let tl_skin = if skin_name == "default" {
+                        None
+                    } else {
+                        Some(skin_name.clone())
+                    };
+                    let mut tl = DeformTimeline::new(
+                        slot_idx,
+                        att_name.clone(),
+                        tl_skin,
+                        setup,
+                        times,
+                        frames,
+                        n,
+                    );
                     let mut bezier = 0;
                     let mut frame = 0;
                     while frame + 1 < n {
@@ -2345,6 +2375,121 @@ mod tests {
             (c.positions[1].x - 15.0).abs() < 1e-3,
             "x={}",
             c.positions[1].x
+        );
+    }
+
+    #[test]
+    fn deform_is_skin_aware() {
+        // Slot "s" placeholder "m" is a different mesh in each skin, each with
+        // its own deform under that skin. The active skin selects which applies.
+        let json = r#"{
+            "bones": [ { "name": "root" } ],
+            "slots": [ { "name": "s", "bone": "root", "attachment": "m" } ],
+            "skins": [
+                { "name": "default", "attachments": { "s": { "m": {
+                    "type": "mesh", "uvs": [0,0, 1,0, 0,1], "triangles": [0,1,2],
+                    "vertices": [0,0, 10,0, 0,10]
+                } } } },
+                { "name": "alt", "attachments": { "s": { "m": {
+                    "type": "mesh", "uvs": [0,0, 1,0, 0,1], "triangles": [0,1,2],
+                    "vertices": [0,0, 20,0, 0,20]
+                } } } }
+            ],
+            "animations": {
+                "flap": {
+                    "deform": {
+                        "default": { "s": { "m": [
+                            { "time": 0, "vertices": [0,0, 0,0, 0,0] },
+                            { "time": 1, "offset": 2, "vertices": [5, 0] }
+                        ] } },
+                        "alt": { "s": { "m": [
+                            { "time": 0, "vertices": [0,0, 0,0, 0,0] },
+                            { "time": 1, "offset": 2, "vertices": [100, 0] }
+                        ] } }
+                    }
+                }
+            }
+        }"#;
+        let data = from_json(json).unwrap();
+        let anim = data.find_animation("flap").unwrap().clone();
+        let mut sk = crate::skel::Skeleton::new(std::sync::Arc::new(data));
+        let mut state = crate::anim::AnimationState::new();
+        state.set_animation(anim, false);
+        state.update(1.0);
+
+        // Default skin: only the default deform applies (vtx1.x 10 -> 15).
+        sk.set_slots_to_setup_pose();
+        state.apply(&mut sk);
+        sk.update_world_transform();
+        let c = crate::render::render(&sk);
+        assert!(
+            (c[0].positions[1].x - 15.0).abs() < 1e-3,
+            "default x={}",
+            c[0].positions[1].x
+        );
+
+        // Alt skin: only the alt deform applies (vtx1.x 20 -> 120), not 15.
+        sk.set_skin("alt");
+        sk.set_slots_to_setup_pose();
+        state.apply(&mut sk);
+        sk.update_world_transform();
+        let c = crate::render::render(&sk);
+        assert!(
+            (c[0].positions[1].x - 120.0).abs() < 1e-3,
+            "alt x={}",
+            c[0].positions[1].x
+        );
+    }
+
+    #[test]
+    fn non_inheriting_link_uses_its_own_deform() {
+        // alt's "m" is a link with "deform": false, so it does NOT inherit the
+        // parent's deform; the alt-authored deform drives it (its own load no
+        // longer skipped, since resolution runs before animation parsing).
+        let json = r#"{
+            "bones": [ { "name": "root" } ],
+            "slots": [ { "name": "s", "bone": "root", "attachment": "m" } ],
+            "skins": [
+                { "name": "default", "attachments": { "s": { "m": {
+                    "type": "mesh", "uvs": [0,0, 1,0, 0,1], "triangles": [0,1,2],
+                    "vertices": [0,0, 10,0, 0,10]
+                } } } },
+                { "name": "alt", "attachments": { "s": { "m": {
+                    "type": "linkedmesh", "skin": "default", "parent": "m", "deform": false
+                } } } }
+            ],
+            "animations": {
+                "flap": {
+                    "deform": {
+                        "default": { "s": { "m": [
+                            { "time": 0, "vertices": [0,0, 0,0, 0,0] },
+                            { "time": 1, "offset": 2, "vertices": [5, 0] }
+                        ] } },
+                        "alt": { "s": { "m": [
+                            { "time": 0, "vertices": [0,0, 0,0, 0,0] },
+                            { "time": 1, "offset": 2, "vertices": [50, 0] }
+                        ] } }
+                    }
+                }
+            }
+        }"#;
+        let data = from_json(json).unwrap();
+        let anim = data.find_animation("flap").unwrap().clone();
+        let mut sk = crate::skel::Skeleton::new(std::sync::Arc::new(data));
+        sk.set_skin("alt");
+        let mut state = crate::anim::AnimationState::new();
+        state.set_animation(anim, false);
+        state.update(1.0);
+        sk.set_slots_to_setup_pose();
+        state.apply(&mut sk);
+        sk.update_world_transform();
+        let c = crate::render::render(&sk);
+        // The link shares the parent geometry (base x 10) but uses the alt deform
+        // (+50 -> 60), not the parent's (+5 -> 15).
+        assert!(
+            (c[0].positions[1].x - 60.0).abs() < 1e-3,
+            "x={}",
+            c[0].positions[1].x
         );
     }
 }
