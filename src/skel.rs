@@ -16,6 +16,7 @@ use crate::constraint::physics::{self, Physics, PhysicsConstraint, PhysicsConstr
 use crate::constraint::transform::{self, TransformConstraint, TransformConstraintData};
 use crate::data::{BoneData, Color, Inherit, SkeletonData, SlotData};
 use crate::event::Event;
+use crate::skin::Skin;
 
 /// Degrees-to-radians factor.
 const DEG_RAD: f32 = core::f32::consts::PI / 180.0;
@@ -215,6 +216,8 @@ pub struct Skeleton {
     physics_constraints: Vec<PhysicsConstraint>,
     slots: Vec<Slot>,
     draw_order: Vec<usize>,
+    // Active named skin (index into `data.skins`); `None` uses the default skin.
+    skin: Option<usize>,
     events: Vec<Event>,
     update_cache: Vec<Updatable>,
     // Accumulated simulation time, advanced by `update`, read by physics.
@@ -266,6 +269,7 @@ impl Skeleton {
             physics_constraints,
             slots,
             draw_order,
+            skin: None,
             events: Vec::new(),
             update_cache,
             time: 0.0,
@@ -286,6 +290,24 @@ impl Skeleton {
     /// while also mutating bones (decouples from the `&self` borrow).
     pub(crate) fn data_arc(&self) -> Arc<SkeletonData> {
         Arc::clone(&self.data)
+    }
+
+    /// Set the active skin by name: it overrides the default skin for attachment
+    /// lookups (so linked meshes and other variants in that skin are shown). An
+    /// unknown name (or `"default"`) clears the active skin.
+    pub fn set_skin(&mut self, name: &str) {
+        self.skin = self.data.skins.iter().position(|s| s.name == name);
+    }
+
+    /// Clear the active skin, using only the default skin.
+    pub fn clear_skin(&mut self) {
+        self.skin = None;
+    }
+
+    /// The active named skin, if one is set.
+    #[must_use]
+    pub fn active_skin(&self) -> Option<&Skin> {
+        self.skin.and_then(|i| self.data.skins.get(i))
     }
 
     /// All bones, in hierarchy order.

@@ -109,7 +109,7 @@ fn build_command(
     let setup = data.slots.get(slot_index)?;
     let slot = skeleton.slot(slot_index)?;
     let name = slot.attachment.as_deref()?;
-    let att = data.attachment(slot_index, name, None)?;
+    let att = data.attachment(slot_index, name, skeleton.active_skin())?;
     match att {
         Attachment::Region(r) => {
             let bone = skeleton.bone(setup.bone)?;

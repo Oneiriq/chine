@@ -2297,4 +2297,54 @@ mod tests {
             other => panic!("expected resolved mesh, got {other:?}"),
         }
     }
+
+    #[test]
+    fn linked_mesh_inherits_parent_deform_under_active_skin() {
+        // The slot's "m" placeholder is a mesh in the default skin and a linked
+        // mesh (own red tint) in "alt"; a deform animation targets "m". With the
+        // alt skin active, render shows the link and the parent's deform drives
+        // it - purely through name matching, no deform-source indirection.
+        let json = r#"{
+            "bones": [ { "name": "root" } ],
+            "slots": [ { "name": "s", "bone": "root", "attachment": "m" } ],
+            "skins": [
+                { "name": "default", "attachments": { "s": { "m": {
+                    "type": "mesh", "uvs": [0,0, 1,0, 0,1], "triangles": [0,1,2],
+                    "vertices": [0,0, 10,0, 0,10]
+                } } } },
+                { "name": "alt", "attachments": { "s": { "m": {
+                    "type": "linkedmesh", "skin": "default", "parent": "m", "color": "ff0000ff"
+                } } } }
+            ],
+            "animations": {
+                "flap": {
+                    "deform": { "default": { "s": { "m": [
+                        { "time": 0, "vertices": [0,0, 0,0, 0,0] },
+                        { "time": 1, "offset": 2, "vertices": [5, 0] }
+                    ] } } }
+                }
+            }
+        }"#;
+        let data = from_json(json).unwrap();
+        let anim = data.find_animation("flap").unwrap().clone();
+        let mut sk = crate::skel::Skeleton::new(std::sync::Arc::new(data));
+        sk.set_skin("alt");
+        let mut state = crate::anim::AnimationState::new();
+        state.set_animation(anim, false);
+        state.update(1.0);
+        sk.set_slots_to_setup_pose();
+        state.apply(&mut sk);
+        sk.update_world_transform();
+        let cmds = crate::render::render(&sk);
+        assert_eq!(cmds.len(), 1);
+        let c = &cmds[0];
+        // The alt skin's linked mesh is the one rendered (its own red tint)...
+        assert!(c.color.r > 0.9 && c.color.g < 0.1, "color={:?}", c.color);
+        // ...and the parent's deform drives it: vertex 1's x goes 10 -> 15.
+        assert!(
+            (c.positions[1].x - 15.0).abs() < 1e-3,
+            "x={}",
+            c.positions[1].x
+        );
+    }
 }
