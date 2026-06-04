@@ -8,3 +8,5 @@
 /chine-web/examples/*.atlas
 /chine-web/examples/*.png
 /chine-web/examples/*.json
+# Generated drop-in demo embeds Spine asset data; keep it local.
+/chine-web/examples/*-embedded.html

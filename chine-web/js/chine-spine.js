@@ -1,14 +1,16 @@
 // A custom element that renders a Spine 4.3 animation with chine-web
 // (chine compiled to WebAssembly + a WebGL2 renderer).
 //
-// Usage:
+// Usage by URL:
 //   <script type="module" src="chine-web/js/chine-spine.js"></script>
 //   <chine-spine atlas="skeleton.atlas" skeleton="skeleton.skel"
 //                animation="idle" style="width:600px;height:600px"></chine-spine>
 //
-// `skeleton` may be a binary `.skel` or a `.json` export (chosen by extension).
-// The element registers as both <chine-spine> and, for drop-in compatibility
-// with Spine's HTML export, <spine-skeleton> (unless one is already defined).
+// Drop-in for a Spine HTML export: swap the spine-webgl runtime <script> for
+// this module. The element reads the export's embedded base64 globals
+// (`skeletonData`, `atlasData`, `textureData`) and registers under Spine's
+// element name `<spine-skeleton>` as well as `<chine-spine>`. The skeleton may
+// be a binary `.skel` or a `.json` export; the type is auto-detected.
 
 import init, { WebSpine } from "../pkg/chine_web.js";
 
@@ -18,13 +20,41 @@ function ensureWasm(wasmUrl) {
   return wasmReady;
 }
 
-function loadImage(url) {
+function base64ToBytes(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function decodeUtf8(bytes) {
+  return new TextDecoder("utf-8").decode(bytes);
+}
+
+// A binary `.skel` starts with arbitrary hash bytes; a JSON export starts with
+// `{` (after optional whitespace).
+function looksLikeJson(bytes) {
+  for (let i = 0; i < Math.min(bytes.length, 16); i++) {
+    const c = bytes[i];
+    if (c === 0x7b) return true;
+    if (c !== 0x20 && c !== 0x09 && c !== 0x0a && c !== 0x0d) return false;
+  }
+  return false;
+}
+
+function makeSpine(canvas, skelBytes, atlasText) {
+  return looksLikeJson(skelBytes)
+    ? WebSpine.from_json(canvas, decodeUtf8(skelBytes), atlasText)
+    : WebSpine.from_binary(canvas, skelBytes, atlasText);
+}
+
+function loadImage(src) {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.crossOrigin = "anonymous";
     img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error("failed to load image: " + url));
-    img.src = url;
+    img.onerror = () => reject(new Error("failed to load image: " + src));
+    img.src = src;
   });
 }
 
@@ -45,34 +75,44 @@ class ChineSpine extends HTMLElement {
 
   async _boot() {
     await ensureWasm(this.getAttribute("wasm") || undefined);
-
-    const skelUrl = this.getAttribute("skeleton");
-    const atlasUrl = this.getAttribute("atlas");
-    if (!skelUrl || !atlasUrl) {
-      throw new Error("chine-spine needs `skeleton` and `atlas` attributes");
-    }
-    const base = atlasUrl.slice(0, atlasUrl.lastIndexOf("/") + 1);
-
     this._resize();
-    const atlasText = await fetch(atlasUrl).then((r) => r.text());
 
-    let spine;
-    if (skelUrl.endsWith(".json")) {
-      const json = await fetch(skelUrl).then((r) => r.text());
-      spine = WebSpine.from_json(this._canvas, json, atlasText);
+    // Drop-in mode: a Spine HTML export embeds its data as base64 globals.
+    const g = globalThis;
+    const embedded =
+      typeof g.skeletonData !== "undefined" && typeof g.atlasData !== "undefined";
+
+    let textures = null;
+    let base = "";
+    if (embedded) {
+      const skelBytes = base64ToBytes(g.skeletonData);
+      const atlasText = decodeUtf8(base64ToBytes(g.atlasData));
+      this._spine = makeSpine(this._canvas, skelBytes, atlasText);
+      textures = new Map();
+      if (Array.isArray(g.textureData)) {
+        for (const [name, b64] of g.textureData) textures.set(name, b64);
+      }
     } else {
-      const bytes = new Uint8Array(await fetch(skelUrl).then((r) => r.arrayBuffer()));
-      spine = WebSpine.from_binary(this._canvas, bytes, atlasText);
+      const skelUrl = this.getAttribute("skeleton");
+      const atlasUrl = this.getAttribute("atlas");
+      if (!skelUrl || !atlasUrl) {
+        throw new Error("chine-spine needs `skeleton` and `atlas` attributes or embedded data");
+      }
+      base = atlasUrl.slice(0, atlasUrl.lastIndexOf("/") + 1);
+      const atlasText = await fetch(atlasUrl).then((r) => r.text());
+      const skelBytes = new Uint8Array(await fetch(skelUrl).then((r) => r.arrayBuffer()));
+      this._spine = makeSpine(this._canvas, skelBytes, atlasText);
     }
-    this._spine = spine;
 
     // Upload each atlas page image as a texture, in page order.
-    for (const name of spine.page_names()) {
-      spine.add_page(await loadImage(base + name));
+    for (const name of this._spine.page_names()) {
+      const embeddedPng = textures && textures.get(name);
+      const src = embeddedPng ? "data:image/png;base64," + embeddedPng : base + name;
+      this._spine.add_page(await loadImage(src));
     }
 
-    const anim = this.getAttribute("animation") || spine.animation_names()[0];
-    if (anim) spine.set_animation(anim, true);
+    const anim = this.getAttribute("animation") || this._spine.animation_names()[0];
+    if (anim) this._spine.set_animation(anim, true);
 
     this._last = performance.now();
     this._loop();
