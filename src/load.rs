@@ -23,8 +23,8 @@ use crate::anim::{
     GLOBAL_PHYSICS,
 };
 use crate::attach::{
-    Attachment, BoundingBoxAttachment, LinkedMeshAttachment, MeshAttachment, MeshVertices,
-    PathAttachment, PointAttachment, RegionAttachment,
+    Attachment, BoundingBoxAttachment, ClippingAttachment, LinkedMeshAttachment, MeshAttachment,
+    MeshVertices, PathAttachment, PointAttachment, RegionAttachment,
 };
 use crate::constraint::ik::IkConstraintData;
 use crate::constraint::path::{PathConstraintData, PositionMode, RotateMode, SpacingMode};
@@ -290,7 +290,23 @@ fn parse_attachment(name: &str, v: &Value) -> Option<Attachment> {
             v.get("parent").and_then(Value::as_str).unwrap_or(name),
             parse_color(v.get("color").and_then(Value::as_str), Color::WHITE),
         ))),
-        // clipping arrives later.
+        "clipping" => {
+            let count = v.get("vertexCount").and_then(Value::as_u64).unwrap_or(0) as usize;
+            let raw = f_array(v, "vertices");
+            let vertices = if raw.len() == count * 2 {
+                MeshVertices::Unweighted(raw)
+            } else {
+                parse_weighted(&raw)
+            };
+            let end = v
+                .get("end")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            Some(Attachment::Clipping(ClippingAttachment::new(
+                name, end, vertices, count,
+            )))
+        }
         _ => None,
     }
 }
@@ -2233,6 +2249,21 @@ mod tests {
                 assert!((p.rotation - 30.0).abs() < 1e-4);
             }
             other => panic!("expected point, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_clipping_attachment() {
+        let v: Value = serde_json::from_str(
+            r#"{"type":"clipping","end":"mouth","vertexCount":3,"vertices":[0,0,10,0,10,10]}"#,
+        )
+        .unwrap();
+        match parse_attachment("mask", &v) {
+            Some(Attachment::Clipping(c)) => {
+                assert_eq!(c.vertex_count(), 3);
+                assert_eq!(c.end_slot, "mouth");
+            }
+            other => panic!("expected clipping, got {other:?}"),
         }
     }
 

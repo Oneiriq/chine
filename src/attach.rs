@@ -5,7 +5,7 @@
 //! renderable types; [`PathAttachment`] holds the Bezier control points that
 //! path constraints follow. Bounding-box and point attachments are exposed as
 //! geometry/transform data; linked meshes resolve to their parent's geometry at
-//! load time. Clipping attachments arrive later.
+//! load time; clipping attachments mask the slots they cover with a polygon.
 
 use glam::Vec2;
 
@@ -41,6 +41,8 @@ pub enum Attachment {
     Point(PointAttachment),
     /// A mesh that borrows a parent mesh's geometry (resolved to `Mesh` at load).
     LinkedMesh(LinkedMeshAttachment),
+    /// A polygon that masks the slots it covers (not rendered itself).
+    Clipping(ClippingAttachment),
 }
 
 /// A textured quad attached to a slot's bone.
@@ -537,6 +539,51 @@ impl LinkedMeshAttachment {
         m.color = self.color;
         m.page = 0;
         m
+    }
+}
+
+/// A clipping attachment: a polygon that masks the slots from its own slot up to
+/// and including `end_slot` (in draw order). Convex polygons clip exactly;
+/// concave polygons clip against their convex span (a known simplification).
+#[derive(Debug, Clone)]
+pub struct ClippingAttachment {
+    /// Attachment name (the key within a skin).
+    pub name: String,
+    /// Name of the slot at which clipping ends (resolved at render time).
+    pub end_slot: String,
+    /// Clip polygon vertices (bind pose).
+    vertices: MeshVertices,
+    /// Number of polygon vertices.
+    vertex_count: usize,
+}
+
+impl ClippingAttachment {
+    /// A clipping attachment from its parts.
+    #[must_use]
+    pub fn new(
+        name: impl Into<String>,
+        end_slot: impl Into<String>,
+        vertices: MeshVertices,
+        vertex_count: usize,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            end_slot: end_slot.into(),
+            vertices,
+            vertex_count,
+        }
+    }
+
+    /// Number of clip-polygon vertices.
+    #[must_use]
+    pub fn vertex_count(&self) -> usize {
+        self.vertex_count
+    }
+
+    /// Compute the clip polygon's world-space vertices.
+    #[must_use]
+    pub fn compute_world_vertices(&self, skeleton: &Skeleton, slot_bone: usize) -> Vec<Vec2> {
+        compute_vertices(&self.vertices, self.vertex_count, skeleton, slot_bone, &[])
     }
 }
 
