@@ -180,9 +180,12 @@ fn inherit_from(ordinal: usize) -> Inherit {
 
 /// Parse a Spine `.skel` binary export into a [`SkeletonData`].
 ///
-/// The full section sequence is read: header, bones, slots, constraints, skins,
-/// events, and animations (bone timelines; other timeline groups are skipped
-/// while empty). A truncated stream returns [`BinaryError::Truncated`].
+/// The full section sequence is read: header, bones, slots, the IK / transform
+/// / path / physics / slider constraints, skins (including sequence
+/// attachments), events, and animations. Every timeline group is decoded: bone
+/// (rotate / translate / scale / shear), slot (attachment, color, two-color,
+/// alpha), deform, draw order, event, the IK / transform / path / physics
+/// constraint timelines, and the slider and sequence timelines.
 ///
 /// # Errors
 /// Returns [`BinaryError::Truncated`] if the data ends mid-skeleton.
@@ -2363,6 +2366,68 @@ mod tests {
             );
             assert!(cmd.page < atlas.pages.len(), "a real atlas page");
         }
+    }
+
+    // Builds a complete, minimal essential `.skel` in memory (one root bone, one
+    // slot, no constraints / skins / events / animations) and round-trips it
+    // through `from_binary`. Covers the whole header plus the bone and slot
+    // sections plus the empty trailing sections without depending on the
+    // gitignored diamond fixture, so this path stays covered in a clean checkout.
+    #[test]
+    fn from_binary_round_trips_a_minimal_skeleton() {
+        fn put_string(out: &mut Vec<u8>, s: &str) {
+            // var_uint length where 0 is None and n encodes n - 1 bytes.
+            out.push(u8::try_from(s.len() + 1).unwrap());
+            out.extend_from_slice(s.as_bytes());
+        }
+        fn put_f32(out: &mut Vec<u8>, v: f32) {
+            out.extend_from_slice(&v.to_be_bytes());
+        }
+
+        let mut b = Vec::new();
+        // Header: 64-bit hash, version, setup bounds, reference scale, flag.
+        b.extend_from_slice(&[0; 8]);
+        put_string(&mut b, "4.3.00");
+        for v in [0.0_f32, 0.0, 100.0, 200.0] {
+            put_f32(&mut b, v);
+        }
+        put_f32(&mut b, 1.0); // reference scale
+        b.push(0); // essential (nonessential = false)
+        b.push(0); // string table: 0 entries
+
+        // One root bone.
+        b.push(1); // bone count
+        put_string(&mut b, "root");
+        // rotation, x, y, scaleX, scaleY, shearX, shearY, length.
+        for v in [0.0_f32, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0] {
+            put_f32(&mut b, v);
+        }
+        b.push(0); // inherit = Normal
+        b.push(0); // skin required = false
+
+        // One slot on the root bone: white, no dark tint, no setup attachment.
+        b.push(1); // slot count
+        put_string(&mut b, "slot");
+        b.push(0); // bone index 0
+        b.extend_from_slice(&0xFFFF_FFFF_u32.to_be_bytes()); // color
+        b.extend_from_slice(&0xFFFF_FFFF_u32.to_be_bytes()); // dark (none)
+        b.push(0); // attachment = None (string ref 0)
+        b.push(0); // blend = normal
+
+        // No constraints, an empty default skin, no named skins / events / anims.
+        b.push(0); // constraint count
+        b.push(0); // default skin: 0 slots
+        b.push(0); // named skin count
+        b.push(0); // event count
+        b.push(0); // animation count
+
+        let data = from_binary(&b).expect("minimal skeleton parses");
+        assert_eq!(data.spine_version.as_deref(), Some("4.3.00"));
+        assert_eq!(data.bones.len(), 1);
+        assert_eq!(data.bones[0].name, "root");
+        assert_eq!(data.slots.len(), 1);
+        assert_eq!(data.slots[0].name, "slot");
+        assert_eq!(data.slots[0].bone, 0);
     }
 
     #[test]
