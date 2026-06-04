@@ -2321,6 +2321,50 @@ mod tests {
         assert!(distinct, "a sequenced attachment should bind distinct frame UVs");
     }
 
+    // Drives the diamond rig through the whole pipeline (load, bind, pose,
+    // render) and confirms it produces well-formed draw commands: each carries
+    // geometry with one UV pair per vertex, in-range triangle indices, and a
+    // real atlas page. Skips if the local fixtures are absent.
+    #[test]
+    fn diamond_renders_end_to_end() {
+        let skel = concat!(env!("CARGO_MANIFEST_DIR"), "/data/diamond-pro.skel");
+        let atlas = concat!(env!("CARGO_MANIFEST_DIR"), "/data/diamond-pro.atlas");
+        let (Ok(bytes), Ok(atlas_text)) = (std::fs::read(skel), std::fs::read_to_string(atlas))
+        else {
+            return;
+        };
+        let mut data = from_binary(&bytes).unwrap();
+        let atlas = crate::atlas::Atlas::parse(&atlas_text);
+        crate::render::bind_atlas(&mut data, &atlas);
+
+        let anim = data.find_animation("idle-rotating").unwrap().clone();
+        let mut sk = crate::skel::Skeleton::new(std::sync::Arc::new(data));
+        let mut state = crate::anim::AnimationState::new();
+        state.set_animation(anim, false);
+        state.update(0.25);
+        sk.set_slots_to_setup_pose();
+        state.apply(&mut sk);
+        sk.update_world_transform();
+
+        let commands = crate::render::render(&sk);
+        assert!(!commands.is_empty(), "the rig should draw something");
+        for cmd in &commands {
+            assert!(!cmd.positions.is_empty(), "a command needs vertices");
+            assert_eq!(
+                cmd.uvs.len(),
+                cmd.positions.len() * 2,
+                "one UV pair per vertex"
+            );
+            assert!(!cmd.triangles.is_empty(), "a command needs triangles");
+            let vertex_count = cmd.positions.len() as u16;
+            assert!(
+                cmd.triangles.iter().all(|&i| i < vertex_count),
+                "triangle indices stay in range"
+            );
+            assert!(cmd.page < atlas.pages.len(), "a real atlas page");
+        }
+    }
+
     #[test]
     fn applies_a_sequence_timeline() {
         use crate::anim::SequenceTimeline;
