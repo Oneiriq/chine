@@ -118,7 +118,7 @@ pub struct TransformConstraintData {
 
 /// A runtime transform-constraint pose (the mixes are animatable).
 #[derive(Debug, Clone)]
-pub struct TransformConstraint {
+pub(crate) struct TransformConstraint {
     /// Rotation mix in `[0, 1]`.
     pub mix_rotate: f32,
     /// X mix.

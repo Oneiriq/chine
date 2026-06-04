@@ -23,7 +23,7 @@ const DEFAULT_REFERENCE_SCALE: f32 = 100.0;
 
 /// How physics advances on an `update_world_transform` pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Physics {
+pub(crate) enum Physics {
     /// Leave physics untouched this pass.
     None,
     /// Reset accumulated physics state, then advance once.

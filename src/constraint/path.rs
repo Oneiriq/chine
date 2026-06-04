@@ -91,7 +91,7 @@ pub struct PathConstraintData {
 
 /// A runtime path-constraint pose (animatable).
 #[derive(Debug, Clone, Copy)]
-pub struct PathConstraint {
+pub(crate) struct PathConstraint {
     /// Position along the path.
     pub position: f32,
     /// Spacing between bones.

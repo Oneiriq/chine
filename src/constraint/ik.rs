@@ -41,7 +41,7 @@ pub struct IkConstraintData {
 
 /// A runtime IK constraint pose, mixable by animation.
 #[derive(Debug, Clone)]
-pub struct IkConstraint {
+pub(crate) struct IkConstraint {
     /// Mix weight in `[0, 1]`.
     pub mix: f32,
     /// Softness length.

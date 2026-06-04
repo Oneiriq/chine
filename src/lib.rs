@@ -22,18 +22,19 @@
 //! position `(world_x, world_y)`, computed root-to-children, the same model the
 //! official runtimes use.
 #![warn(missing_docs)]
+#![warn(unreachable_pub)]
 #![warn(clippy::all)]
 
 pub mod anim;
 pub mod atlas;
-pub mod attach;
+pub(crate) mod attach;
 #[cfg(feature = "binary")]
 pub mod binary;
-pub mod constraint;
+pub(crate) mod constraint;
 pub mod data;
-pub mod event;
+pub(crate) mod event;
 #[cfg(feature = "json")]
 pub mod load;
 pub mod render;
 pub mod skel;
-pub mod skin;
+pub(crate) mod skin;

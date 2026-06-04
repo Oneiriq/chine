@@ -86,7 +86,7 @@ impl Default for SliderData {
 /// A runtime slider pose: its current scrub time and mix, both animatable (by
 /// the SLIDER_TIME and SLIDER_MIX timelines).
 #[derive(Debug, Clone, Copy)]
-pub struct SliderPose {
+pub(crate) struct SliderPose {
     /// Scrub time, used directly when the slider has no driving bone.
     pub time: f32,
     /// Mix weight in `[0, 1]`.

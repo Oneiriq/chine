@@ -10,11 +10,11 @@
 //! Each constraint kind lives in its own submodule: [`ik`], [`transform`],
 //! [`path`], [`physics`], and [`slider`].
 
-pub mod ik;
-pub mod path;
-pub mod physics;
-pub mod slider;
-pub mod transform;
+pub(crate) mod ik;
+pub(crate) mod path;
+pub(crate) mod physics;
+pub(crate) mod slider;
+pub(crate) mod transform;
 
 /// How a constraint adjusts Y scale when stretching or compressing
 /// (Spine 4.3 `ScaleYMode`).
