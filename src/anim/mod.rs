@@ -10,10 +10,12 @@
 //! path / physics constraint timelines, and single-track playback. Slot /
 //! deform / event timelines and multi-track mixing are layered on later.
 
+mod channels;
 mod curve;
 mod state;
 mod timeline;
 
+pub(crate) use channels::{PATH_MIX, PATH_POSITION, PATH_SPACING, TRANSFORM_MIX};
 pub use state::{AnimationState, TrackEntry};
 pub(crate) use timeline::{
     compute_draw_order, AttachmentTimeline, BoneAxis, BoneTimeline, ConstraintTimeline,

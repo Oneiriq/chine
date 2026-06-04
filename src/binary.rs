@@ -18,7 +18,7 @@ use glam::Vec2;
 use crate::anim::{
     compute_draw_order, Animation, AttachmentTimeline, BoneAxis, BoneTimeline, ConstraintTimeline,
     DeformTimeline, DrawOrderTimeline, EventTimeline, PhysicsProperty, PhysicsResetTimeline,
-    SequenceTimeline, Timeline,
+    SequenceTimeline, Timeline, PATH_MIX, PATH_POSITION, PATH_SPACING, TRANSFORM_MIX,
 };
 use crate::attach::{
     Attachment, BoundingBoxAttachment, ClippingAttachment, LinkedMeshAttachment, MeshAttachment,
@@ -1094,7 +1094,7 @@ fn read_animation(
     for _ in 0..transform_groups {
         let index = r.var_usize();
         let frames = r.count();
-        let (tl, d) = read_curve_timeline_n(r, index, frames, 6);
+        let (tl, d) = read_curve_timeline_n(r, index, frames, TRANSFORM_MIX.len());
         duration = duration.max(d);
         timelines.push(Timeline::TransformMix(tl));
     }
@@ -1109,15 +1109,15 @@ fn read_animation(
             let frames = r.count();
             let entry = match kind {
                 0 => {
-                    let (tl, d) = read_curve_timeline_n(r, index, frames, 1);
+                    let (tl, d) = read_curve_timeline_n(r, index, frames, PATH_POSITION.len());
                     Some((Timeline::PathPosition(tl), d))
                 }
                 1 => {
-                    let (tl, d) = read_curve_timeline_n(r, index, frames, 1);
+                    let (tl, d) = read_curve_timeline_n(r, index, frames, PATH_SPACING.len());
                     Some((Timeline::PathSpacing(tl), d))
                 }
                 2 => {
-                    let (tl, d) = read_curve_timeline_n(r, index, frames, 3);
+                    let (tl, d) = read_curve_timeline_n(r, index, frames, PATH_MIX.len());
                     Some((Timeline::PathMix(tl), d))
                 }
                 _ => {
@@ -1190,8 +1190,7 @@ fn read_animation(
     }
 
     // Attachment timelines, nested skins -> slots -> attachments. Mesh deforms
-    // are built and applied; sequence (animated attachment) timelines are
-    // consumed (chine does not run sequences yet).
+    // and sequence (animated attachment) timelines are both built and applied.
     let deform_skins = r.count();
     for _ in 0..deform_skins {
         let skin_index = r.var_usize();
@@ -2548,6 +2547,118 @@ mod tests {
             from_binary(&b),
             Err(BinaryError::UnknownConstraintType(99))
         ));
+    }
+
+    // Loads the same tiny rig (two bones, one rotate animation) from JSON and
+    // from binary and confirms both loaders pose it identically. This is the
+    // guard against the two loaders drifting apart: they share the channel
+    // definitions and must agree on curve reading. Both inputs are built in
+    // memory, so the test needs no external fixture.
+    #[cfg(feature = "json")]
+    #[test]
+    fn json_and_binary_loaders_agree() {
+        const JSON: &str = r#"{
+            "bones": [
+                { "name": "root" },
+                { "name": "child", "parent": "root", "x": 10 }
+            ],
+            "animations": {
+                "spin": {
+                    "bones": {
+                        "child": {
+                            "rotate": [ { "time": 0, "value": 0 }, { "time": 1, "value": 90 } ]
+                        }
+                    }
+                }
+            }
+        }"#;
+
+        fn put_string(out: &mut Vec<u8>, s: &str) {
+            out.push(u8::try_from(s.len() + 1).unwrap());
+            out.extend_from_slice(s.as_bytes());
+        }
+        fn put_f32(out: &mut Vec<u8>, v: f32) {
+            out.extend_from_slice(&v.to_be_bytes());
+        }
+
+        let mut b = Vec::new();
+        b.extend_from_slice(&[0; 8]); // hash
+        b.push(0); // version = None
+        for v in [0.0_f32, 0.0, 0.0, 0.0, 1.0] {
+            put_f32(&mut b, v); // bounds + reference scale
+        }
+        b.push(0); // essential
+        b.push(0); // 0 strings
+        b.push(2); // 2 bones
+        put_string(&mut b, "root");
+        for v in [0.0_f32, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0] {
+            put_f32(&mut b, v);
+        }
+        b.push(0); // inherit
+        b.push(0); // skin required
+        put_string(&mut b, "child");
+        b.push(0); // parent index 0
+        for v in [0.0_f32, 10.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0] {
+            put_f32(&mut b, v); // rotation, x = 10, y, scaleX, scaleY, shearX, shearY, length
+        }
+        b.push(0); // inherit
+        b.push(0); // skin required
+        b.push(0); // 0 slots
+        b.push(0); // 0 constraints
+        b.push(0); // empty default skin
+        b.push(0); // 0 named skins
+        b.push(0); // 0 events
+        b.push(1); // 1 animation
+        put_string(&mut b, "spin");
+        b.push(0); // ignored timeline count
+        b.push(0); // 0 slot groups
+        b.push(1); // 1 bone group
+        b.push(1); // bone index 1 (child)
+        b.push(1); // 1 timeline for this bone
+        b.push(0); // kind 0 = rotate
+        b.push(2); // 2 frames
+        b.push(0); // 0 bezier curves
+        put_f32(&mut b, 0.0); // frame 0 time
+        put_f32(&mut b, 0.0); // frame 0 value
+        put_f32(&mut b, 1.0); // frame 1 time
+        put_f32(&mut b, 90.0); // frame 1 value
+        b.push(0); // linear curve
+        // ik, transform, path, physics, slider, deform, draw order, folder, event
+        b.extend_from_slice(&[0; 9]);
+
+        let json_data = crate::load::from_json(JSON).unwrap();
+        let bin_data = from_binary(&b).unwrap();
+        assert_eq!(json_data.bones.len(), 2);
+        assert_eq!(json_data.bones.len(), bin_data.bones.len());
+
+        // Pose each at the same time and read the child's world transform.
+        let pose = |data: SkeletonData| {
+            let anim = data.find_animation("spin").unwrap().clone();
+            let mut sk = crate::skel::Skeleton::new(std::sync::Arc::new(data));
+            let mut state = crate::anim::AnimationState::new();
+            state.set_animation(anim, false);
+            state.update(0.5);
+            sk.set_bones_to_setup_pose();
+            state.apply(&mut sk);
+            sk.update_world_transform();
+            let bone = sk.bone(1).unwrap();
+            [
+                bone.a(),
+                bone.b(),
+                bone.c(),
+                bone.d(),
+                bone.world_x(),
+                bone.world_y(),
+            ]
+        };
+        let from_json_pose = pose(json_data);
+        let from_binary_pose = pose(bin_data);
+        for (j, b) in from_json_pose.iter().zip(from_binary_pose.iter()) {
+            assert!(
+                (j - b).abs() < 1e-5,
+                "loaders disagree: json {from_json_pose:?} vs binary {from_binary_pose:?}"
+            );
+        }
     }
 
     #[test]

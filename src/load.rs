@@ -20,7 +20,7 @@ use serde_json::Value;
 use crate::anim::{
     compute_draw_order, Animation, AttachmentTimeline, BoneAxis, BoneTimeline, ConstraintTimeline,
     DeformTimeline, DrawOrderTimeline, EventTimeline, PhysicsProperty, PhysicsResetTimeline,
-    Timeline, GLOBAL_PHYSICS,
+    Timeline, GLOBAL_PHYSICS, PATH_MIX, PATH_POSITION, PATH_SPACING, TRANSFORM_MIX,
 };
 use crate::attach::{
     Attachment, BoundingBoxAttachment, ClippingAttachment, LinkedMeshAttachment, MeshAttachment,
@@ -490,18 +490,7 @@ fn parse_animation(name: &str, anim: &Value, data: &SkeletonData) -> Result<Anim
                 .iter()
                 .position(|c| c.name == *cname)
                 .ok_or_else(|| LoadError::BadReference(cname.clone()))?;
-            let (tl, dur) = read_curve_timeline(
-                keys,
-                idx,
-                &[
-                    ("mixRotate", 1.0),
-                    ("mixX", 1.0),
-                    ("mixY", 1.0),
-                    ("mixScaleX", 1.0),
-                    ("mixScaleY", 1.0),
-                    ("mixShearY", 1.0),
-                ],
-            );
+            let (tl, dur) = read_curve_timeline(keys, idx, TRANSFORM_MIX);
             duration = duration.max(dur);
             timelines.push(Timeline::TransformMix(tl));
         }
@@ -525,21 +514,17 @@ fn parse_animation(name: &str, anim: &Value, data: &SkeletonData) -> Result<Anim
                 }
                 match channel.as_str() {
                     "position" => {
-                        let (tl, dur) = read_curve_timeline(keys, idx, &[("position", 0.0)]);
+                        let (tl, dur) = read_curve_timeline(keys, idx, PATH_POSITION);
                         duration = duration.max(dur);
                         timelines.push(Timeline::PathPosition(tl));
                     }
                     "spacing" => {
-                        let (tl, dur) = read_curve_timeline(keys, idx, &[("spacing", 0.0)]);
+                        let (tl, dur) = read_curve_timeline(keys, idx, PATH_SPACING);
                         duration = duration.max(dur);
                         timelines.push(Timeline::PathSpacing(tl));
                     }
                     "mix" => {
-                        let (tl, dur) = read_curve_timeline(
-                            keys,
-                            idx,
-                            &[("mixRotate", 1.0), ("mixX", 1.0), ("mixY", 1.0)],
-                        );
+                        let (tl, dur) = read_curve_timeline(keys, idx, PATH_MIX);
                         duration = duration.max(dur);
                         timelines.push(Timeline::PathMix(tl));
                     }
