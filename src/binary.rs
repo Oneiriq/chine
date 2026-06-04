@@ -15,7 +15,9 @@ use std::sync::Arc;
 
 use glam::Vec2;
 
-use crate::anim::{Animation, BoneAxis, BoneTimeline, Timeline};
+use crate::anim::{
+    Animation, AttachmentTimeline, BoneAxis, BoneTimeline, ConstraintTimeline, Timeline,
+};
 use crate::attach::{
     Attachment, BoundingBoxAttachment, ClippingAttachment, LinkedMeshAttachment, MeshAttachment,
     MeshVertices, PathAttachment, PointAttachment, RegionAttachment,
@@ -327,7 +329,7 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
     let animation_count = r.var_usize();
     for _ in 0..animation_count {
         let aname = r.string().unwrap_or_default();
-        let anim = read_animation(&mut r, aname, nonessential);
+        let anim = read_animation(&mut r, aname, &strings, nonessential);
         data.animations.push(Arc::new(anim));
     }
 
@@ -715,15 +717,59 @@ fn axis((tl, d): (BoneTimeline, f32), a: BoneAxis) -> (Timeline, f32) {
 
 /// Parse one animation. Built group by group; on an unhandled timeline type the
 /// parse stops early and returns what it has (later sections are left unread).
-fn read_animation(r: &mut BinaryReader, name: String, nonessential: bool) -> Animation {
+fn read_animation(
+    r: &mut BinaryReader,
+    name: String,
+    strings: &[String],
+    nonessential: bool,
+) -> Animation {
     let _timeline_count = r.var_usize();
     let mut timelines = Vec::new();
     let mut duration = 0.0_f32;
 
-    // Slot timelines (not yet handled): stop if any are present.
+    // Slot timelines: per animated slot, one or more typed timelines (color,
+    // two-color, attachment; alpha is consumed but not yet applied).
     let slot_groups = r.var_usize();
-    if slot_groups != 0 {
-        return Animation::new(name, duration, timelines);
+    for _ in 0..slot_groups {
+        let slot = r.var_usize();
+        let count = r.var_usize();
+        for _ in 0..count {
+            let kind = r.byte();
+            let frames = r.var_usize();
+            let entry: Option<(Timeline, f32)> = match kind {
+                0 => {
+                    let (tl, d) = read_slot_attachment_timeline(r, slot, frames, strings);
+                    Some((Timeline::Attachment(tl), d))
+                }
+                1 => {
+                    let (tl, d) = read_slot_color_timeline(r, slot, frames, 4);
+                    Some((Timeline::SlotColor(tl, true), d))
+                }
+                2 => {
+                    let (tl, d) = read_slot_color_timeline(r, slot, frames, 3);
+                    Some((Timeline::SlotColor(tl, false), d))
+                }
+                3 => {
+                    let (tl, d) = read_slot_color_timeline(r, slot, frames, 7);
+                    Some((Timeline::SlotTwoColor(tl, true), d))
+                }
+                4 => {
+                    let (tl, d) = read_slot_color_timeline(r, slot, frames, 6);
+                    Some((Timeline::SlotTwoColor(tl, false), d))
+                }
+                5 => {
+                    // Alpha-only: chine has no alpha slot timeline yet; consume
+                    // the bytes so the stream stays aligned.
+                    read_slot_color_timeline(r, slot, frames, 1);
+                    None
+                }
+                _ => return Animation::new(name, duration, timelines),
+            };
+            if let Some((timeline, d)) = entry {
+                duration = duration.max(d);
+                timelines.push(timeline);
+            }
+        }
     }
 
     // Bone timelines: one group per animated bone, each with one or more typed
@@ -756,7 +802,53 @@ fn read_animation(r: &mut BinaryReader, name: String, nonessential: bool) -> Ani
     // Remaining timeline groups (IK, transform, path, physics, slider,
     // attachment/deform, draw order, draw-order folders, events): skip while
     // empty, stop at the first non-empty (not yet handled).
-    for _ in 0..9 {
+    // Constraint timelines for IK / transform / path / physics: not yet parsed
+    // from binary. Stop if any appear.
+    for _ in 0..4 {
+        if r.var_usize() != 0 {
+            return Animation::new(name, duration, timelines);
+        }
+    }
+
+    // Slider timelines (Spine 4.3): SLIDER_TIME / SLIDER_MIX, each a one-value
+    // curve. chine does not run sliders yet, so these are consumed to keep the
+    // stream aligned.
+    let slider_groups = r.var_usize();
+    for _ in 0..slider_groups {
+        let _slider = r.var_usize();
+        let count = r.var_usize();
+        for _ in 0..count {
+            let _kind = r.byte();
+            let frames = r.var_usize();
+            skip_timeline1(r, frames);
+        }
+    }
+
+    // Attachment/deform timelines: consumed (mesh deforms are not yet applied
+    // from binary). The section nests skins -> slots -> attachments.
+    let deform_skins = r.var_usize();
+    for _ in 0..deform_skins {
+        let _skin = r.var_usize();
+        let slots = r.var_usize();
+        for _ in 0..slots {
+            let _slot = r.var_usize();
+            let atts = r.var_usize();
+            for _ in 0..atts {
+                let _ = string_ref(r, strings);
+                let kind = r.byte();
+                let frames = r.var_usize();
+                match kind {
+                    0 => skip_deform_timeline(r, frames),
+                    1 => skip_sequence_timeline(r, frames),
+                    _ => return Animation::new(name, duration, timelines),
+                }
+            }
+        }
+    }
+
+    // Draw order, draw-order folders, and event timelines: not yet parsed from
+    // binary. Stop if any appear.
+    for _ in 0..3 {
         if r.var_usize() != 0 {
             return Animation::new(name, duration, timelines);
         }
@@ -852,6 +944,146 @@ fn read_bone_timeline2(r: &mut BinaryReader, bone: usize, frames: usize) -> (Bon
         v2 = nv2;
     }
     (tl, duration)
+}
+
+/// Read `n` color channels, each a `0..=255` byte scaled to `0..=1`.
+fn read_color_channels(r: &mut BinaryReader, n: usize) -> Vec<f32> {
+    (0..n).map(|_| f32::from(r.byte()) / 255.0).collect()
+}
+
+/// Read a slot color timeline (RGBA / RGB / two-color / alpha): per frame a time
+/// and `channels` color components (each a byte), with a stepped / linear /
+/// Bezier curve per channel between frames. The stream gives the Bezier-segment
+/// count first.
+fn read_slot_color_timeline(
+    r: &mut BinaryReader,
+    slot: usize,
+    frames: usize,
+    channels: usize,
+) -> (ConstraintTimeline, f32) {
+    let bezier_count = r.var_usize();
+    let mut tl = ConstraintTimeline::new(slot, frames, bezier_count, channels + 1);
+    let mut bezier = 0;
+    let mut duration = 0.0_f32;
+    let mut time = r.float();
+    let mut vals = read_color_channels(r, channels);
+    let last = frames.saturating_sub(1);
+    for frame in 0..frames {
+        tl.set_frame(frame, time, &vals);
+        duration = duration.max(time);
+        if frame == last {
+            break;
+        }
+        let time2 = r.float();
+        let vals2 = read_color_channels(r, channels);
+        match r.byte() {
+            1 => tl.set_stepped(frame),
+            2 => {
+                for ch in 0..channels {
+                    let cx1 = r.float();
+                    let cy1 = r.float();
+                    let cx2 = r.float();
+                    let cy2 = r.float();
+                    tl.set_bezier(
+                        bezier, frame, ch, time, vals[ch], cx1, cy1, cx2, cy2, time2, vals2[ch],
+                    );
+                    bezier += 1;
+                }
+            }
+            _ => {}
+        }
+        time = time2;
+        vals = vals2;
+    }
+    (tl, duration)
+}
+
+/// Consume a one-value curve timeline (Bezier count, then time + value per
+/// frame with stepped / linear / Bezier curves) without building anything. Used
+/// for timeline kinds chine parses but does not yet apply (e.g. sliders).
+fn skip_timeline1(r: &mut BinaryReader, frames: usize) {
+    let _bezier_count = r.var_usize();
+    r.float(); // first frame time
+    r.float(); // first frame value
+    let last = frames.saturating_sub(1);
+    for frame in 0..frames {
+        if frame == last {
+            break;
+        }
+        r.float(); // time
+        r.float(); // value
+        if r.byte() == 2 {
+            // Bezier: four control floats.
+            for _ in 0..4 {
+                r.float();
+            }
+        }
+    }
+}
+
+/// Consume one mesh-deform timeline frame: a run of changed vertices encoded as
+/// a count, a start offset, then that many float offsets (count `0` means the
+/// frame uses the setup vertices).
+fn skip_deform_frame(r: &mut BinaryReader) {
+    let end = r.var_usize();
+    if end != 0 {
+        let _start = r.var_usize();
+        for _ in 0..end {
+            r.float();
+        }
+    }
+}
+
+/// Consume a mesh-deform timeline (Bezier count, then per-frame time and vertex
+/// offsets, with stepped / linear / Bezier curves) without building anything.
+fn skip_deform_timeline(r: &mut BinaryReader, frames: usize) {
+    let _bezier_count = r.var_usize();
+    let last = frames.saturating_sub(1);
+    r.float(); // first frame time
+    skip_deform_frame(r);
+    for frame in 0..frames {
+        if frame == last {
+            break;
+        }
+        r.float(); // time
+        if r.byte() == 2 {
+            // Bezier: four control floats.
+            for _ in 0..4 {
+                r.float();
+            }
+        }
+        skip_deform_frame(r);
+    }
+}
+
+/// Consume a sequence (animated attachment) timeline: per frame a time, a
+/// packed mode-and-index int, and a delay. Stepped, so there is no curve data.
+fn skip_sequence_timeline(r: &mut BinaryReader, frames: usize) {
+    for _ in 0..frames {
+        r.float(); // time
+        r.u32(); // packed sequence mode and index
+        r.float(); // delay
+    }
+}
+
+/// Read a slot attachment-swap timeline: per frame a time and the attachment
+/// name shown (`None` hides the slot). Stepped, so there is no curve data.
+fn read_slot_attachment_timeline(
+    r: &mut BinaryReader,
+    slot: usize,
+    frames: usize,
+    strings: &[String],
+) -> (AttachmentTimeline, f32) {
+    let mut times = Vec::with_capacity(frames);
+    let mut names = Vec::with_capacity(frames);
+    let mut duration = 0.0_f32;
+    for _ in 0..frames {
+        let time = r.float();
+        names.push(string_ref(r, strings));
+        times.push(time);
+        duration = duration.max(time);
+    }
+    (AttachmentTimeline::new(slot, times, names), duration)
 }
 
 #[cfg(test)]
@@ -1025,11 +1257,26 @@ mod tests {
         assert!(slider.bone.is_some());
         assert!(slider.property.is_some());
 
-        // Eight animations; the first ("appear") is bone-only and fully parses
-        // (a non-zero duration confirms its bone timelines were read).
-        assert_eq!(data.animations.len(), 8);
-        assert_eq!(data.animations[0].name(), "appear");
+        // All eight animations parse end to end; a misaligned parse would
+        // surface as a garbage or truncated name. "appear" is bone-only;
+        // "disappear" exercises slot color, attachment, slider, deform, and
+        // sequence timelines.
+        let names: Vec<&str> = data.animations.iter().map(|a| a.name()).collect();
+        assert_eq!(
+            names,
+            [
+                "appear",
+                "disappear",
+                "idle-rotating",
+                "idle-rotating-alt-shape",
+                "idle-still",
+                "rotation",
+                "size-changing-rotation",
+                "size-changing-rotation-perspective",
+            ]
+        );
         assert!(data.animations[0].duration() > 0.0);
+        assert!(data.animations[1].duration() > 0.0);
     }
 
     #[test]
