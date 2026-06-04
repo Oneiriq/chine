@@ -17,7 +17,7 @@ use glam::Vec2;
 
 use crate::anim::{
     Animation, AttachmentTimeline, BoneAxis, BoneTimeline, ConstraintTimeline, DeformTimeline,
-    Timeline,
+    EventTimeline, Timeline,
 };
 use crate::attach::{
     Attachment, BoundingBoxAttachment, ClippingAttachment, LinkedMeshAttachment, MeshAttachment,
@@ -27,7 +27,7 @@ use crate::constraint::ik::IkConstraintData;
 use crate::constraint::slider::{SliderData, SliderProperty};
 use crate::constraint::ScaleYMode;
 use crate::data::{BlendMode, BoneData, Color, Inherit, SkeletonData, SlotData};
-use crate::event::EventData;
+use crate::event::{Event, EventData};
 use crate::skin::Skin;
 
 /// An error from binary skeleton loading.
@@ -859,12 +859,21 @@ fn read_animation(
         }
     }
 
-    // Draw order, draw-order folders, and event timelines: not yet parsed from
-    // binary. Stop if any appear.
-    for _ in 0..3 {
-        if r.var_usize() != 0 {
-            return Animation::new(name, duration, timelines);
-        }
+    // Draw order and draw-order folder timelines: not yet parsed. Stop if any
+    // appear (the folder section is new in Spine 4.3).
+    if r.var_usize() != 0 {
+        return Animation::new(name, duration, timelines);
+    }
+    if r.var_usize() != 0 {
+        return Animation::new(name, duration, timelines);
+    }
+
+    // Event timeline: keyframes that fire named events with per-key overrides.
+    let event_count = r.var_usize();
+    if event_count != 0 {
+        let (tl, d) = read_event_timeline(r, data, event_count);
+        duration = duration.max(d);
+        timelines.push(Timeline::Event(tl));
     }
 
     // A nonessential export appends the animation's editor color (RGBA8888).
@@ -1205,6 +1214,54 @@ fn read_slot_attachment_timeline(
     (AttachmentTimeline::new(slot, times, names), duration)
 }
 
+/// Read an event timeline: per frame a time and the fired event. Each event's
+/// base values come from the skeleton's [`EventData`] (by index) and are
+/// overridden by the keyframe; volume / balance are only stored when the event
+/// has an audio path.
+fn read_event_timeline(
+    r: &mut BinaryReader,
+    data: &SkeletonData,
+    frames: usize,
+) -> (EventTimeline, f32) {
+    let mut times = Vec::with_capacity(frames);
+    let mut events = Vec::with_capacity(frames);
+    let mut duration = 0.0_f32;
+    for _ in 0..frames {
+        let time = r.float();
+        let index = r.var_usize();
+        let (name, def_string, has_audio, def_volume, def_balance) = match data.events.get(index) {
+            Some(e) => (
+                e.name.clone(),
+                e.string_value.clone(),
+                e.audio_path.is_some(),
+                e.volume,
+                e.balance,
+            ),
+            None => (String::new(), String::new(), false, 1.0, 0.0),
+        };
+        let int_value = r.var_int();
+        let float_value = r.float();
+        let string_value = r.string().unwrap_or(def_string);
+        let (volume, balance) = if has_audio {
+            (r.float(), r.float())
+        } else {
+            (def_volume, def_balance)
+        };
+        events.push(Event {
+            name,
+            time,
+            int_value,
+            float_value,
+            string_value,
+            volume,
+            balance,
+        });
+        times.push(time);
+        duration = duration.max(time);
+    }
+    (EventTimeline::new(times, events), duration)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1444,5 +1501,50 @@ mod tests {
         let (_tl, duration) = read_bone_timeline1(&mut r, 0, 2);
         assert!((duration - 1.0).abs() < 1e-6);
         assert!(!r.overran());
+    }
+
+    #[test]
+    fn reads_an_event_timeline() {
+        // A skeleton with a root bone and one event named "footstep".
+        let data = SkeletonData {
+            bones: vec![BoneData {
+                index: 0,
+                name: "root".into(),
+                ..Default::default()
+            }],
+            events: vec![EventData {
+                name: "footstep".into(),
+                int_value: 5,
+                float_value: 0.0,
+                string_value: String::new(),
+                audio_path: None,
+                volume: 1.0,
+                balance: 0.0,
+            }],
+            ..Default::default()
+        };
+        // One keyframe at time 0.5: event index 0, int override 7, float 1.5,
+        // no string override, no audio (so no volume / balance bytes).
+        let mut b = Vec::new();
+        b.extend_from_slice(&0.5_f32.to_be_bytes());
+        b.push(0); // event index
+        b.push(14); // int value 7 as a zig-zag var-int
+        b.extend_from_slice(&1.5_f32.to_be_bytes());
+        b.push(0); // string value = None
+        let mut r = BinaryReader::new(&b);
+        let (tl, dur) = read_event_timeline(&mut r, &data, 1);
+        assert!((dur - 0.5).abs() < 1e-6);
+        assert!(!r.overran());
+
+        // Playing past the keyframe fires "footstep" with the keyframe int (7).
+        let anim = Animation::new("walk", dur, vec![Timeline::Event(tl)]);
+        let mut sk = crate::skel::Skeleton::new(std::sync::Arc::new(data));
+        let mut state = crate::anim::AnimationState::new();
+        state.set_animation(std::sync::Arc::new(anim), false);
+        state.update(1.0);
+        state.apply(&mut sk);
+        assert_eq!(sk.events().len(), 1);
+        assert_eq!(sk.events()[0].name, "footstep");
+        assert_eq!(sk.events()[0].int_value, 7);
     }
 }
