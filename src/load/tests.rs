@@ -110,6 +110,32 @@ fn parses_and_plays_a_rotate_animation() {
 }
 
 #[test]
+fn parses_and_plays_a_slot_alpha_timeline() {
+    let json = r#"{
+        "bones": [ { "name": "root" } ],
+        "slots": [ { "name": "s", "bone": "root" } ],
+        "animations": {
+            "fade": {
+                "slots": {
+                    "s": {
+                        "alpha": [ { "time": 0, "value": 1 }, { "time": 1, "value": 0 } ]
+                    }
+                }
+            }
+        }
+    }"#;
+    let data = from_json(json).unwrap();
+    let anim = data.find_animation("fade").unwrap().clone();
+    let mut sk = crate::skel::Skeleton::new(std::sync::Arc::new(data));
+    let mut state = crate::anim::AnimationState::new();
+    state.set_animation(anim, false);
+    state.update(0.5);
+    state.apply(&mut sk);
+    // setup alpha 1 fading to 0; ~0.5 at the halfway point.
+    assert!((sk.slot(0).unwrap().color.a - 0.5).abs() < 1e-4);
+}
+
+#[test]
 fn parses_ik_constraint() {
     let json = r#"{
         "bones": [
