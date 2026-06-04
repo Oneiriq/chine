@@ -251,9 +251,16 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
     // IK constraints. Spine 4.3 packs the flags into one byte and stores only
     // non-default mix/softness; there is no explicit order (it is the read
     // order across all constraint types).
-    let ik_count = r.var_usize();
-    for _ in 0..ik_count {
-        data.ik_constraints.push(parse_ik(&mut r));
+    // Constraints are one list; each begins with a name and a type byte
+    // (0 = IK). This WIP rig has only IK constraints.
+    let constraint_count = r.var_usize();
+    for order in 0..constraint_count {
+        let name = r.string().unwrap_or_default();
+        let kind = r.byte();
+        match kind {
+            0 => data.ik_constraints.push(parse_ik(&mut r, name, order)),
+            _ => break,
+        }
     }
 
     if r.overran() {
@@ -272,9 +279,7 @@ fn scale_y_from(ordinal: usize) -> ScaleYMode {
 }
 
 /// Parse one IK constraint (Spine 4.3 bit-packed layout).
-fn parse_ik(r: &mut BinaryReader) -> IkConstraintData {
-    let name = r.string().unwrap_or_default();
-    let order = r.var_usize();
+fn parse_ik(r: &mut BinaryReader, name: String, order: usize) -> IkConstraintData {
     let bone_count = r.var_usize();
     let bones = (0..bone_count).map(|_| r.var_usize()).collect();
     let target = r.var_usize();
