@@ -24,6 +24,14 @@
 #![warn(missing_docs)]
 #![warn(unreachable_pub)]
 #![warn(clippy::all)]
+// Without a loader feature, the loader-fed timeline variants, channel tables,
+// and data constructors are unused by design: the crate is then a manual
+// pose/render runtime over a hand-built SkeletonData. Allow that dead code only
+// in the no-loader configuration; the loader builds still enforce every warning.
+#![cfg_attr(
+    not(any(feature = "json", feature = "binary")),
+    allow(dead_code, unused_imports)
+)]
 
 pub mod anim;
 pub mod atlas;
