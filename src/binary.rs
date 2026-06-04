@@ -11,8 +11,11 @@
 //! transcribed from the Spine 4.3 format. Sections beyond those already read are
 //! left for later and simply end the parse early.
 
+use std::sync::Arc;
+
 use glam::Vec2;
 
+use crate::anim::{Animation, BoneAxis, BoneTimeline, Timeline};
 use crate::attach::{
     Attachment, BoundingBoxAttachment, ClippingAttachment, LinkedMeshAttachment, MeshAttachment,
     MeshVertices, PathAttachment, PointAttachment, RegionAttachment,
@@ -66,6 +69,12 @@ impl<'a> BinaryReader<'a> {
     #[must_use]
     pub fn overran(&self) -> bool {
         self.overran
+    }
+
+    /// Bytes not yet consumed.
+    #[must_use]
+    pub fn remaining(&self) -> usize {
+        self.data.len().saturating_sub(self.pos)
     }
 
     /// One byte (zero past the end).
@@ -161,9 +170,9 @@ fn inherit_from(ordinal: usize) -> Inherit {
 
 /// Parse a Spine `.skel` binary export into a [`SkeletonData`].
 ///
-/// The header, bone, slot, constraint, skin (attachment), and event sections are
-/// read; animations are added as the loader grows. A truncated stream returns
-/// [`BinaryError::Truncated`].
+/// The full section sequence is read: header, bones, slots, constraints, skins,
+/// events, and animations (bone timelines; other timeline groups are skipped
+/// while empty). A truncated stream returns [`BinaryError::Truncated`].
 ///
 /// # Errors
 /// Returns [`BinaryError::Truncated`] if the data ends mid-skeleton.
@@ -309,6 +318,16 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
         });
     }
 
+    // Animations.
+    let animation_count = r.var_usize();
+    for _ in 0..animation_count {
+        let aname = r.string().unwrap_or_default();
+        let anim = read_animation(&mut r, aname);
+        data.animations.push(Arc::new(anim));
+    }
+
+    // A trailing file marker may remain after the last animation; it is left
+    // unread (and is harmless - `remaining()` simply stays non-zero).
     if r.overran() {
         return Err(BinaryError::Truncated);
     }
@@ -634,6 +653,147 @@ fn read_short_array(r: &mut BinaryReader, n: usize) -> Vec<u16> {
     (0..n).map(|_| r.var_usize() as u16).collect()
 }
 
+/// Wrap a parsed bone timeline in its [`Timeline`] variant.
+fn wrap((tl, d): (BoneTimeline, f32), make: fn(BoneTimeline) -> Timeline) -> (Timeline, f32) {
+    (make(tl), d)
+}
+
+/// Wrap a parsed single-axis bone timeline.
+fn axis((tl, d): (BoneTimeline, f32), a: BoneAxis) -> (Timeline, f32) {
+    (Timeline::BoneAxis(tl, a), d)
+}
+
+/// Parse one animation. Built group by group; on an unhandled timeline type the
+/// parse stops early and returns what it has (later sections are left unread).
+fn read_animation(r: &mut BinaryReader, name: String) -> Animation {
+    let _timeline_count = r.var_usize();
+    let mut timelines = Vec::new();
+    let mut duration = 0.0_f32;
+
+    // Slot timelines (not yet handled): stop if any are present.
+    if r.var_usize() != 0 {
+        return Animation::new(name, duration, timelines);
+    }
+
+    // Bone timelines.
+    let bone_groups = r.var_usize();
+    for _ in 0..bone_groups {
+        let bone = r.var_usize();
+        let count = r.var_usize();
+        for _ in 0..count {
+            let kind = r.byte();
+            let frames = r.var_usize();
+            let (timeline, d) = match kind {
+                0 => wrap(read_bone_timeline1(r, bone, frames), Timeline::Rotate),
+                1 => wrap(read_bone_timeline2(r, bone, frames), Timeline::Translate),
+                2 => axis(read_bone_timeline1(r, bone, frames), BoneAxis::TranslateX),
+                3 => axis(read_bone_timeline1(r, bone, frames), BoneAxis::TranslateY),
+                4 => wrap(read_bone_timeline2(r, bone, frames), Timeline::Scale),
+                5 => axis(read_bone_timeline1(r, bone, frames), BoneAxis::ScaleX),
+                6 => axis(read_bone_timeline1(r, bone, frames), BoneAxis::ScaleY),
+                7 => wrap(read_bone_timeline2(r, bone, frames), Timeline::Shear),
+                8 => axis(read_bone_timeline1(r, bone, frames), BoneAxis::ShearX),
+                9 => axis(read_bone_timeline1(r, bone, frames), BoneAxis::ShearY),
+                _ => return Animation::new(name, duration, timelines),
+            };
+            duration = duration.max(d);
+            timelines.push(timeline);
+        }
+    }
+
+    // Remaining timeline groups (IK, transform, path, physics, slider,
+    // attachment/deform, draw order, draw-order folders, events): skip while
+    // empty, stop at the first non-empty (not yet handled).
+    for _ in 0..9 {
+        if r.var_usize() != 0 {
+            return Animation::new(name, duration, timelines);
+        }
+    }
+
+    Animation::new(name, duration, timelines)
+}
+
+/// Read a one-value bone timeline (rotate / single axis): per-frame time + value
+/// with a stepped / linear / Bezier curve between frames.
+fn read_bone_timeline1(r: &mut BinaryReader, bone: usize, frames: usize) -> (BoneTimeline, f32) {
+    let mut tl = BoneTimeline::one_value(bone, frames, frames);
+    let mut bezier = 0;
+    let mut duration = 0.0_f32;
+    let mut time = r.float();
+    let mut value = r.float();
+    let last = frames.saturating_sub(1);
+    for frame in 0..frames {
+        tl.set_frame1(frame, time, value);
+        duration = duration.max(time);
+        if frame == last {
+            break;
+        }
+        let time2 = r.float();
+        let value2 = r.float();
+        match r.byte() {
+            1 => tl.set_stepped(frame),
+            2 => {
+                let cx1 = r.float();
+                let cy1 = r.float();
+                let cx2 = r.float();
+                let cy2 = r.float();
+                tl.set_bezier(
+                    bezier, frame, 0, time, value, cx1, cy1, cx2, cy2, time2, value2,
+                );
+                bezier += 1;
+            }
+            _ => {}
+        }
+        time = time2;
+        value = value2;
+    }
+    (tl, duration)
+}
+
+/// Read a two-value bone timeline (translate / scale / shear): per frame a time
+/// and two values, with two Bezier segments per curved frame.
+fn read_bone_timeline2(r: &mut BinaryReader, bone: usize, frames: usize) -> (BoneTimeline, f32) {
+    let mut tl = BoneTimeline::two_value(bone, frames, frames * 2);
+    let mut bezier = 0;
+    let mut duration = 0.0_f32;
+    let mut time = r.float();
+    let mut v1 = r.float();
+    let mut v2 = r.float();
+    let last = frames.saturating_sub(1);
+    for frame in 0..frames {
+        tl.set_frame2(frame, time, v1, v2);
+        duration = duration.max(time);
+        if frame == last {
+            break;
+        }
+        let time2 = r.float();
+        let nv1 = r.float();
+        let nv2 = r.float();
+        match r.byte() {
+            1 => tl.set_stepped(frame),
+            2 => {
+                let cx1 = r.float();
+                let cy1 = r.float();
+                let cx2 = r.float();
+                let cy2 = r.float();
+                tl.set_bezier(bezier, frame, 0, time, v1, cx1, cy1, cx2, cy2, time2, nv1);
+                bezier += 1;
+                let dx1 = r.float();
+                let dy1 = r.float();
+                let dx2 = r.float();
+                let dy2 = r.float();
+                tl.set_bezier(bezier, frame, 1, time, v2, dx1, dy1, dx2, dy2, time2, nv2);
+                bezier += 1;
+            }
+            _ => {}
+        }
+        time = time2;
+        v1 = nv1;
+        v2 = nv2;
+    }
+    (tl, duration)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -697,6 +857,7 @@ mod tests {
         b.push(0); // default skin slot count = 0
         b.push(0); // named skin count = 0
         b.push(0); // event count = 0
+        b.push(0); // animation count = 0
 
         let data = from_binary(&b).unwrap();
         assert_eq!(data.spine_version.as_deref(), Some("4.3.00"));
@@ -776,5 +937,23 @@ mod tests {
             .triangles
             .iter()
             .all(|&t| (t as usize) < mesh.vertex_count()));
+
+        // One animation (empty in this WIP rig) named "animation".
+        assert_eq!(data.animations.len(), 1);
+        assert_eq!(data.animations[0].name(), "animation");
+    }
+
+    #[test]
+    fn reads_a_one_value_bone_timeline() {
+        // Two rotate frames (0,0) and (1,90) with a linear curve between them.
+        let mut b = Vec::new();
+        for v in [0.0_f32, 0.0, 1.0, 90.0] {
+            b.extend_from_slice(&v.to_be_bytes());
+        }
+        b.push(0); // curve = linear
+        let mut r = BinaryReader::new(&b);
+        let (_tl, duration) = read_bone_timeline1(&mut r, 0, 2);
+        assert!((duration - 1.0).abs() < 1e-6);
+        assert!(!r.overran());
     }
 }
