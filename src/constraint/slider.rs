@@ -1,8 +1,9 @@
 //! Slider constraints (Spine 4.3).
 //!
-//! A slider reads one local bone property, maps it to a scrub time, and applies
-//! the animation it drives at that time, so the bone's pose scrubs that
-//! animation. The world-space property path is not yet implemented.
+//! A slider reads one bone property (local pose or world transform), maps it to
+//! a scrub time, and applies the animation it drives at that time, so the bone
+//! scrubs that animation. A bone-less slider's scrub time instead comes from a
+//! SLIDER_TIME timeline.
 
 use crate::anim::MixFrom;
 use crate::skel::{Bone, Skeleton};
@@ -103,15 +104,31 @@ impl SliderPose {
     }
 }
 
-/// Read the local property value a slider maps to its scrub time.
-fn read_bone_property(bone: &Bone, property: SliderProperty) -> f32 {
+/// Read the property value a slider maps to its scrub time, in local pose space
+/// or, when `local` is false, decomposed from the bone's world transform.
+fn read_bone_property(bone: &Bone, property: SliderProperty, local: bool) -> f32 {
+    if local {
+        return match property {
+            SliderProperty::Rotate => bone.rotation,
+            SliderProperty::X => bone.x,
+            SliderProperty::Y => bone.y,
+            SliderProperty::ScaleX => bone.scale_x,
+            SliderProperty::ScaleY => bone.scale_y,
+            SliderProperty::ShearY => bone.shear_y,
+        };
+    }
     match property {
-        SliderProperty::Rotate => bone.rotation,
-        SliderProperty::X => bone.x,
-        SliderProperty::Y => bone.y,
-        SliderProperty::ScaleX => bone.scale_x,
-        SliderProperty::ScaleY => bone.scale_y,
-        SliderProperty::ShearY => bone.shear_y,
+        SliderProperty::Rotate => bone.c().atan2(bone.a()).to_degrees(),
+        SliderProperty::X => bone.world_x(),
+        SliderProperty::Y => bone.world_y(),
+        SliderProperty::ScaleX => bone.a().hypot(bone.c()),
+        SliderProperty::ScaleY => bone.b().hypot(bone.d()),
+        // The y-axis's deviation from perpendicular to the x-axis.
+        SliderProperty::ShearY => {
+            let x_angle = bone.c().atan2(bone.a());
+            let y_angle = bone.d().atan2(bone.b());
+            (y_angle - x_angle).to_degrees() - 90.0
+        }
     }
 }
 
@@ -136,7 +153,7 @@ pub(crate) fn solve(skel: &mut Skeleton, c: usize) {
     // (possibly animated) pose time is used directly.
     let mut time = if let (Some(bone_index), Some(property)) = (data.bone, data.property) {
         let value = match skel.bone(bone_index) {
-            Some(bone) => read_bone_property(bone, property),
+            Some(bone) => read_bone_property(bone, property, data.local),
             None => return,
         };
         data.offset + (value - data.property_offset) * data.scale
