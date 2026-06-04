@@ -71,7 +71,7 @@ struct SequenceFrame {
 
 impl Sequence {
     /// A sequence with the given counts and setup frame; its per-frame UVs are
-    /// filled in at bind time via [`Self::push_frame`].
+    /// resolved at bind time.
     #[must_use]
     pub fn new(count: usize, start: usize, digits: usize, setup_index: usize) -> Self {
         Self {
