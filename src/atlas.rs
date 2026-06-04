@@ -146,7 +146,10 @@ impl Atlas {
             // Page: the filename line, then indented page-property lines.
             let mut page = AtlasPage::new(line.trim().to_string());
             while let Some(next) = lines.peek() {
-                if !is_indented(next) || next.trim().is_empty() {
+                let t = next.trim();
+                // A property line is indented (legacy) or `key:value` (4.x);
+                // a bare name line (neither) ends the page header.
+                if t.is_empty() || (!is_indented(next) && !t.contains(':')) {
                     break;
                 }
                 apply_page_prop(&mut page, lines.next().unwrap().trim());
@@ -170,7 +173,10 @@ impl Atlas {
                         let name = lines.next().unwrap().trim().to_string();
                         let mut region = AtlasRegion::new(name, page_index);
                         while let Some(next) = lines.peek() {
-                            if !is_indented(next) || next.trim().is_empty() {
+                            let t = next.trim();
+                            // A property line is indented (legacy) or `key:value`
+                            // (4.x); a bare name line ends this region.
+                            if t.is_empty() || (!is_indented(next) && !t.contains(':')) {
                                 break;
                             }
                             apply_region_prop(&mut region, lines.next().unwrap().trim());
