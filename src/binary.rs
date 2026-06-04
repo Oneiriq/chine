@@ -17,7 +17,8 @@ use glam::Vec2;
 
 use crate::anim::{
     compute_draw_order, Animation, AttachmentTimeline, BoneAxis, BoneTimeline, ConstraintTimeline,
-    DeformTimeline, DrawOrderTimeline, EventTimeline, Timeline,
+    DeformTimeline, DrawOrderTimeline, EventTimeline, PhysicsProperty, PhysicsResetTimeline,
+    Timeline,
 };
 use crate::attach::{
     Attachment, BoundingBoxAttachment, ClippingAttachment, LinkedMeshAttachment, MeshAttachment,
@@ -808,11 +809,85 @@ fn read_animation(
     // Remaining timeline groups (IK, transform, path, physics, slider,
     // attachment/deform, draw order, draw-order folders, events): skip while
     // empty, stop at the first non-empty (not yet handled).
-    // Constraint timelines for IK / transform / path / physics: not yet parsed
-    // from binary. Stop if any appear.
-    for _ in 0..4 {
-        if r.var_usize() != 0 {
-            return Animation::new(name, duration, timelines);
+    // IK constraint timelines (one per animated IK constraint).
+    let ik_groups = r.var_usize();
+    for _ in 0..ik_groups {
+        let index = r.var_usize();
+        let frames = r.var_usize();
+        let (tl, d) = read_ik_constraint_timeline(r, index, frames);
+        duration = duration.max(d);
+        timelines.push(Timeline::Ik(tl));
+    }
+
+    // Transform constraint timelines (six mix channels).
+    let transform_groups = r.var_usize();
+    for _ in 0..transform_groups {
+        let index = r.var_usize();
+        let frames = r.var_usize();
+        let (tl, d) = read_curve_timeline_n(r, index, frames, 6);
+        duration = duration.max(d);
+        timelines.push(Timeline::TransformMix(tl));
+    }
+
+    // Path constraint timelines: position, spacing, or mix per inner entry.
+    let path_groups = r.var_usize();
+    for _ in 0..path_groups {
+        let index = r.var_usize();
+        let count = r.var_usize();
+        for _ in 0..count {
+            let kind = r.byte();
+            let frames = r.var_usize();
+            let entry = match kind {
+                0 => {
+                    let (tl, d) = read_curve_timeline_n(r, index, frames, 1);
+                    Some((Timeline::PathPosition(tl), d))
+                }
+                1 => {
+                    let (tl, d) = read_curve_timeline_n(r, index, frames, 1);
+                    Some((Timeline::PathSpacing(tl), d))
+                }
+                2 => {
+                    let (tl, d) = read_curve_timeline_n(r, index, frames, 3);
+                    Some((Timeline::PathMix(tl), d))
+                }
+                _ => return Animation::new(name, duration, timelines),
+            };
+            if let Some((timeline, d)) = entry {
+                duration = duration.max(d);
+                timelines.push(timeline);
+            }
+        }
+    }
+
+    // Physics constraint timelines: one tunable (or a reset) per inner entry.
+    // The stored index is one less than the stream's (a 0 marks a global
+    // timeline, wrapping to the global sentinel).
+    let physics_groups = r.var_usize();
+    for _ in 0..physics_groups {
+        let index = r.var_usize().wrapping_sub(1);
+        let count = r.var_usize();
+        for _ in 0..count {
+            let kind = r.byte();
+            let frames = r.var_usize();
+            if kind == 8 {
+                let times: Vec<f32> = (0..frames).map(|_| r.float()).collect();
+                duration = duration.max(times.last().copied().unwrap_or(0.0));
+                timelines.push(Timeline::PhysicsReset(PhysicsResetTimeline::new(index, times)));
+                continue;
+            }
+            let property = match kind {
+                0 => PhysicsProperty::Inertia,
+                1 => PhysicsProperty::Strength,
+                2 => PhysicsProperty::Damping,
+                4 => PhysicsProperty::Mass,
+                5 => PhysicsProperty::Wind,
+                6 => PhysicsProperty::Gravity,
+                7 => PhysicsProperty::Mix,
+                _ => return Animation::new(name, duration, timelines),
+            };
+            let (tl, d) = read_curve_timeline_n(r, index, frames, 1);
+            duration = duration.max(d);
+            timelines.push(Timeline::Physics(tl, property));
         }
     }
 
@@ -1201,6 +1276,116 @@ fn read_deform_timeline(
         }
     }
     (tl, duration)
+}
+
+/// Read a curve timeline whose `channels` values are plain floats (transform,
+/// path, and physics constraint timelines), with a stepped / linear / Bezier
+/// curve per channel between frames.
+fn read_curve_timeline_n(
+    r: &mut BinaryReader,
+    constraint: usize,
+    frames: usize,
+    channels: usize,
+) -> (ConstraintTimeline, f32) {
+    let bezier_count = r.var_usize();
+    let mut tl = ConstraintTimeline::new(constraint, frames, bezier_count, channels + 1);
+    let mut bezier = 0;
+    let mut duration = 0.0_f32;
+    let mut time = r.float();
+    let mut vals: Vec<f32> = (0..channels).map(|_| r.float()).collect();
+    let last = frames.saturating_sub(1);
+    for frame in 0..frames {
+        tl.set_frame(frame, time, &vals);
+        duration = duration.max(time);
+        if frame == last {
+            break;
+        }
+        let time2 = r.float();
+        let vals2: Vec<f32> = (0..channels).map(|_| r.float()).collect();
+        match r.byte() {
+            1 => tl.set_stepped(frame),
+            2 => {
+                for ch in 0..channels {
+                    let cx1 = r.float();
+                    let cy1 = r.float();
+                    let cx2 = r.float();
+                    let cy2 = r.float();
+                    tl.set_bezier(
+                        bezier, frame, ch, time, vals[ch], cx1, cy1, cx2, cy2, time2, vals2[ch],
+                    );
+                    bezier += 1;
+                }
+            }
+            _ => {}
+        }
+        time = time2;
+        vals = vals2;
+    }
+    (tl, duration)
+}
+
+/// Read an IK constraint timeline (Spine 4.3 flags-packed). Each frame packs mix
+/// presence, softness presence, bend direction, compress, and stretch into one
+/// flags byte (also carrying the following segment's curve type); mix and
+/// softness are the two curved channels.
+fn read_ik_constraint_timeline(
+    r: &mut BinaryReader,
+    constraint: usize,
+    frames: usize,
+) -> (ConstraintTimeline, f32) {
+    let bezier_count = r.var_usize();
+    let mut tl = ConstraintTimeline::new(constraint, frames, bezier_count, 6);
+    let mut bezier = 0;
+    let mut duration = 0.0_f32;
+    let last = frames.saturating_sub(1);
+    let mut flags = r.byte();
+    let mut time = r.float();
+    let mut mix = ik_flag_value(r, flags, 1, 2);
+    let mut softness = if flags & 4 != 0 { r.float() } else { 0.0 };
+    for frame in 0..frames {
+        let bend = if flags & 8 != 0 { 1.0 } else { -1.0 };
+        let compress = f32::from(flags & 16 != 0);
+        let stretch = f32::from(flags & 32 != 0);
+        tl.set_frame(frame, time, &[mix, softness, bend, compress, stretch]);
+        duration = duration.max(time);
+        if frame == last {
+            break;
+        }
+        flags = r.byte();
+        let time2 = r.float();
+        let mix2 = ik_flag_value(r, flags, 1, 2);
+        let softness2 = if flags & 4 != 0 { r.float() } else { 0.0 };
+        if flags & 64 != 0 {
+            tl.set_stepped(frame);
+        } else if flags & 128 != 0 {
+            let (cx1, cy1, cx2, cy2) = (r.float(), r.float(), r.float(), r.float());
+            tl.set_bezier(bezier, frame, 0, time, mix, cx1, cy1, cx2, cy2, time2, mix2);
+            bezier += 1;
+            let (dx1, dy1, dx2, dy2) = (r.float(), r.float(), r.float(), r.float());
+            tl.set_bezier(
+                bezier, frame, 1, time, softness, dx1, dy1, dx2, dy2, time2, softness2,
+            );
+            bezier += 1;
+        }
+        time = time2;
+        mix = mix2;
+        softness = softness2;
+    }
+    (tl, duration)
+}
+
+/// Decode an IK timeline mix from its flags: absent (`0`), a default of `1`, or
+/// an explicit float.
+fn ik_flag_value(r: &mut BinaryReader, flags: u8, present: u8, explicit: u8) -> f32 {
+    if flags & present != 0 {
+        if flags & explicit != 0 {
+            r.float()
+        } else {
+            1.0
+        }
+    } else {
+        0.0
+    }
 }
 
 /// Read a slot attachment-swap timeline: per frame a time and the attachment
@@ -1699,5 +1884,93 @@ mod tests {
         let c = sk.slot(0).unwrap().color;
         assert!((c.a - 0.5).abs() < 0.05, "alpha={}", c.a);
         assert!((c.r - 1.0).abs() < 1e-3, "r={}", c.r);
+    }
+
+    #[test]
+    fn reads_an_ik_constraint_timeline() {
+        use crate::constraint::ik::IkConstraintData;
+        use crate::constraint::ScaleYMode;
+
+        // Mix 0 at time 0, mix 1 at time 1 (flags-packed, linear).
+        let mut b = Vec::new();
+        b.push(0); // bezier-segment count
+        b.push(0); // flags: mix absent (0)
+        b.extend_from_slice(&0.0_f32.to_be_bytes()); // time 0
+        b.push(1); // flags: mix present, default 1, linear
+        b.extend_from_slice(&1.0_f32.to_be_bytes()); // time 1
+        let mut r = BinaryReader::new(&b);
+        let (tl, dur) = read_ik_constraint_timeline(&mut r, 0, 2);
+        assert!((dur - 1.0).abs() < 1e-6);
+        assert!(!r.overran());
+
+        // A one-bone IK aiming at a target above it; the timeline drives its mix.
+        let data = SkeletonData {
+            bones: vec![
+                BoneData {
+                    index: 0,
+                    name: "root".into(),
+                    ..Default::default()
+                },
+                BoneData {
+                    index: 1,
+                    name: "aim".into(),
+                    parent: Some(0),
+                    length: 10.0,
+                    ..Default::default()
+                },
+                BoneData {
+                    index: 2,
+                    name: "target".into(),
+                    parent: Some(0),
+                    position: Vec2::new(0.0, 10.0),
+                    ..Default::default()
+                },
+            ],
+            ik_constraints: vec![IkConstraintData {
+                name: "aim-ik".into(),
+                order: 0,
+                bones: vec![1],
+                target: 2,
+                scale_y_mode: ScaleYMode::None,
+                mix: 1.0,
+                softness: 0.0,
+                bend_direction: 1,
+                compress: false,
+                stretch: false,
+            }],
+            ..Default::default()
+        };
+        let anim = Animation::new("ik", dur, vec![Timeline::Ik(tl)]);
+        let mut sk = crate::skel::Skeleton::new(std::sync::Arc::new(data));
+        let mut state = crate::anim::AnimationState::new();
+        state.set_animation(std::sync::Arc::new(anim), false);
+        // At time 0 the keyed mix is 0, so the aim keeps its setup +x heading
+        // rather than rotating up toward the target (which mix 1 would do).
+        state.update(0.0);
+        state.apply(&mut sk);
+        sk.update_world_transform();
+        let aim = sk.bone(1).unwrap();
+        assert!((aim.a() - 1.0).abs() < 0.1, "a={}", aim.a());
+        assert!(aim.c().abs() < 0.1, "c={}", aim.c());
+    }
+
+    #[test]
+    fn reads_a_transform_mix_timeline() {
+        // Two frames, six float mix channels, linear.
+        let mut b = Vec::new();
+        b.push(0); // bezier-segment count
+        b.extend_from_slice(&0.0_f32.to_be_bytes());
+        for _ in 0..6 {
+            b.extend_from_slice(&1.0_f32.to_be_bytes());
+        }
+        b.extend_from_slice(&1.0_f32.to_be_bytes());
+        for _ in 0..6 {
+            b.extend_from_slice(&0.5_f32.to_be_bytes());
+        }
+        b.push(0); // linear curve
+        let mut r = BinaryReader::new(&b);
+        let (_tl, dur) = read_curve_timeline_n(&mut r, 0, 2, 6);
+        assert!((dur - 1.0).abs() < 1e-6);
+        assert!(!r.overran());
     }
 }
