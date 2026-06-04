@@ -184,6 +184,9 @@ pub struct Slot {
     /// Deformed local vertex positions for the current mesh attachment, set by a
     /// deform timeline (empty = use the attachment's setup vertices).
     pub deform: Vec<f32>,
+    /// Current sequence frame index (`-1` uses the attachment's setup index),
+    /// set by a sequence timeline.
+    pub sequence_index: i32,
 }
 
 impl Slot {
@@ -193,6 +196,7 @@ impl Slot {
             dark_color: data.dark_color,
             attachment: data.attachment.clone(),
             deform: Vec::new(),
+            sequence_index: -1,
         }
     }
 
@@ -202,6 +206,7 @@ impl Slot {
         self.dark_color = data.dark_color;
         self.attachment = data.attachment.clone();
         self.deform.clear();
+        self.sequence_index = -1;
     }
 }
 

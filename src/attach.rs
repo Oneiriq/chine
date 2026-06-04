@@ -45,6 +45,69 @@ pub enum Attachment {
     Clipping(ClippingAttachment),
 }
 
+/// An animated (flipbook) attachment: a run of atlas regions shown over time.
+/// Each region's UVs and atlas page are resolved at bind time and selected per
+/// frame by the slot's sequence index.
+#[derive(Debug, Clone)]
+pub struct Sequence {
+    /// Number of regions in the sequence.
+    pub count: usize,
+    /// Starting number for the region path suffix.
+    pub start: usize,
+    /// Minimum digits in the suffix (zero-padded).
+    pub digits: usize,
+    /// Region index shown in the setup pose.
+    pub setup_index: usize,
+    frames: Vec<SequenceFrame>,
+}
+
+/// One resolved sequence frame: its bound UVs (8 for a region, `2 * vertices`
+/// for a mesh) and atlas page.
+#[derive(Debug, Clone)]
+struct SequenceFrame {
+    uvs: Vec<f32>,
+    page: usize,
+}
+
+impl Sequence {
+    /// A sequence with the given counts and setup frame; its per-frame UVs are
+    /// filled in at bind time via [`Self::push_frame`].
+    #[must_use]
+    pub fn new(count: usize, start: usize, digits: usize, setup_index: usize) -> Self {
+        Self {
+            count,
+            start,
+            digits,
+            setup_index,
+            frames: Vec::new(),
+        }
+    }
+
+    /// The atlas region name for frame `index`: the base path plus the
+    /// zero-padded `start + index`.
+    #[must_use]
+    pub fn region_name(&self, base: &str, index: usize) -> String {
+        let frame = (self.start + index).to_string();
+        let pad = self.digits.saturating_sub(frame.len());
+        format!("{base}{}{frame}", "0".repeat(pad))
+    }
+
+    /// Record a frame's bound UVs and atlas page (called at bind time).
+    pub(crate) fn push_frame(&mut self, uvs: Vec<f32>, page: usize) {
+        self.frames.push(SequenceFrame { uvs, page });
+    }
+
+    /// The bound UVs and page for frame `index` (clamped to the resolved range).
+    #[must_use]
+    pub(crate) fn frame(&self, index: usize) -> Option<(&[f32], usize)> {
+        if self.frames.is_empty() {
+            return None;
+        }
+        let i = index.min(self.frames.len() - 1);
+        self.frames.get(i).map(|f| (f.uvs.as_slice(), f.page))
+    }
+}
+
 /// A textured quad attached to a slot's bone.
 #[derive(Debug, Clone)]
 pub struct RegionAttachment {
@@ -75,6 +138,8 @@ pub struct RegionAttachment {
     pub uvs: [f32; 8],
     /// Atlas page index (texture), set when the atlas is bound.
     pub page: usize,
+    /// The animated sequence this attachment cycles through, if any.
+    pub sequence: Option<Sequence>,
 }
 
 impl RegionAttachment {
@@ -95,6 +160,7 @@ impl RegionAttachment {
             offset: [0.0; 8],
             uvs: [0.0; 8],
             page: 0,
+            sequence: None,
         }
     }
 
@@ -211,6 +277,8 @@ pub struct MeshAttachment {
     /// Skin whose deform timelines drive this mesh (`None` = default skin). For
     /// an inheriting linked mesh this points at the parent's skin.
     pub deform_skin: Option<String>,
+    /// The animated sequence this attachment cycles through, if any.
+    pub sequence: Option<Sequence>,
 }
 
 impl MeshAttachment {
@@ -233,6 +301,7 @@ impl MeshAttachment {
             vertices,
             page: 0,
             deform_skin: None,
+            sequence: None,
         }
     }
 

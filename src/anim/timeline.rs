@@ -226,6 +226,40 @@ impl EventTimeline {
     }
 }
 
+/// A sequence (flipbook) timeline: per keyframe a time, a packed mode-and-index,
+/// and a delay. The shown region index advances from the active keyframe by the
+/// elapsed time over the delay, wrapped per the sequence mode.
+#[derive(Debug, Clone)]
+pub(crate) struct SequenceTimeline {
+    slot: usize,
+    attachment: String,
+    count: usize,
+    times: Vec<f32>,
+    mode_and_index: Vec<u32>,
+    delays: Vec<f32>,
+}
+
+impl SequenceTimeline {
+    /// A sequence timeline for `slot` / `attachment` over `count` regions.
+    pub(crate) fn new(
+        slot: usize,
+        attachment: String,
+        count: usize,
+        times: Vec<f32>,
+        mode_and_index: Vec<u32>,
+        delays: Vec<f32>,
+    ) -> Self {
+        Self {
+            slot,
+            attachment,
+            count,
+            times,
+            mode_and_index,
+            delays,
+        }
+    }
+}
+
 /// A mesh deform timeline: per-keyframe vertex offsets. For an unweighted mesh
 /// they add to the setup vertices; for a weighted mesh the setup is zero and the
 /// offsets add per-influence in `compute_vertices`. Only applies while the slot
@@ -387,6 +421,8 @@ pub(crate) enum Timeline {
     Event(EventTimeline),
     /// Mesh deform (unweighted local-vertex offsets).
     Deform(DeformTimeline),
+    /// Slot sequence (flipbook) frame index.
+    Sequence(SequenceTimeline),
 }
 
 impl Timeline {
@@ -434,6 +470,7 @@ impl Timeline {
             Timeline::DrawOrder(t) => apply_draw_order(t, skeleton, time),
             Timeline::Event(t) => apply_event(t, skeleton, last_time, time),
             Timeline::Deform(t) => apply_deform(t, skeleton, time, alpha, from),
+            Timeline::Sequence(t) => apply_sequence(t, skeleton, time),
         }
     }
 }
@@ -1348,6 +1385,51 @@ fn apply_deform(t: &DeformTimeline, skel: &mut Skeleton, time: f32, alpha: f32, 
     slot.deform.resize(n, 0.0);
     for (i, d) in slot.deform.iter_mut().enumerate() {
         *d = t.setup[i] + offset.get(i).copied().unwrap_or(0.0) * alpha;
+    }
+}
+
+/// Sequence timeline: advance the slot's sequence frame index from the active
+/// keyframe by the elapsed time over the delay, wrapped per the sequence mode.
+/// Applies only while the slot shows the timeline's attachment.
+fn apply_sequence(t: &SequenceTimeline, skel: &mut Skeleton, time: f32) {
+    if t.count == 0 || t.times.is_empty() || time < t.times[0] {
+        return;
+    }
+    let Some((slot, _)) = skel.slot_pose_and_setup(t.slot) else {
+        return;
+    };
+    if slot.attachment.as_deref() != Some(t.attachment.as_str()) {
+        return;
+    }
+    let frame = search_step(&t.times, time);
+    let mode_and_index = t.mode_and_index[frame];
+    let count = t.count;
+    let mut index = (mode_and_index >> 4) as usize;
+    let mode = mode_and_index & 0xf;
+    if mode != 0 {
+        let delay = t.delays[frame];
+        index += ((time - t.times[frame]) / delay + 0.000_01) as usize;
+        index = match mode {
+            1 => index.min(count - 1),                        // once
+            2 => index % count,                               // loop
+            3 => sequence_pingpong(index, count),             // pingpong
+            4 => (count - 1).saturating_sub(index),           // once reverse
+            5 => count - 1 - (index % count),                 // loop reverse
+            6 => sequence_pingpong(index + count - 1, count), // pingpong reverse
+            _ => index,
+        };
+    }
+    slot.sequence_index = index as i32;
+}
+
+/// Wrap an index across a ping-pong sequence of `count` regions.
+fn sequence_pingpong(index: usize, count: usize) -> usize {
+    let n = (count * 2).saturating_sub(2);
+    let i = if n == 0 { 0 } else { index % n };
+    if i >= count {
+        n - i
+    } else {
+        i
     }
 }
 

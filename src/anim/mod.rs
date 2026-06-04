@@ -18,7 +18,7 @@ pub use state::{AnimationState, TrackEntry};
 pub(crate) use timeline::{
     compute_draw_order, AttachmentTimeline, BoneAxis, BoneTimeline, ConstraintTimeline,
     DeformTimeline, DrawOrderTimeline, EventTimeline, PhysicsProperty, PhysicsResetTimeline,
-    Timeline, GLOBAL_PHYSICS,
+    SequenceTimeline, Timeline, GLOBAL_PHYSICS,
 };
 
 use crate::skel::Skeleton;

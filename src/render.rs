@@ -10,7 +10,7 @@
 use glam::Vec2;
 
 use crate::atlas::Atlas;
-use crate::attach::Attachment;
+use crate::attach::{Attachment, MeshAttachment, RegionAttachment, Sequence};
 use crate::data::{BlendMode, Color, SkeletonData};
 use crate::skel::Skeleton;
 use crate::skin::Skin;
@@ -48,7 +48,9 @@ fn bind_skin(skin: &mut Skin, atlas: &Atlas) {
     for att in skin.attachments_mut() {
         match att {
             Attachment::Region(r) => {
-                if let Some(region) = atlas.find_region(&r.path) {
+                if r.sequence.is_some() {
+                    bind_region_sequence(r, atlas);
+                } else if let Some(region) = atlas.find_region(&r.path) {
                     let page = &atlas.pages[region.page];
                     let (pw, ph) = (page.width, page.height);
                     r.page = region.page;
@@ -56,7 +58,9 @@ fn bind_skin(skin: &mut Skin, atlas: &Atlas) {
                 }
             }
             Attachment::Mesh(m) => {
-                if let Some(region) = atlas.find_region(&m.path) {
+                if m.sequence.is_some() {
+                    bind_mesh_sequence(m, atlas);
+                } else if let Some(region) = atlas.find_region(&m.path) {
                     let page = &atlas.pages[region.page];
                     let (pw, ph) = (page.width, page.height);
                     m.page = region.page;
@@ -70,6 +74,68 @@ fn bind_skin(skin: &mut Skin, atlas: &Atlas) {
             | Attachment::Clipping(_) => {}
         }
     }
+}
+
+/// Resolve a region attachment's sequence: bind each frame's UVs and page, then
+/// bake the static corner offsets / UVs / page to the setup frame.
+fn bind_region_sequence(r: &mut RegionAttachment, atlas: &Atlas) {
+    let Some(mut seq) = r.sequence.take() else {
+        return;
+    };
+    for i in 0..seq.count {
+        if let Some(region) = atlas.find_region(&seq.region_name(&r.path, i)) {
+            let page = &atlas.pages[region.page];
+            r.update(region, page.width, page.height);
+            seq.push_frame(r.uvs.to_vec(), region.page);
+        } else {
+            seq.push_frame(r.uvs.to_vec(), r.page);
+        }
+    }
+    if let Some(region) = atlas.find_region(&seq.region_name(&r.path, seq.setup_index)) {
+        let page = &atlas.pages[region.page];
+        r.page = region.page;
+        r.update(region, page.width, page.height);
+    }
+    r.sequence = Some(seq);
+}
+
+/// Resolve a mesh attachment's sequence: remap the original UVs into each
+/// frame's region, then leave the static UVs at the setup frame.
+fn bind_mesh_sequence(m: &mut MeshAttachment, atlas: &Atlas) {
+    let Some(mut seq) = m.sequence.take() else {
+        return;
+    };
+    let original = m.uvs.clone();
+    for i in 0..seq.count {
+        if let Some(region) = atlas.find_region(&seq.region_name(&m.path, i)) {
+            let page = &atlas.pages[region.page];
+            m.uvs.clone_from(&original);
+            m.remap_uvs(region, page.width, page.height);
+            seq.push_frame(m.uvs.clone(), region.page);
+        } else {
+            seq.push_frame(original.clone(), m.page);
+        }
+    }
+    m.uvs.clone_from(&original);
+    if let Some(region) = atlas.find_region(&seq.region_name(&m.path, seq.setup_index)) {
+        let page = &atlas.pages[region.page];
+        m.page = region.page;
+        m.remap_uvs(region, page.width, page.height);
+    }
+    m.sequence = Some(seq);
+}
+
+/// The bound UVs and page of a sequenced attachment at the slot's frame index
+/// (`-1` uses the attachment's setup index); `None` for a non-sequenced
+/// attachment (so the caller falls back to the static UVs).
+fn sequence_frame(seq: Option<&Sequence>, slot_index: i32) -> Option<(&[f32], usize)> {
+    let seq = seq?;
+    let index = if slot_index < 0 {
+        seq.setup_index
+    } else {
+        slot_index as usize
+    };
+    seq.frame(index)
 }
 
 /// Produce the draw-order render command stream for a posed skeleton.
@@ -113,25 +179,31 @@ fn build_command(
     match att {
         Attachment::Region(r) => {
             let bone = skeleton.bone(setup.bone)?;
+            let (uvs, page) = sequence_frame(r.sequence.as_ref(), slot.sequence_index)
+                .map_or_else(|| (r.uvs.to_vec(), r.page), |(u, p)| (u.to_vec(), p));
             Some(RenderCommand {
                 positions: r.compute_world_vertices(bone).to_vec(),
-                uvs: r.uvs.to_vec(),
+                uvs,
                 triangles: vec![0, 1, 2, 2, 3, 0],
                 color: mul(slot.color, r.color),
                 dark_color: slot.dark_color,
-                page: r.page,
+                page,
                 blend: setup.blend,
             })
         }
-        Attachment::Mesh(m) => Some(RenderCommand {
-            positions: m.compute_world_vertices(skeleton, setup.bone, &slot.deform),
-            uvs: m.uvs.clone(),
-            triangles: m.triangles.clone(),
-            color: mul(slot.color, m.color),
-            dark_color: slot.dark_color,
-            page: m.page,
-            blend: setup.blend,
-        }),
+        Attachment::Mesh(m) => {
+            let (uvs, page) = sequence_frame(m.sequence.as_ref(), slot.sequence_index)
+                .map_or_else(|| (m.uvs.clone(), m.page), |(u, p)| (u.to_vec(), p));
+            Some(RenderCommand {
+                positions: m.compute_world_vertices(skeleton, setup.bone, &slot.deform),
+                uvs,
+                triangles: m.triangles.clone(),
+                color: mul(slot.color, m.color),
+                dark_color: slot.dark_color,
+                page,
+                blend: setup.blend,
+            })
+        }
         Attachment::Clipping(c) => {
             let pieces = clip_pieces(c.compute_world_vertices(skeleton, setup.bone));
             if !pieces.is_empty() {

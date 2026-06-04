@@ -18,11 +18,11 @@ use glam::Vec2;
 use crate::anim::{
     compute_draw_order, Animation, AttachmentTimeline, BoneAxis, BoneTimeline, ConstraintTimeline,
     DeformTimeline, DrawOrderTimeline, EventTimeline, PhysicsProperty, PhysicsResetTimeline,
-    Timeline,
+    SequenceTimeline, Timeline,
 };
 use crate::attach::{
     Attachment, BoundingBoxAttachment, ClippingAttachment, LinkedMeshAttachment, MeshAttachment,
-    MeshVertices, PathAttachment, PointAttachment, RegionAttachment,
+    MeshVertices, PathAttachment, PointAttachment, RegionAttachment, Sequence,
 };
 use crate::constraint::ik::IkConstraintData;
 use crate::constraint::path::{PathConstraintData, PositionMode, RotateMode, SpacingMode};
@@ -749,7 +749,7 @@ fn read_attachment(
                 name.clone()
             };
             let color = read_att_color(r, flags & 32 != 0);
-            read_sequence(r, flags & 64 != 0);
+            let sequence = read_sequence(r, flags & 64 != 0);
             let rotation = if flags & 128 != 0 { r.float() } else { 0.0 };
             let mut reg = RegionAttachment::new(name, path);
             reg.x = r.float();
@@ -760,6 +760,7 @@ fn read_attachment(
             reg.height = r.float();
             reg.rotation = rotation;
             reg.color = color;
+            reg.sequence = sequence;
             Some(Attachment::Region(reg))
         }
         1 => {
@@ -776,7 +777,7 @@ fn read_attachment(
                 name.clone()
             };
             let color = read_att_color(r, flags & 32 != 0);
-            read_sequence(r, flags & 64 != 0);
+            let sequence = read_sequence(r, flags & 64 != 0);
             let hull = r.var_usize();
             let (vertices, count) = read_vertices(r, flags & 128 != 0);
             let uvs = read_float_array(r, count * 2);
@@ -797,6 +798,7 @@ fn read_attachment(
             let mut m = MeshAttachment::new(name, path, vertices, uvs, triangles);
             m.hull_length = hull;
             m.color = color;
+            m.sequence = sequence;
             Some(Attachment::Mesh(m))
         }
         3 => {
@@ -806,7 +808,7 @@ fn read_attachment(
                 name.clone()
             };
             let color = read_att_color(r, flags & 32 != 0);
-            read_sequence(r, flags & 64 != 0);
+            let _ = read_sequence(r, flags & 64 != 0);
             let inherit = flags & 128 != 0;
             let _source_index = r.var_usize();
             let _skin_index = r.var_usize();
@@ -873,12 +875,15 @@ fn skip_nonessential_color(r: &mut BinaryReader, nonessential: bool) {
 }
 
 /// Consume an animation `Sequence` (4 varints) when the attachment has one.
-fn read_sequence(r: &mut BinaryReader, present: bool) {
-    if present {
-        for _ in 0..4 {
-            r.var_usize();
-        }
+fn read_sequence(r: &mut BinaryReader, present: bool) -> Option<Sequence> {
+    if !present {
+        return None;
     }
+    let count = r.var_usize();
+    let start = r.var_usize();
+    let digits = r.var_usize();
+    let setup_index = r.var_usize();
+    Some(Sequence::new(count, start, digits, setup_index))
 }
 
 /// Read mesh/polygon vertices: unweighted (`2 * vertexCount` floats) or weighted
@@ -1140,7 +1145,13 @@ fn read_animation(
                         // No matching mesh: consume the bytes to stay aligned.
                         None => skip_deform_timeline(r, frames),
                     },
-                    1 => skip_sequence_timeline(r, frames),
+                    1 => {
+                        let count =
+                            sequence_count(data, skin_index, slot, &att_name).unwrap_or(0);
+                        let (tl, d) = read_sequence_timeline(r, slot, att_name, count, frames);
+                        duration = duration.max(d);
+                        timelines.push(Timeline::Sequence(tl));
+                    }
                     _ => return Animation::new(name, duration, timelines),
                 }
             }
@@ -1362,14 +1373,45 @@ fn skip_deform_timeline(r: &mut BinaryReader, frames: usize) {
     }
 }
 
-/// Consume a sequence (animated attachment) timeline: per frame a time, a
-/// packed mode-and-index int, and a delay. Stepped, so there is no curve data.
-fn skip_sequence_timeline(r: &mut BinaryReader, frames: usize) {
-    for _ in 0..frames {
-        r.float(); // time
-        r.u32(); // packed sequence mode and index
-        r.float(); // delay
+/// The number of regions in a sequenced region/mesh attachment, for a sequence
+/// timeline's index wrapping.
+fn sequence_count(data: &SkeletonData, skin_index: usize, slot: usize, name: &str) -> Option<usize> {
+    let skin = if skin_index == 0 {
+        None
+    } else {
+        data.skins.get(skin_index - 1)
+    };
+    match data.attachment(slot, name, skin) {
+        Some(Attachment::Region(r)) => r.sequence.as_ref().map(|s| s.count),
+        Some(Attachment::Mesh(m)) => m.sequence.as_ref().map(|s| s.count),
+        _ => None,
     }
+}
+
+/// Read a sequence (flipbook) timeline: per frame a time, a packed mode-and-index
+/// int, and a delay. Stepped, so there is no curve data.
+fn read_sequence_timeline(
+    r: &mut BinaryReader,
+    slot: usize,
+    attachment: String,
+    count: usize,
+    frames: usize,
+) -> (SequenceTimeline, f32) {
+    let mut times = Vec::with_capacity(frames);
+    let mut mode_and_index = Vec::with_capacity(frames);
+    let mut delays = Vec::with_capacity(frames);
+    let mut duration = 0.0_f32;
+    for _ in 0..frames {
+        let time = r.float();
+        mode_and_index.push(r.u32());
+        delays.push(r.float());
+        times.push(time);
+        duration = duration.max(time);
+    }
+    (
+        SequenceTimeline::new(slot, attachment, count, times, mode_and_index, delays),
+        duration,
+    )
 }
 
 /// Resolve a deform timeline's mesh: the setup-pose deform length, the setup
@@ -2249,5 +2291,39 @@ mod tests {
         assert_eq!(tc.properties[0].to.len(), 1);
         assert_eq!(tc.properties[0].to[0].property, ToProp::Rotate);
         assert!((tc.properties[0].to[0].scale - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn applies_a_sequence_timeline() {
+        use crate::anim::SequenceTimeline;
+
+        // A slot showing a four-region sequence "seq". One looping keyframe at
+        // time 0 (mode loop = 2, index 0) with a 0.1s delay: at 0.25s the index
+        // advances by floor(0.25 / 0.1) = 2.
+        let data = SkeletonData {
+            bones: vec![BoneData {
+                index: 0,
+                name: "root".into(),
+                ..Default::default()
+            }],
+            slots: vec![SlotData {
+                index: 0,
+                name: "s".into(),
+                bone: 0,
+                color: Color::WHITE,
+                dark_color: None,
+                attachment: Some("seq".into()),
+                blend: BlendMode::Normal,
+            }],
+            ..Default::default()
+        };
+        let tl = SequenceTimeline::new(0, "seq".into(), 4, vec![0.0], vec![2_u32], vec![0.1]);
+        let anim = Animation::new("flip", 1.0, vec![Timeline::Sequence(tl)]);
+        let mut sk = crate::skel::Skeleton::new(std::sync::Arc::new(data));
+        let mut state = crate::anim::AnimationState::new();
+        state.set_animation(std::sync::Arc::new(anim), false);
+        state.update(0.25);
+        state.apply(&mut sk);
+        assert_eq!(sk.slot(0).unwrap().sequence_index, 2);
     }
 }
