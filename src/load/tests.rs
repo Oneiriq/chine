@@ -136,6 +136,46 @@ fn parses_and_plays_a_slot_alpha_timeline() {
 }
 
 #[test]
+fn parses_and_plays_a_sequence_timeline() {
+    let json = r#"{
+        "bones": [ { "name": "root" } ],
+        "slots": [ { "name": "s", "bone": "root", "attachment": "seq" } ],
+        "skins": [
+            { "name": "default", "attachments": {
+                "s": { "seq": { "type": "region", "sequence": { "count": 4, "start": 0, "digits": 1 } } }
+            } }
+        ],
+        "animations": {
+            "play": {
+                "attachments": {
+                    "default": { "s": { "seq": {
+                        "sequence": [ { "time": 0, "mode": "loop", "index": 0, "delay": 0.1 } ]
+                    } } }
+                }
+            }
+        }
+    }"#;
+    let data = from_json(json).unwrap();
+    // The region attachment carries its parsed flipbook sequence.
+    match data.default_skin.attachment(0, "seq").unwrap() {
+        crate::attach::Attachment::Region(r) => {
+            assert_eq!(r.sequence.as_ref().unwrap().count, 4);
+        }
+        _ => panic!("expected a region attachment"),
+    }
+
+    let anim = data.find_animation("play").unwrap().clone();
+    let mut sk = crate::skel::Skeleton::new(std::sync::Arc::new(data));
+    let mut state = crate::anim::AnimationState::new();
+    state.set_animation(anim, false);
+    state.update(0.25);
+    sk.set_slots_to_setup_pose();
+    state.apply(&mut sk);
+    // loop mode advances the frame by floor(0.25 / 0.1) = 2.
+    assert_eq!(sk.slot(0).unwrap().sequence_index, 2);
+}
+
+#[test]
 fn parses_ik_constraint() {
     let json = r#"{
         "bones": [

@@ -363,11 +363,11 @@ pub(super) fn parse_animation(name: &str, anim: &Value, data: &SkeletonData) -> 
     // one-value curve keyed by slider name.
     if let Some(sliders) = anim.get("slider").and_then(Value::as_object) {
         for (slider_name, channels) in sliders {
-            let idx = data
-                .sliders
-                .iter()
-                .position(|s| s.name == *slider_name)
-                .ok_or_else(|| LoadError::BadReference(slider_name.clone()))?;
+            // JSON slider constraint setup is not parsed yet (binary only), so a
+            // slider animation with no matching constraint is skipped, not an error.
+            let Some(idx) = data.sliders.iter().position(|s| s.name == *slider_name) else {
+                continue;
+            };
             let Some(channels) = channels.as_object() else {
                 continue;
             };

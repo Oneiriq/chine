@@ -18,7 +18,7 @@ use serde_json::Value;
 
 use crate::attach::{
     Attachment, BoundingBoxAttachment, ClippingAttachment, LinkedMeshAttachment, MeshAttachment,
-    MeshVertices, PathAttachment, PointAttachment, RegionAttachment,
+    MeshVertices, PathAttachment, PointAttachment, RegionAttachment, Sequence,
 };
 use crate::constraint::ik::IkConstraintData;
 use crate::constraint::path::{PathConstraintData, PositionMode, RotateMode, SpacingMode};
@@ -216,6 +216,20 @@ pub fn from_json(text: &str) -> Result<SkeletonData, LoadError> {
     Ok(data)
 }
 
+/// Parse the optional `sequence` (flipbook) object on a region or mesh
+/// attachment: `count` regions starting at `start`, zero-padded to `digits`,
+/// showing `setup` at rest.
+fn parse_sequence(v: &Value) -> Option<Sequence> {
+    let s = v.get("sequence")?.as_object()?;
+    let u = |key: &str, default: u64| s.get(key).and_then(Value::as_u64).unwrap_or(default) as usize;
+    Some(Sequence::new(
+        u("count", 0),
+        u("start", 1),
+        u("digits", 0),
+        u("setup", 0),
+    ))
+}
+
 fn parse_attachment(name: &str, v: &Value) -> Option<Attachment> {
     let path = v
         .get("path")
@@ -233,6 +247,7 @@ fn parse_attachment(name: &str, v: &Value) -> Option<Attachment> {
             r.width = f(v, "width");
             r.height = f(v, "height");
             r.color = parse_color(v.get("color").and_then(Value::as_str), Color::WHITE);
+            r.sequence = parse_sequence(v);
             Some(Attachment::Region(r))
         }
         "mesh" => {
@@ -247,6 +262,7 @@ fn parse_attachment(name: &str, v: &Value) -> Option<Attachment> {
             let mut m = MeshAttachment::new(name, path, vertices, uvs, triangles);
             m.color = parse_color(v.get("color").and_then(Value::as_str), Color::WHITE);
             m.hull_length = v.get("hull").and_then(Value::as_u64).unwrap_or(0) as usize;
+            m.sequence = parse_sequence(v);
             Some(Attachment::Mesh(m))
         }
         "path" => {
