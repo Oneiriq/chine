@@ -182,7 +182,7 @@ pub struct SkeletonData {
     pub path_constraints: Vec<PathConstraintData>,
     /// Physics constraints, applied after FK by [`crate::skel::Skeleton`].
     pub physics_constraints: Vec<PhysicsConstraintData>,
-    /// Slider constraints (Spine 4.3); loaded but not yet applied at runtime.
+    /// Slider constraints (Spine 4.3), applied by [`crate::skel::Skeleton`].
     pub sliders: Vec<SliderData>,
     /// Named events that animations can fire.
     pub events: Vec<EventData>,

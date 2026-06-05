@@ -26,7 +26,7 @@ pub(super) fn read_animation(
     let mut duration = 0.0_f32;
 
     // Slot timelines: per animated slot, one or more typed timelines (color,
-    // two-color, attachment; alpha is consumed but not yet applied).
+    // two-color, attachment, alpha).
     let slot_groups = r.count();
     for _ in 0..slot_groups {
         let slot = r.var_usize();
