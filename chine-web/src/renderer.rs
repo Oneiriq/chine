@@ -230,10 +230,10 @@ impl GlRenderer {
     }
 }
 
-/// Set the blend function for a chine blend mode, accounting for premultiplied
-/// alpha (Spine's blend table).
-fn set_blend(gl: &Gl, blend: BlendMode, pma: bool) {
-    let (src, dst) = match blend {
+/// The (source, destination) blend factors for a chine blend mode, accounting
+/// for premultiplied alpha (Spine's blend table).
+fn blend_factors(blend: BlendMode, pma: bool) -> (u32, u32) {
+    match blend {
         BlendMode::Normal => {
             if pma {
                 (Gl::ONE, Gl::ONE_MINUS_SRC_ALPHA)
@@ -250,7 +250,12 @@ fn set_blend(gl: &Gl, blend: BlendMode, pma: bool) {
         }
         BlendMode::Multiply => (Gl::DST_COLOR, Gl::ONE_MINUS_SRC_ALPHA),
         BlendMode::Screen => (Gl::ONE, Gl::ONE_MINUS_SRC_COLOR),
-    };
+    }
+}
+
+/// Apply the blend factors for a chine blend mode.
+fn set_blend(gl: &Gl, blend: BlendMode, pma: bool) {
+    let (src, dst) = blend_factors(blend, pma);
     gl.blend_func(src, dst);
 }
 
@@ -288,5 +293,39 @@ fn compile_shader(gl: &Gl, kind: u32, source: &str) -> Result<web_sys::WebGlShad
         Err(gl
             .get_shader_info_log(&shader)
             .unwrap_or_else(|| "shader compile failed".to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{blend_factors, Gl};
+    use chine::data::BlendMode;
+
+    #[test]
+    fn blend_factors_follow_spines_table() {
+        // Premultiplied normal/additive use ONE for the source factor; straight
+        // alpha uses SRC_ALPHA.
+        assert_eq!(
+            blend_factors(BlendMode::Normal, true),
+            (Gl::ONE, Gl::ONE_MINUS_SRC_ALPHA)
+        );
+        assert_eq!(
+            blend_factors(BlendMode::Normal, false),
+            (Gl::SRC_ALPHA, Gl::ONE_MINUS_SRC_ALPHA)
+        );
+        assert_eq!(blend_factors(BlendMode::Additive, true), (Gl::ONE, Gl::ONE));
+        assert_eq!(
+            blend_factors(BlendMode::Additive, false),
+            (Gl::SRC_ALPHA, Gl::ONE)
+        );
+        // Multiply and screen do not depend on premultiplied alpha.
+        assert_eq!(
+            blend_factors(BlendMode::Multiply, true),
+            (Gl::DST_COLOR, Gl::ONE_MINUS_SRC_ALPHA)
+        );
+        assert_eq!(
+            blend_factors(BlendMode::Screen, false),
+            (Gl::ONE, Gl::ONE_MINUS_SRC_COLOR)
+        );
     }
 }

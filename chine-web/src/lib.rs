@@ -130,7 +130,7 @@ impl WebSpine {
         self.skeleton.update_world_transform();
         render_into(&self.skeleton, &mut self.commands);
 
-        let view = self.fit_view(width, height);
+        let view = fit_view(self.fit, width, height);
         self.renderer.begin_frame(width, height);
         self.renderer.draw(&view, &self.commands);
     }
@@ -170,34 +170,36 @@ impl WebSpine {
         })
     }
 
-    /// A column-major 4x4 orthographic view that centers the setup fit in the
-    /// canvas, preserving aspect, with a little padding. Spine world space and
-    /// WebGL clip space are both y-up, so no flip is needed.
-    fn fit_view(&self, width: i32, height: i32) -> [f32; 16] {
-        let (cx, cy, hx, hy) = self.fit;
-        let aspect = (width.max(1) as f32) / (height.max(1) as f32);
-        let pad = 1.1;
-        let vw = (hx * pad).max(hy * pad * aspect).max(1.0);
-        let vh = vw / aspect;
-        [
-            1.0 / vw,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            1.0 / vh,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            1.0,
-            0.0,
-            -cx / vw,
-            -cy / vh,
-            0.0,
-            1.0,
-        ]
-    }
+}
+
+/// A column-major 4x4 orthographic view that centers `fit` (the setup-pose
+/// center and half-extents) in the canvas, preserving aspect, with a little
+/// padding. Spine world space and WebGL clip space are both y-up, so no flip is
+/// needed.
+fn fit_view(fit: (f32, f32, f32, f32), width: i32, height: i32) -> [f32; 16] {
+    let (cx, cy, hx, hy) = fit;
+    let aspect = (width.max(1) as f32) / (height.max(1) as f32);
+    let pad = 1.1;
+    let vw = (hx * pad).max(hy * pad * aspect).max(1.0);
+    let vh = vw / aspect;
+    [
+        1.0 / vw,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0 / vh,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        -cx / vw,
+        -cy / vh,
+        0.0,
+        1.0,
+    ]
 }
 
 /// Axis-aligned center and half-extents of the setup-pose geometry, used to
@@ -221,4 +223,50 @@ fn setup_fit(commands: &[RenderCommand]) -> (f32, f32, f32, f32) {
     let hx = ((max.0 - min.0) * 0.5).max(1.0);
     let hy = ((max.1 - min.1) * 0.5).max(1.0);
     (cx, cy, hx, hy)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{fit_view, setup_fit};
+    use chine::data::{BlendMode, Color};
+    use chine::render::RenderCommand;
+    use glam::Vec2;
+
+    fn quad(min: Vec2, max: Vec2) -> RenderCommand {
+        RenderCommand {
+            positions: vec![min, Vec2::new(max.x, min.y), max, Vec2::new(min.x, max.y)],
+            uvs: vec![0.0; 8],
+            triangles: vec![0, 1, 2, 2, 3, 0],
+            color: Color::WHITE,
+            dark_color: None,
+            page: 0,
+            blend: BlendMode::Normal,
+        }
+    }
+
+    #[test]
+    fn setup_fit_measures_the_aabb() {
+        let cmds = [quad(Vec2::new(-10.0, -4.0), Vec2::new(10.0, 4.0))];
+        let (cx, cy, hx, hy) = setup_fit(&cmds);
+        assert!(cx.abs() < 1e-6 && cy.abs() < 1e-6, "centered");
+        assert!((hx - 10.0).abs() < 1e-6 && (hy - 4.0).abs() < 1e-6, "half-extents");
+    }
+
+    #[test]
+    fn setup_fit_empty_falls_back_to_a_unit_box() {
+        assert_eq!(setup_fit(&[]), (0.0, 0.0, 1.0, 1.0));
+    }
+
+    #[test]
+    fn fit_view_centers_and_preserves_aspect() {
+        // A 20x20 rig (half 10) in a square canvas: with pad 1.1 the view half
+        // width is 11, so the rig edge at x = 11 maps to clip x = 1.
+        let m = fit_view((0.0, 0.0, 10.0, 10.0), 100, 100);
+        assert!((m[0] - 1.0 / 11.0).abs() < 1e-6, "x scale");
+        assert!((m[5] - 1.0 / 11.0).abs() < 1e-6, "y scale");
+        assert!(m[12].abs() < 1e-6 && m[13].abs() < 1e-6, "centered at origin");
+        // A wider canvas widens the view, shrinking the x scale.
+        let wide = fit_view((0.0, 0.0, 10.0, 10.0), 200, 100);
+        assert!(wide[0] < m[0], "wider canvas gives a smaller x scale");
+    }
 }

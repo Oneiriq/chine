@@ -28,6 +28,7 @@ name = "chine-web"
 version = "0.1.0"
 dependencies = [
  "chine",
+ "glam",
  "js-sys",
  "wasm-bindgen",
  "web-sys",
