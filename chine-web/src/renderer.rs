@@ -15,30 +15,38 @@ use web_sys::{
 const VERTEX_SRC: &str = r"#version 300 es
 layout(location=0) in vec2 a_pos;
 layout(location=1) in vec2 a_uv;
-layout(location=2) in vec4 a_color;
+layout(location=2) in vec4 a_light;
+layout(location=3) in vec4 a_dark;
 uniform mat4 u_view;
 out vec2 v_uv;
-out vec4 v_color;
+out vec4 v_light;
+out vec4 v_dark;
 void main() {
     v_uv = a_uv;
-    v_color = a_color;
+    v_light = a_light;
+    v_dark = a_dark;
     gl_Position = u_view * vec4(a_pos, 0.0, 1.0);
 }
 ";
 
+// Spine's two-color (tint-black) formula. With a zero dark color it reduces to
+// the plain light tint `texture * v_light`, so single-color rigs are unchanged.
 const FRAGMENT_SRC: &str = r"#version 300 es
 precision mediump float;
 in vec2 v_uv;
-in vec4 v_color;
+in vec4 v_light;
+in vec4 v_dark;
 uniform sampler2D u_tex;
 out vec4 frag;
 void main() {
-    frag = texture(u_tex, v_uv) * v_color;
+    vec4 tex = texture(u_tex, v_uv);
+    frag.a = tex.a * v_light.a;
+    frag.rgb = ((tex.a - 1.0) * v_dark.a + 1.0 - tex.rgb) * v_dark.rgb + tex.rgb * v_light.rgb;
 }
 ";
 
-/// Eight floats per vertex: position (2), uv (2), color (4).
-const FLOATS_PER_VERTEX: usize = 8;
+/// Twelve floats per vertex: position (2), uv (2), light color (4), dark (4).
+const FLOATS_PER_VERTEX: usize = 12;
 
 /// A WebGL2 backend that draws chine render commands to a canvas.
 pub struct GlRenderer {
@@ -90,13 +98,15 @@ impl GlRenderer {
         gl.bind_buffer(Gl::ARRAY_BUFFER, Some(&vbo));
         gl.bind_buffer(Gl::ELEMENT_ARRAY_BUFFER, Some(&ibo));
         let stride = (FLOATS_PER_VERTEX * 4) as i32;
-        // a_pos (2), a_uv (2), a_color (4).
+        // a_pos (2), a_uv (2), a_light (4), a_dark (4).
         gl.vertex_attrib_pointer_with_i32(0, 2, Gl::FLOAT, false, stride, 0);
         gl.enable_vertex_attrib_array(0);
         gl.vertex_attrib_pointer_with_i32(1, 2, Gl::FLOAT, false, stride, 2 * 4);
         gl.enable_vertex_attrib_array(1);
         gl.vertex_attrib_pointer_with_i32(2, 4, Gl::FLOAT, false, stride, 4 * 4);
         gl.enable_vertex_attrib_array(2);
+        gl.vertex_attrib_pointer_with_i32(3, 4, Gl::FLOAT, false, stride, 8 * 4);
+        gl.enable_vertex_attrib_array(3);
         gl.bind_vertex_array(None);
 
         gl.enable(Gl::BLEND);
@@ -172,11 +182,16 @@ impl GlRenderer {
                 continue;
             };
             let pma = *pma;
+            // The dark tint for two-color (tint-black); zero means single-color.
+            let (dr, dg, db, da) = match cmd.dark_color {
+                Some(d) => (d.r, d.g, d.b, d.a),
+                None => (0.0, 0.0, 0.0, 0.0),
+            };
             self.verts.clear();
             for (i, pos) in cmd.positions.iter().enumerate() {
                 let (u, v) = (cmd.uvs[i * 2], cmd.uvs[i * 2 + 1]);
                 let c = cmd.color;
-                // Premultiply the tint for premultiplied-alpha pages so it
+                // Premultiply the light tint for premultiplied-alpha pages so it
                 // matches the texture and the blend equation.
                 let (r, g, b) = if pma {
                     (c.r * c.a, c.g * c.a, c.b * c.a)
@@ -184,7 +199,7 @@ impl GlRenderer {
                     (c.r, c.g, c.b)
                 };
                 self.verts
-                    .extend_from_slice(&[pos.x, pos.y, u, v, r, g, b, c.a]);
+                    .extend_from_slice(&[pos.x, pos.y, u, v, r, g, b, c.a, dr, dg, db, da]);
             }
             self.indices.clear();
             self.indices.extend_from_slice(&cmd.triangles);
