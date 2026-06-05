@@ -27,7 +27,9 @@ wasm-pack build chine-web --target web --release
 ```
 
 This writes the `pkg/` module (`chine_web.js` + `chine_web_bg.wasm`) that the
-element imports.
+element imports. The default build loads binary `.skel` only; add
+`-- --features json` for JSON exports (it pulls in serde_json and enlarges the
+wasm).
 
 ## Use it by URL
 
@@ -44,8 +46,8 @@ images alongside the page, then:
 ></chine-spine>
 ```
 
-The skeleton type (binary or JSON) is auto-detected. The skeleton is auto-fit
-and centered in the element.
+The skeleton type (binary or JSON) is auto-detected; JSON needs a
+`--features json` build. The skeleton is auto-fit and centered in the element.
 
 ## Drop in for a Spine HTML export
 

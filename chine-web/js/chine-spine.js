@@ -43,9 +43,13 @@ function looksLikeJson(bytes) {
 }
 
 function makeSpine(canvas, skelBytes, atlasText) {
-  return looksLikeJson(skelBytes)
-    ? WebSpine.from_json(canvas, decodeUtf8(skelBytes), atlasText)
-    : WebSpine.from_binary(canvas, skelBytes, atlasText);
+  if (looksLikeJson(skelBytes)) {
+    if (typeof WebSpine.from_json !== "function") {
+      throw new Error("this chine-web build has no JSON support; rebuild with --features json");
+    }
+    return WebSpine.from_json(canvas, decodeUtf8(skelBytes), atlasText);
+  }
+  return WebSpine.from_binary(canvas, skelBytes, atlasText);
 }
 
 function loadImage(src) {

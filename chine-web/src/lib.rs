@@ -66,6 +66,7 @@ impl WebSpine {
     ///
     /// # Errors
     /// Returns a JS error if the JSON is malformed or WebGL2 is unavailable.
+    #[cfg(feature = "json")]
     pub fn from_json(
         canvas: &HtmlCanvasElement,
         json: &str,
