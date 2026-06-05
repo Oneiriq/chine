@@ -60,7 +60,9 @@ pub struct GlRenderer {
     /// flag (so the tint and blend match the texture).
     pages: Vec<(WebGlTexture, bool)>,
     verts: Vec<f32>,
-    indices: Vec<u16>,
+    indices: Vec<u32>,
+    /// One entry per draw call: (page, blend, index start, index count).
+    runs: Vec<(usize, BlendMode, i32, i32)>,
 }
 
 impl GlRenderer {
@@ -121,6 +123,7 @@ impl GlRenderer {
             pages: Vec::new(),
             verts: Vec::new(),
             indices: Vec::new(),
+            runs: Vec::new(),
         })
     }
 
@@ -165,29 +168,25 @@ impl GlRenderer {
     }
 
     /// Draw every command with the given column-major 4x4 `view` matrix.
+    ///
+    /// The whole frame is uploaded as one vertex and index stream, then drawn
+    /// with one call per contiguous run of commands sharing a page and blend
+    /// mode (Spine draws in order, so only adjacent runs can merge).
     pub fn draw(&mut self, view: &[f32], commands: &[RenderCommand]) {
-        let gl = &self.gl;
-        gl.use_program(Some(&self.program));
-        gl.uniform_matrix4fv_with_f32_array(Some(&self.u_view), false, view);
-        gl.uniform1i(gl.get_uniform_location(&self.program, "u_tex").as_ref(), 0);
-        gl.active_texture(Gl::TEXTURE0);
-        gl.bind_vertex_array(Some(&self.vao));
-        // ARRAY_BUFFER is not VAO state, so bind the streaming buffers
-        // explicitly before uploading each command's geometry.
-        gl.bind_buffer(Gl::ARRAY_BUFFER, Some(&self.vbo));
-        gl.bind_buffer(Gl::ELEMENT_ARRAY_BUFFER, Some(&self.ibo));
-
+        self.verts.clear();
+        self.indices.clear();
+        self.runs.clear();
         for cmd in commands {
-            let Some((tex, pma)) = self.pages.get(cmd.page) else {
+            if cmd.page >= self.pages.len() {
                 continue;
-            };
-            let pma = *pma;
+            }
+            let pma = self.pages[cmd.page].1;
             // The dark tint for two-color (tint-black); zero means single-color.
             let (dr, dg, db, da) = match cmd.dark_color {
                 Some(d) => (d.r, d.g, d.b, d.a),
                 None => (0.0, 0.0, 0.0, 0.0),
             };
-            self.verts.clear();
+            let base = (self.verts.len() / FLOATS_PER_VERTEX) as u32;
             for (i, pos) in cmd.positions.iter().enumerate() {
                 let (u, v) = (cmd.uvs[i * 2], cmd.uvs[i * 2 + 1]);
                 let c = cmd.color;
@@ -201,30 +200,45 @@ impl GlRenderer {
                 self.verts
                     .extend_from_slice(&[pos.x, pos.y, u, v, r, g, b, c.a, dr, dg, db, da]);
             }
-            self.indices.clear();
-            self.indices.extend_from_slice(&cmd.triangles);
-
-            gl.bind_texture(Gl::TEXTURE_2D, Some(tex));
-            set_blend(gl, cmd.blend, pma);
-
-            // SAFETY: the typed-array views borrow the scratch buffers and are
-            // dropped before any reallocation; buffer_data copies immediately.
-            unsafe {
-                let vview = js_sys::Float32Array::view(&self.verts);
-                gl.buffer_data_with_array_buffer_view(Gl::ARRAY_BUFFER, &vview, Gl::DYNAMIC_DRAW);
-                let iview = js_sys::Uint16Array::view(&self.indices);
-                gl.buffer_data_with_array_buffer_view(
-                    Gl::ELEMENT_ARRAY_BUFFER,
-                    &iview,
-                    Gl::DYNAMIC_DRAW,
-                );
+            let start = self.indices.len() as i32;
+            for &t in &cmd.triangles {
+                self.indices.push(base + u32::from(t));
             }
-            gl.draw_elements_with_i32(
-                Gl::TRIANGLES,
-                self.indices.len() as i32,
-                Gl::UNSIGNED_SHORT,
-                0,
-            );
+            let count = self.indices.len() as i32 - start;
+            // Merge with the previous run when the page and blend match.
+            match self.runs.last_mut() {
+                Some(run) if run.0 == cmd.page && run.1 == cmd.blend => run.3 += count,
+                _ => self.runs.push((cmd.page, cmd.blend, start, count)),
+            }
+        }
+        if self.runs.is_empty() {
+            return;
+        }
+
+        let gl = &self.gl;
+        gl.use_program(Some(&self.program));
+        gl.uniform_matrix4fv_with_f32_array(Some(&self.u_view), false, view);
+        gl.uniform1i(gl.get_uniform_location(&self.program, "u_tex").as_ref(), 0);
+        gl.active_texture(Gl::TEXTURE0);
+        gl.bind_vertex_array(Some(&self.vao));
+        gl.bind_buffer(Gl::ARRAY_BUFFER, Some(&self.vbo));
+        gl.bind_buffer(Gl::ELEMENT_ARRAY_BUFFER, Some(&self.ibo));
+
+        // Upload the whole frame's geometry once.
+        // SAFETY: the typed-array views borrow the scratch buffers and are
+        // dropped before any reallocation; buffer_data copies immediately.
+        unsafe {
+            let vview = js_sys::Float32Array::view(&self.verts);
+            gl.buffer_data_with_array_buffer_view(Gl::ARRAY_BUFFER, &vview, Gl::DYNAMIC_DRAW);
+            let iview = js_sys::Uint32Array::view(&self.indices);
+            gl.buffer_data_with_array_buffer_view(Gl::ELEMENT_ARRAY_BUFFER, &iview, Gl::DYNAMIC_DRAW);
+        }
+
+        // One draw call per run.
+        for &(page, blend, start, count) in &self.runs {
+            gl.bind_texture(Gl::TEXTURE_2D, Some(&self.pages[page].0));
+            set_blend(gl, blend, self.pages[page].1);
+            gl.draw_elements_with_i32(Gl::TRIANGLES, count, Gl::UNSIGNED_INT, start * 4);
         }
         gl.bind_vertex_array(None);
     }
