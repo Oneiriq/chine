@@ -146,7 +146,12 @@ hardening and ergonomics:
 
 ## License
 
-Licensed under either of Apache License, Version 2.0 or the MIT license, at your
-option. Using Spine skeleton data with `chine` still requires a valid Spine
-Editor license and is subject to the
-[Spine Runtimes License Agreement](https://github.com/EsotericSoftware/spine-runtimes/blob/4.3/LICENSE).
+`chine`'s own source code is licensed under the MIT license; see
+[`LICENSE`](LICENSE).
+
+`chine` is a from-scratch reimplementation of the Spine Runtimes and is not
+affiliated with Esoteric Software. Using it to work with Spine skeleton data is
+subject to the
+[Spine Runtimes License Agreement](https://esotericsoftware.com/spine-editor-license),
+which requires that each user hold a valid Spine Editor license. The full
+agreement is reproduced in [`LICENSE`](LICENSE).

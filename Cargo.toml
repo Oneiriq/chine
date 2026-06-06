@@ -2,7 +2,8 @@
 name = "chine"
 version = "0.1.0"
 edition = "2021"
-license = "MIT OR Apache-2.0"
+authors = ["Shon Thomas <shon@oneiriq.com>"]
+license = "MIT"
 description = "A pure-Rust Spine 4.3 skeletal animation runtime (renderer-agnostic)."
 repository = "https://github.com/Oneiriq/chine"
 keywords = ["spine", "animation", "skeletal", "2d", "gamedev"]
