@@ -144,6 +144,18 @@ hardening and ergonomics:
 - performance passes on the per-frame pose and draw paths;
 - publishing to crates.io once the API has settled.
 
+## Attribution
+
+[Spine](https://esotericsoftware.com/) is a 2D skeletal animation tool and
+runtime created by [Esoteric Software](https://esotericsoftware.com/). `chine`
+is an independent, from-scratch reimplementation of the Spine 4.3 runtime: its
+file formats, posing math, and constraint behavior are based on Esoteric
+Software's official
+[spine-runtimes](https://github.com/EsotericSoftware/spine-runtimes), which were
+referenced throughout development. All credit for the Spine format and runtime
+design belongs to Esoteric Software. Spine is a trademark of Esoteric Software;
+`chine` is an unaffiliated project and is not endorsed by them.
+
 ## License
 
 `chine`'s own source code is licensed under the MIT license; see
