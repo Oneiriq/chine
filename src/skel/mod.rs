@@ -6,7 +6,8 @@
 //! bone's *world* transform root-to-children. The world transform is a 2x2
 //! matrix `(a, b, c, d)` plus a world position `(world_x, world_y)`, the same
 //! representation the official Spine runtimes use. After the forward-kinematics
-//! pass, IK, transform, path, and physics constraints adjust the pose in order.
+//! pass, IK, transform, path, physics, and slider constraints adjust the pose
+//! in order.
 
 use std::sync::Arc;
 

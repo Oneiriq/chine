@@ -2,8 +2,8 @@
 //!
 //! Behind the `json` feature, [`from_json`] parses a Spine `.json` export into
 //! a [`SkeletonData`] rig: bones, slots, skins, region / mesh / path
-//! attachments, animations, and IK / transform / path / physics constraints.
-//! The binary `.skel` loader arrives later; unknown sections are ignored.
+//! attachments, animations, and IK / transform / path / physics / slider
+//! constraints. (The binary `.skel` loader lives in the `binary` module.)
 //!
 //! Region attachments are parsed with their transform but without UVs; those
 //! are filled in once an [`crate::atlas::Atlas`] is bound (the UV/offset layout

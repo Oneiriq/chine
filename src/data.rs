@@ -1,9 +1,9 @@
 //! Setup-pose skeleton data: the immutable rig loaded from a Spine export.
 //!
 //! [`SkeletonData`] is the shared, read-only description of a rig: its bones,
-//! slots, and (in later milestones) skins, attachments, animations, and
-//! constraints. A posable `Skeleton` instance is created from it; many
-//! skeletons can share one `SkeletonData`.
+//! slots, skins, attachments, animations, events, and constraints. A posable
+//! `Skeleton` instance is created from it; many skeletons can share one
+//! `SkeletonData`.
 
 use std::sync::Arc;
 
@@ -148,8 +148,8 @@ pub struct SlotData {
 
 /// An immutable Spine rig: the shared data that a `Skeleton` poses and animates.
 ///
-/// Later milestones extend this with skins, attachments, animations, events,
-/// and constraints; M1 establishes the bone/slot spine of the model.
+/// Holds the bones, slots, skins, attachments, animations, events, and
+/// constraints decoded from a Spine export.
 #[derive(Debug, Clone, Default)]
 pub struct SkeletonData {
     /// Skeleton name from the export, if present.

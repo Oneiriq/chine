@@ -431,9 +431,9 @@ fn compute_vertices(
 }
 
 /// A path attachment: a composite cubic-Bezier curve whose control points are a
-/// vertex set (weighted or not, like a mesh). A `PathConstraint` (a later
-/// milestone) samples positions and tangents along it; this milestone provides
-/// the control-point geometry.
+/// vertex set (weighted or not, like a mesh). A path constraint samples
+/// positions and tangents along it; this type provides the control-point
+/// geometry.
 #[derive(Debug, Clone)]
 pub struct PathAttachment {
     /// Attachment name (the key within a skin).

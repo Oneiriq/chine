@@ -101,9 +101,8 @@ pub(super) fn read_animation(
         }
     }
 
-    // Remaining timeline groups (IK, transform, path, physics, slider,
-    // attachment/deform, draw order, draw-order folders, events): skip while
-    // empty, stop at the first non-empty (not yet handled).
+    // Remaining timeline groups: IK, transform, path, physics, slider,
+    // attachment / deform, draw order, and events.
     // IK constraint timelines (one per animated IK constraint).
     let ik_groups = r.count();
     for _ in 0..ik_groups {

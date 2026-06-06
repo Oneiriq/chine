@@ -6,10 +6,10 @@
 //! read section by section (header, bones, slots, constraints, skins, events,
 //! animations) in a fixed order.
 //!
-//! This loader is built up section by section; the reader primitives
-//! ([`BinaryReader`]) are stable across Spine 4.x, while the section layouts are
-//! transcribed from the Spine 4.3 format. Sections beyond those already read are
-//! left for later and simply end the parse early.
+//! The reader primitives ([`BinaryReader`]) are stable across Spine 4.x, while
+//! the section layouts are transcribed from the Spine 4.3 format. The loader
+//! covers the full format: header, bones, slots, constraints, skins, events,
+//! and animations (with the per-slider physics index trailer).
 
 use std::sync::Arc;
 
