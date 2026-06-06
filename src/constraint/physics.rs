@@ -6,7 +6,7 @@
 //! and offset across frames and integrates over a time delta, and it reads and
 //! writes the bone's world transform directly.
 //!
-//! The integrator is adapted from Spine 4.3 `PhysicsConstraint`, using the
+//! The integrator re-implements Spine 4.3's `PhysicsConstraint`, using the
 //! fixed-timestep formulation with scalar wind and gravity and no inter-frame
 //! lag interpolation (chine drives a fixed delta, so lag smoothing is moot).
 

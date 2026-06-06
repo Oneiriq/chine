@@ -4,7 +4,7 @@
 //! Each timeline interpolates one bone property with stepped / linear / Bezier
 //! curves (see the `curve` module); [`AnimationState`] plays an animation on a
 //! track.
-//! Interpolation and blending are transcribed from Spine 4.3 for fidelity.
+//! Interpolation and blending re-implement Spine 4.3's behavior.
 //!
 //! Covered: every Spine 4.3 timeline (bone rotate / translate / scale / shear
 //! and single-axis variants; IK / transform / path / physics / slider mixes;

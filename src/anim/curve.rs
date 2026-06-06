@@ -1,9 +1,9 @@
 //! Keyframe curves: stepped / linear / Bezier interpolation.
 //!
-//! [`Curve`] mirrors the storage and evaluation of Spine 4.3's `CurveTimeline`
-//! so interpolated values match the reference runtime: keyframe `frames`
-//! interleave a time with one or two values, and a parallel `curves` array holds
-//! either a per-frame interpolation type (`LINEAR` / `STEPPED`) or an index into
+//! [`Curve`] re-implements Spine 4.3's `CurveTimeline` storage and evaluation,
+//! so interpolated values match: keyframe `frames` interleave a time with one or
+//! two values, and a parallel `curves` array holds either a per-frame
+//! interpolation type (`LINEAR` / `STEPPED`) or an index into
 //! forward-difference-sampled Bezier segments.
 
 use super::MixFrom;
@@ -71,8 +71,7 @@ impl Curve {
     }
 
     /// Store one Bezier segment table for `frame`'s value ordinal `value`
-    /// (0-based). Transcribed from Spine 4.3 `CurveTimeline.setBezier`
-    /// (forward-difference sampling of the cubic).
+    /// (0-based), as forward-difference sampling of the cubic.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn set_bezier(
         &mut self,
@@ -118,8 +117,7 @@ impl Curve {
     }
 
     /// Interpolated value at `time` for the value at `value_offset` (1 or 2).
-    /// `time` must be `>= first_time()`. Transcribed from Spine's getCurveValue
-    /// and the inlined two-value curve evaluation.
+    /// `time` must be `>= first_time()`.
     pub(crate) fn value(&self, time: f32, value_offset: usize) -> f32 {
         let entries = self.entries;
         let i = search(&self.frames, time, entries);

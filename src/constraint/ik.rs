@@ -1,8 +1,8 @@
 //! Inverse-kinematics constraints.
 //!
 //! An [`IkConstraint`] rotates 1 or 2 bones so the tip of the last bone reaches
-//! toward a target bone. The solver math is transcribed from Spine 4.3
-//! `IkConstraint` for fidelity; it reads each bone's world transform and writes
+//! toward a target bone. The solver re-implements Spine 4.3's `IkConstraint`; it
+//! reads each bone's world transform and writes
 //! the constrained bones' local rotation (and scale, when stretching).
 
 use core::f32::consts::PI;

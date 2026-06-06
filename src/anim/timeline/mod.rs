@@ -1,7 +1,7 @@
 //! Bone-property animation timelines (rotate / translate / scale).
 //!
-//! Each timeline keys one bone over time via a [`Curve`]. The apply logic is
-//! transcribed from Spine 4.3: rotate/translate values are **added** to the
+//! Each timeline keys one bone over time via a [`Curve`]. The apply logic
+//! re-implements Spine 4.3's: rotate/translate values are **added** to the
 //! setup pose, scale values **multiply** it (with sign-adjusted mixing).
 
 use super::curve::{absolute_value_with, Curve};

@@ -19,8 +19,8 @@ The established Rust runtime, `rusty_spine`, is transpiled from `spine-c` and
 tops out at Spine 4.2; Esoteric discontinued `spine-c` at 4.3. `chine` is a
 from-scratch, dependency-light (`glam` plus optional `serde`) implementation of
 the 4.3 runtime, so projects can target current Spine in pure Rust (native and
-WebAssembly). The math is transcribed from the Spine 4.3 reference runtime for
-fidelity.
+WebAssembly). chine is a re-implementation of the Spine 4.3 runtime: it is based
+on the official runtime's behavior, not a port or copy of its code.
 
 (The name is the *chine*, the backbone.)
 

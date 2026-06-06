@@ -2,7 +2,7 @@
 //!
 //! A [`PathConstraint`] positions and rotates a chain of bones along a
 //! [`crate::attach::PathAttachment`] on a target slot. The Bezier sampling
-//! (`compute_world_positions`) and the bone apply are transcribed from Spine 4.3
+//! (`compute_world_positions`) and the bone apply re-implement Spine 4.3's
 //! `PathConstraint`. The constant-speed arc-length sampling is used for all
 //! paths (it is correct whether or not `constant_speed` is set; the flag is only
 //! an optimization to reuse precomputed lengths, which chine recomputes).
@@ -315,8 +315,7 @@ pub(crate) fn solve(skeleton: &mut Skeleton, c: usize, pose: PathConstraint) {
 
 /// Sample `spaces_count` positions (and tangent angles) along the path's
 /// composite cubic Bezier, using constant-speed arc-length parameterization.
-/// Returns `[x, y, angle]` per sample. Transcribed from Spine's
-/// `computeWorldPositions` (constant-speed branch).
+/// Returns `[x, y, angle]` per sample.
 #[allow(clippy::too_many_arguments, clippy::many_single_char_names)]
 fn compute_world_positions(
     world_pts: &[Vec2],

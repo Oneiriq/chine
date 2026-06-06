@@ -5,7 +5,7 @@
 //! (rotate / x / y / scaleX / scaleY / shearY) drives one or more target
 //! properties, scaled and offset. World-target constraints modify the
 //! constrained bones' world matrices directly; local-target ones modify their
-//! local pose. The math is transcribed from Spine 4.3 `TransformConstraintData`.
+//! local pose. It re-implements Spine 4.3's `TransformConstraintData`.
 
 use core::f32::consts::{PI, TAU};
 

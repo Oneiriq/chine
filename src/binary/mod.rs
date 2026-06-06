@@ -7,7 +7,7 @@
 //! animations) in a fixed order.
 //!
 //! The reader primitives ([`BinaryReader`]) are stable across Spine 4.x, while
-//! the section layouts are transcribed from the Spine 4.3 format. The loader
+//! the section layouts follow the Spine 4.3 binary format. The loader
 //! covers the full format: header, bones, slots, constraints, skins, events,
 //! and animations (with the per-slider physics index trailer).
 

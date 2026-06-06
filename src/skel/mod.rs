@@ -620,7 +620,7 @@ fn root_world(b: &Bone, skel_x: f32, skel_y: f32, sx: f32, sy: f32) -> World {
 }
 
 /// Child bone: local pose composed with the parent world transform per the
-/// bone's [`Inherit`] mode. Transcribed from Spine 4.3 `BonePose`.
+/// bone's [`Inherit`] mode.
 fn child_world(b: &Bone, p: &ParentPose, sx: f32, sy: f32) -> World {
     let world_x = p.a * b.x + p.b * b.y + p.world_x;
     let world_y = p.c * b.x + p.d * b.y + p.world_y;
