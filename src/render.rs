@@ -562,4 +562,118 @@ mod tests {
         assert_eq!(second, first.as_slice());
         assert_eq!(second, render(&sk).as_slice());
     }
+
+    /// The four blend modes, in the slot order the fixtures declare them.
+    const ALL_BLENDS: [BlendMode; 4] = [
+        BlendMode::Normal,
+        BlendMode::Additive,
+        BlendMode::Multiply,
+        BlendMode::Screen,
+    ];
+
+    // End to end through the JSON loader: one slot per blend mode, each
+    // emitted RenderCommand must carry its slot's mode.
+    #[cfg(feature = "json")]
+    #[test]
+    fn json_blend_modes_reach_their_render_commands() {
+        let json = r#"{
+            "bones": [ { "name": "root" } ],
+            "slots": [
+                { "name": "n", "bone": "root", "attachment": "n" },
+                { "name": "a", "bone": "root", "attachment": "a", "blend": "additive" },
+                { "name": "m", "bone": "root", "attachment": "m", "blend": "multiply" },
+                { "name": "s", "bone": "root", "attachment": "s", "blend": "screen" }
+            ],
+            "skins": [ {
+                "name": "default",
+                "attachments": {
+                    "n": { "n": { "width": 10, "height": 10 } },
+                    "a": { "a": { "width": 10, "height": 10 } },
+                    "m": { "m": { "width": 10, "height": 10 } },
+                    "s": { "s": { "width": 10, "height": 10 } }
+                }
+            } ]
+        }"#;
+        let data = crate::load::from_json(json).unwrap();
+        let mut sk = Skeleton::new(Arc::new(data));
+        sk.update_world_transform();
+        let cmds = render(&sk);
+        assert_eq!(cmds.len(), 4);
+        for (cmd, expected) in cmds.iter().zip(ALL_BLENDS) {
+            assert_eq!(cmd.blend, expected);
+            assert_eq!(cmd.positions.len(), 4, "a region quad per slot");
+        }
+    }
+
+    // End to end through the binary loader: a hand-built `.skel` with one
+    // region-attachment slot per blend ordinal (0..=3), rendered, must emit
+    // each RenderCommand with its slot's mode.
+    #[cfg(feature = "binary")]
+    #[test]
+    fn binary_blend_modes_reach_their_render_commands() {
+        fn put_string(out: &mut Vec<u8>, s: &str) {
+            out.push(u8::try_from(s.len() + 1).unwrap());
+            out.extend_from_slice(s.as_bytes());
+        }
+        fn put_f32(out: &mut Vec<u8>, v: f32) {
+            out.extend_from_slice(&v.to_be_bytes());
+        }
+
+        let names = ["n", "a", "m", "s"];
+        let mut b = Vec::new();
+        // Header: hash, version, bounds, reference scale, essential.
+        b.extend_from_slice(&[0; 8]);
+        put_string(&mut b, "4.3.00");
+        for v in [0.0_f32, 0.0, 0.0, 0.0, 1.0] {
+            put_f32(&mut b, v);
+        }
+        b.push(0);
+        // String table: the four attachment names.
+        b.push(4);
+        for name in names {
+            put_string(&mut b, name);
+        }
+        // One root bone.
+        b.push(1);
+        put_string(&mut b, "root");
+        for v in [0.0_f32, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0] {
+            put_f32(&mut b, v);
+        }
+        b.push(0); // inherit = Normal
+        b.push(0); // skin required = false
+        // Four slots: blend ordinals 0..=3, attachment = string ref i + 1.
+        b.push(4);
+        for (i, name) in names.iter().enumerate() {
+            let i = u8::try_from(i).unwrap();
+            put_string(&mut b, name);
+            b.push(0); // bone 0
+            b.extend_from_slice(&0xFFFF_FFFF_u32.to_be_bytes()); // color
+            b.extend_from_slice(&0xFFFF_FFFF_u32.to_be_bytes()); // dark (none)
+            b.push(i + 1); // attachment string ref
+            b.push(i); // blend ordinal
+        }
+        b.push(0); // constraint count
+        // Default skin: one plain region attachment per slot.
+        b.push(4);
+        for i in 0..4_u8 {
+            b.push(i); // slot index
+            b.push(1); // one attachment
+            b.push(i + 1); // placeholder string ref
+            b.push(0); // flags: region, name = placeholder, no extras
+            for v in [0.0_f32, 0.0, 1.0, 1.0, 10.0, 10.0] {
+                put_f32(&mut b, v); // x, y, scaleX, scaleY, width, height
+            }
+        }
+        b.extend_from_slice(&[0; 3]); // named skins, events, animations
+
+        let data = crate::binary::from_binary(&b).expect("blend fixture parses");
+        let mut sk = Skeleton::new(Arc::new(data));
+        sk.update_world_transform();
+        let cmds = render(&sk);
+        assert_eq!(cmds.len(), 4);
+        for (cmd, expected) in cmds.iter().zip(ALL_BLENDS) {
+            assert_eq!(cmd.blend, expected);
+            assert_eq!(cmd.positions.len(), 4, "a region quad per slot");
+        }
+    }
 }
