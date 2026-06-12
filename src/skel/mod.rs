@@ -971,6 +971,5 @@ fn sort_reset(bone: usize, children: &[Vec<usize>], sorted: &mut [bool]) {
     }
 }
 
-
 #[cfg(test)]
 mod tests;

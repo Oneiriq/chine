@@ -231,7 +231,11 @@ impl GlRenderer {
             let vview = js_sys::Float32Array::view(&self.verts);
             gl.buffer_data_with_array_buffer_view(Gl::ARRAY_BUFFER, &vview, Gl::DYNAMIC_DRAW);
             let iview = js_sys::Uint32Array::view(&self.indices);
-            gl.buffer_data_with_array_buffer_view(Gl::ELEMENT_ARRAY_BUFFER, &iview, Gl::DYNAMIC_DRAW);
+            gl.buffer_data_with_array_buffer_view(
+                Gl::ELEMENT_ARRAY_BUFFER,
+                &iview,
+                Gl::DYNAMIC_DRAW,
+            );
         }
 
         // One draw call per run.

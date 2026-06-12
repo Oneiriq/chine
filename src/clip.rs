@@ -136,7 +136,8 @@ pub(crate) fn clip_into(
                 dst.uvs.push(*v);
             }
             for k in 1..subject.len() as u16 - 1 {
-                dst.triangles.extend_from_slice(&[base, base + k, base + k + 1]);
+                dst.triangles
+                    .extend_from_slice(&[base, base + k, base + k + 1]);
             }
         }
     }
@@ -444,7 +445,12 @@ mod tests {
     #[test]
     fn degenerate_clip_keeps_the_previous_pieces() {
         let (mut ear, mut points, mut ranges) = (Vec::new(), Vec::new(), Vec::new());
-        assert!(replace_clip(&mut square(), &mut ear, &mut points, &mut ranges));
+        assert!(replace_clip(
+            &mut square(),
+            &mut ear,
+            &mut points,
+            &mut ranges
+        ));
         // A two-vertex "polygon" yields nothing: the square stays active.
         let mut line = vec![Vec2::ZERO, Vec2::new(5.0, 0.0)];
         assert!(!replace_clip(&mut line, &mut ear, &mut points, &mut ranges));

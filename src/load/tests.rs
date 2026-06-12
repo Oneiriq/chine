@@ -750,8 +750,7 @@ fn parses_boundingbox_and_point_attachments() {
         Some(Attachment::BoundingBox(b)) => assert_eq!(b.vertex_count(), 3),
         other => panic!("expected boundingbox, got {other:?}"),
     }
-    let pt: Value =
-        serde_json::from_str(r#"{"type":"point","x":5,"y":6,"rotation":30}"#).unwrap();
+    let pt: Value = serde_json::from_str(r#"{"type":"point","x":5,"y":6,"rotation":30}"#).unwrap();
     match parse_attachment("muzzle", &pt) {
         Some(Attachment::Point(p)) => {
             assert!((p.x - 5.0).abs() < 1e-4);

@@ -641,7 +641,7 @@ mod tests {
         }
         b.push(0); // inherit = Normal
         b.push(0); // skin required = false
-        // Four slots: blend ordinals 0..=3, attachment = string ref i + 1.
+                   // Four slots: blend ordinals 0..=3, attachment = string ref i + 1.
         b.push(4);
         for (i, name) in names.iter().enumerate() {
             let i = u8::try_from(i).unwrap();
@@ -653,7 +653,7 @@ mod tests {
             b.push(i); // blend ordinal
         }
         b.push(0); // constraint count
-        // Default skin: one plain region attachment per slot.
+                   // Default skin: one plain region attachment per slot.
         b.push(4);
         for i in 0..4_u8 {
             b.push(i); // slot index

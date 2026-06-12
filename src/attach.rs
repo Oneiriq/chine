@@ -699,7 +699,14 @@ impl ClippingAttachment {
         slot_bone: usize,
         out: &mut Vec<Vec2>,
     ) {
-        compute_vertices_into(&self.vertices, self.vertex_count, skeleton, slot_bone, &[], out);
+        compute_vertices_into(
+            &self.vertices,
+            self.vertex_count,
+            skeleton,
+            slot_bone,
+            &[],
+            out,
+        );
     }
 }
 

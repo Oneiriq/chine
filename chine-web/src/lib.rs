@@ -169,7 +169,6 @@ impl WebSpine {
             fit,
         })
     }
-
 }
 
 /// A column-major 4x4 orthographic view that centers `fit` (the setup-pose
@@ -249,7 +248,10 @@ mod tests {
         let cmds = [quad(Vec2::new(-10.0, -4.0), Vec2::new(10.0, 4.0))];
         let (cx, cy, hx, hy) = setup_fit(&cmds);
         assert!(cx.abs() < 1e-6 && cy.abs() < 1e-6, "centered");
-        assert!((hx - 10.0).abs() < 1e-6 && (hy - 4.0).abs() < 1e-6, "half-extents");
+        assert!(
+            (hx - 10.0).abs() < 1e-6 && (hy - 4.0).abs() < 1e-6,
+            "half-extents"
+        );
     }
 
     #[test]
@@ -264,7 +266,10 @@ mod tests {
         let m = fit_view((0.0, 0.0, 10.0, 10.0), 100, 100);
         assert!((m[0] - 1.0 / 11.0).abs() < 1e-6, "x scale");
         assert!((m[5] - 1.0 / 11.0).abs() < 1e-6, "y scale");
-        assert!(m[12].abs() < 1e-6 && m[13].abs() < 1e-6, "centered at origin");
+        assert!(
+            m[12].abs() < 1e-6 && m[13].abs() < 1e-6,
+            "centered at origin"
+        );
         // A wider canvas widens the view, shrinking the x scale.
         let wide = fit_view((0.0, 0.0, 10.0, 10.0), 200, 100);
         assert!(wide[0] < m[0], "wider canvas gives a smaller x scale");

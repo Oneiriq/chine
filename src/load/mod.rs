@@ -221,7 +221,8 @@ pub fn from_json(text: &str) -> Result<SkeletonData, LoadError> {
 /// showing `setup` at rest.
 fn parse_sequence(v: &Value) -> Option<Sequence> {
     let s = v.get("sequence")?.as_object()?;
-    let u = |key: &str, default: u64| s.get(key).and_then(Value::as_u64).unwrap_or(default) as usize;
+    let u =
+        |key: &str, default: u64| s.get(key).and_then(Value::as_u64).unwrap_or(default) as usize;
     Some(Sequence::new(
         u("count", 0),
         u("start", 1),
@@ -351,7 +352,6 @@ fn parse_weighted(raw: &[f32]) -> MeshVertices {
     }
     MeshVertices::Weighted { bones, vertices }
 }
-
 
 /// Resolve a constraint's named constrained bones to indices.
 fn constraint_bones(cm: &Value, kind: &str, data: &SkeletonData) -> Result<Vec<usize>, LoadError> {
@@ -672,7 +672,6 @@ fn parse_color(s: Option<&str>, default: Color) -> Color {
         if s.len() >= 8 { byte(6) } else { 1.0 },
     )
 }
-
 
 mod timelines;
 use timelines::parse_animation;

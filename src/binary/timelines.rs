@@ -172,7 +172,9 @@ pub(super) fn read_animation(
             if kind == 8 {
                 let times: Vec<f32> = (0..frames).map(|_| r.float()).collect();
                 duration = duration.max(times.last().copied().unwrap_or(0.0));
-                timelines.push(Timeline::PhysicsReset(PhysicsResetTimeline::new(index, times)));
+                timelines.push(Timeline::PhysicsReset(PhysicsResetTimeline::new(
+                    index, times,
+                )));
                 continue;
             }
             let property = match kind {
@@ -242,16 +244,15 @@ pub(super) fn read_animation(
                         None => skip_deform_timeline(r, frames),
                     },
                     1 => {
-                        let count =
-                            sequence_count(data, skin_index, slot, &att_name).unwrap_or(0);
+                        let count = sequence_count(data, skin_index, slot, &att_name).unwrap_or(0);
                         let (tl, d) = read_sequence_timeline(r, slot, att_name, count, frames);
                         duration = duration.max(d);
                         timelines.push(Timeline::Sequence(tl));
                     }
                     _ => {
-                    r.fail(BinaryError::UnknownTimelineType(kind));
-                    return Animation::new(name, duration, timelines);
-                }
+                        r.fail(BinaryError::UnknownTimelineType(kind));
+                        return Animation::new(name, duration, timelines);
+                    }
                 }
             }
         }
@@ -303,7 +304,11 @@ pub(super) fn read_animation(
 /// Read a one-value bone timeline (rotate / single axis). The stream gives the
 /// Bezier-segment count first (curve storage), then per-frame time + value with
 /// a stepped / linear / Bezier curve between frames.
-pub(super) fn read_bone_timeline1(r: &mut BinaryReader, bone: usize, frames: usize) -> (BoneTimeline, f32) {
+pub(super) fn read_bone_timeline1(
+    r: &mut BinaryReader,
+    bone: usize,
+    frames: usize,
+) -> (BoneTimeline, f32) {
     let bezier_count = r.count();
     let mut tl = BoneTimeline::one_value(bone, frames, bezier_count);
     let mut bezier = 0;
@@ -474,7 +479,12 @@ fn skip_deform_timeline(r: &mut BinaryReader, frames: usize) {
 
 /// The number of regions in a sequenced region/mesh attachment, for a sequence
 /// timeline's index wrapping.
-fn sequence_count(data: &SkeletonData, skin_index: usize, slot: usize, name: &str) -> Option<usize> {
+fn sequence_count(
+    data: &SkeletonData,
+    skin_index: usize,
+    slot: usize,
+    name: &str,
+) -> Option<usize> {
     let skin = if skin_index == 0 {
         None
     } else {

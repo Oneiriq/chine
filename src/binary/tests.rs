@@ -1,6 +1,5 @@
-use super::*;
 use super::timelines::*;
-
+use super::*;
 
 #[test]
 fn reads_var_uint_multi_byte() {
@@ -77,7 +76,10 @@ fn parses_header_and_bones() {
 
 // Validates the parser against a real Spine 4.3 `.skel` when the local
 // fixture is present (it is not committed); skips cleanly otherwise.
-#[cfg_attr(not(skel_fixtures), ignore = "requires the gitignored Spine fixtures in data/")]
+#[cfg_attr(
+    not(skel_fixtures),
+    ignore = "requires the gitignored Spine fixtures in data/"
+)]
 #[test]
 fn parses_real_skel_header_and_bones() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/data/Spine.skel");
@@ -153,7 +155,10 @@ fn parses_real_skel_header_and_bones() {
 // non-bone animation timelines are still being added, so this asserts the
 // structural pieces that are wired up: bones, slots, the new 4.3 slider
 // constraint, and the first (bone-only) animation parsing in full.
-#[cfg_attr(not(skel_fixtures), ignore = "requires the gitignored Spine fixtures in data/")]
+#[cfg_attr(
+    not(skel_fixtures),
+    ignore = "requires the gitignored Spine fixtures in data/"
+)]
 #[test]
 fn parses_diamond_rig() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/data/diamond-pro.skel");
@@ -199,7 +204,10 @@ fn parses_diamond_rig() {
 // The "disappear" animation deforms the diamond mesh; loading it from binary
 // must build a real deform timeline (not silently fall back to consuming the
 // bytes). Playing it populates a slot's deform buffer.
-#[cfg_attr(not(skel_fixtures), ignore = "requires the gitignored Spine fixtures in data/")]
+#[cfg_attr(
+    not(skel_fixtures),
+    ignore = "requires the gitignored Spine fixtures in data/"
+)]
 #[test]
 fn diamond_deform_timeline_applies() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/data/diamond-pro.skel");
@@ -232,7 +240,10 @@ fn diamond_deform_timeline_applies() {
 // Exercises the slider constraint on the real rig: playing an animation and
 // updating world transforms runs the slider, which scrubs the "rotation"
 // animation from its bone. This must pose the rig without panicking.
-#[cfg_attr(not(skel_fixtures), ignore = "requires the gitignored Spine fixtures in data/")]
+#[cfg_attr(
+    not(skel_fixtures),
+    ignore = "requires the gitignored Spine fixtures in data/"
+)]
 #[test]
 fn diamond_slider_runs() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/data/diamond-pro.skel");
@@ -569,13 +580,15 @@ fn parses_a_transform_constraint_with_a_property() {
 // attachment resolved its frames to distinct UVs (the per-frame regions
 // were found, i.e. the frame path names match the atlas). Skips if the
 // local fixtures are absent.
-#[cfg_attr(not(skel_fixtures), ignore = "requires the gitignored Spine fixtures in data/")]
+#[cfg_attr(
+    not(skel_fixtures),
+    ignore = "requires the gitignored Spine fixtures in data/"
+)]
 #[test]
 fn diamond_sequence_binds_distinct_frames() {
     let skel = concat!(env!("CARGO_MANIFEST_DIR"), "/data/diamond-pro.skel");
     let atlas = concat!(env!("CARGO_MANIFEST_DIR"), "/data/diamond-pro.atlas");
-    let (Ok(bytes), Ok(atlas_text)) = (std::fs::read(skel), std::fs::read_to_string(atlas))
-    else {
+    let (Ok(bytes), Ok(atlas_text)) = (std::fs::read(skel), std::fs::read_to_string(atlas)) else {
         return;
     };
     let mut data = from_binary(&bytes).unwrap();
@@ -591,20 +604,25 @@ fn diamond_sequence_binds_distinct_frames() {
         seq.and_then(|s| Some((s.frame(0)?.0.to_vec(), s.frame(1)?.0.to_vec())))
             .is_some_and(|(a, b)| a != b)
     });
-    assert!(distinct, "a sequenced attachment should bind distinct frame UVs");
+    assert!(
+        distinct,
+        "a sequenced attachment should bind distinct frame UVs"
+    );
 }
 
 // Drives the diamond rig through the whole pipeline (load, bind, pose,
 // render) and confirms it produces well-formed draw commands: each carries
 // geometry with one UV pair per vertex, in-range triangle indices, and a
 // real atlas page. Skips if the local fixtures are absent.
-#[cfg_attr(not(skel_fixtures), ignore = "requires the gitignored Spine fixtures in data/")]
+#[cfg_attr(
+    not(skel_fixtures),
+    ignore = "requires the gitignored Spine fixtures in data/"
+)]
 #[test]
 fn diamond_renders_end_to_end() {
     let skel = concat!(env!("CARGO_MANIFEST_DIR"), "/data/diamond-pro.skel");
     let atlas = concat!(env!("CARGO_MANIFEST_DIR"), "/data/diamond-pro.atlas");
-    let (Ok(bytes), Ok(atlas_text)) = (std::fs::read(skel), std::fs::read_to_string(atlas))
-    else {
+    let (Ok(bytes), Ok(atlas_text)) = (std::fs::read(skel), std::fs::read_to_string(atlas)) else {
         return;
     };
     let mut data = from_binary(&bytes).unwrap();
@@ -720,7 +738,7 @@ fn minimal_skeleton_bytes(version: &str) -> Vec<u8> {
     }
     b.push(0); // inherit = Normal
     b.push(0); // skin required = false
-    // No slots / constraints, an empty default skin, no skins / events / anims.
+               // No slots / constraints, an empty default skin, no skins / events / anims.
     b.extend_from_slice(&[0; 6]);
     b
 }
@@ -768,10 +786,7 @@ fn corrupt_length_is_rejected_not_looped() {
     b.push(0); // essential
     b.push(0); // 0 strings
     b.push(100); // bone count = 100, but no bone bytes follow
-    assert!(matches!(
-        from_binary(&b),
-        Err(BinaryError::CorruptLength)
-    ));
+    assert!(matches!(from_binary(&b), Err(BinaryError::CorruptLength)));
 }
 
 // An otherwise valid header whose single constraint carries an unknown type
@@ -877,7 +892,7 @@ fn json_and_binary_loaders_agree() {
     put_f32(&mut b, 1.0); // frame 1 time
     put_f32(&mut b, 90.0); // frame 1 value
     b.push(0); // linear curve
-    // ik, transform, path, physics, slider, deform, draw order, folder, event
+               // ik, transform, path, physics, slider, deform, draw order, folder, event
     b.extend_from_slice(&[0; 9]);
 
     let json_data = crate::load::from_json(JSON).unwrap();

@@ -69,7 +69,10 @@ impl std::fmt::Display for BinaryError {
         match self {
             BinaryError::Truncated => write!(f, "binary skeleton data is truncated"),
             BinaryError::UnsupportedVersion { found, expected } => {
-                write!(f, "unsupported Spine version {found} (this loader reads {expected} exports)")
+                write!(
+                    f,
+                    "unsupported Spine version {found} (this loader reads {expected} exports)"
+                )
             }
             BinaryError::CorruptLength => {
                 write!(f, "a list length exceeds the remaining data")
@@ -358,7 +361,12 @@ fn parse_ik(r: &mut BinaryReader, name: String, order: usize) -> IkConstraintDat
 
 /// Parse one slider constraint (Spine 4.3 bit-packed layout). chine loads at
 /// scale 1, so the property scale factor (applied to X / Y) is the identity.
-fn parse_slider(r: &mut BinaryReader, name: String, order: usize, nonessential: bool) -> SliderData {
+fn parse_slider(
+    r: &mut BinaryReader,
+    name: String,
+    order: usize,
+    nonessential: bool,
+) -> SliderData {
     let mut data = SliderData {
         name,
         order,
@@ -876,7 +884,6 @@ fn read_float_array(r: &mut BinaryReader, n: usize) -> Vec<f32> {
 fn read_short_array(r: &mut BinaryReader, n: usize) -> Vec<u16> {
     (0..n).map(|_| r.var_usize() as u16).collect()
 }
-
 
 mod reader;
 pub use reader::BinaryReader;

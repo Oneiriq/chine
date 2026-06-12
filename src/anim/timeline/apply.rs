@@ -580,7 +580,12 @@ pub(super) fn apply_physics_one(
 /// Physics reset timeline: if a keyframe time falls in the window
 /// `(last_time, time]` (handling a loop wrap where `time < last_time`), reset
 /// the target constraint, or every physics constraint when global.
-pub(super) fn apply_physics_reset(t: &PhysicsResetTimeline, skel: &mut Skeleton, last_time: f32, time: f32) {
+pub(super) fn apply_physics_reset(
+    t: &PhysicsResetTimeline,
+    skel: &mut Skeleton,
+    last_time: f32,
+    time: f32,
+) {
     let fired = if time >= last_time {
         t.times.iter().any(|&kt| kt > last_time && kt <= time)
     } else {
@@ -834,7 +839,12 @@ pub(super) fn apply_slot_two_color(
 }
 
 /// Slot attachment timeline: a stepped switch to the keyed attachment name.
-pub(super) fn apply_attachment(t: &AttachmentTimeline, skel: &mut Skeleton, time: f32, from: MixFrom) {
+pub(super) fn apply_attachment(
+    t: &AttachmentTimeline,
+    skel: &mut Skeleton,
+    time: f32,
+    from: MixFrom,
+) {
     let Some((slot, setup)) = skel.slot_pose_and_setup(t.slot) else {
         return;
     };
@@ -876,7 +886,13 @@ pub(super) fn apply_event(t: &EventTimeline, skel: &mut Skeleton, last_time: f32
 /// Mesh deform timeline: set the slot's deform buffer to the setup vertices plus
 /// the interpolated keyframe offsets (scaled by `alpha`). Only applies while the
 /// slot shows the timeline's attachment.
-pub(super) fn apply_deform(t: &DeformTimeline, skel: &mut Skeleton, time: f32, alpha: f32, from: MixFrom) {
+pub(super) fn apply_deform(
+    t: &DeformTimeline,
+    skel: &mut Skeleton,
+    time: f32,
+    alpha: f32,
+    from: MixFrom,
+) {
     let Some(slot) = skel.slot(t.slot) else {
         return;
     };

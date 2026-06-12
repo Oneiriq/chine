@@ -3,13 +3,18 @@ use super::*;
 use crate::anim::{
     compute_draw_order, Animation, AttachmentTimeline, BoneAxis, BoneTimeline, ConstraintTimeline,
     DeformTimeline, DrawOrderTimeline, EventTimeline, PhysicsProperty, PhysicsResetTimeline,
-    SequenceTimeline, Timeline, GLOBAL_PHYSICS, PATH_MIX, PATH_POSITION, PATH_SPACING, TRANSFORM_MIX,
+    SequenceTimeline, Timeline, GLOBAL_PHYSICS, PATH_MIX, PATH_POSITION, PATH_SPACING,
+    TRANSFORM_MIX,
 };
 use crate::event::Event;
 
 /// Parse one animation: bone, slot, deform, event, draw-order, and constraint
 /// timelines.
-pub(super) fn parse_animation(name: &str, anim: &Value, data: &SkeletonData) -> Result<Animation, LoadError> {
+pub(super) fn parse_animation(
+    name: &str,
+    anim: &Value,
+    data: &SkeletonData,
+) -> Result<Animation, LoadError> {
     let mut timelines = Vec::new();
     let mut duration = 0.0_f32;
     if let Some(bones) = anim.get("bones").and_then(Value::as_object) {
