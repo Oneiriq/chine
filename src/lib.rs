@@ -38,6 +38,7 @@ pub mod atlas;
 pub(crate) mod attach;
 #[cfg(feature = "binary")]
 pub mod binary;
+pub(crate) mod clip;
 pub(crate) mod constraint;
 pub mod data;
 pub(crate) mod event;

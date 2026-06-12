@@ -6,17 +6,24 @@
 //! triangles, tint, blend mode, and atlas page. The host uploads these to the
 //! GPU; chine does no rendering itself. Call [`bind_atlas`] once after loading
 //! so attachment UVs and page indices are resolved against the atlas.
+//!
+//! A render loop should hold a [`RenderScratch`] and call [`render_with`]
+//! every frame: the commands and the clipper's internal buffers are then
+//! reused, so steady-state rendering performs no heap allocation.
 
 use glam::Vec2;
 
 use crate::atlas::Atlas;
 use crate::attach::{Attachment, MeshAttachment, RegionAttachment, Sequence};
-use crate::data::{BlendMode, Color, SkeletonData};
-use crate::skel::Skeleton;
+use crate::clip::{clip_into, replace_clip};
+use crate::data::{BlendMode, Color, SkeletonData, SlotData};
+use crate::skel::{Skeleton, Slot};
 use crate::skin::Skin;
 
+pub use crate::clip::RenderScratch;
+
 /// One batch of geometry: an attachment's triangles with its texture and tint.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct RenderCommand {
     /// World-space vertex positions.
     pub positions: Vec<Vec2>,
@@ -154,311 +161,163 @@ pub fn render(skeleton: &Skeleton) -> Vec<RenderCommand> {
 /// Build the skeleton's draw-order render commands into `out`, which is cleared
 /// first. A render loop should keep one buffer and call this every frame to
 /// reuse its capacity, rather than calling [`render`] and allocating a fresh
-/// `Vec` each frame.
+/// `Vec` each frame; to also reuse the commands' own buffers and the clipper's
+/// internals, hold a [`RenderScratch`] and call [`render_with`] instead.
 pub fn render_into(skeleton: &Skeleton, out: &mut Vec<RenderCommand>) {
     out.clear();
-    let mut clip: Option<Clip> = None;
-    for &slot_index in skeleton.draw_order() {
-        if let Some(cmd) = build_command(skeleton, slot_index, &mut clip) {
-            match &clip {
-                Some(c) => out.extend(clip_command(cmd, &c.polygons)),
-                None => out.push(cmd),
-            }
-        }
-        if let Some(c) = &clip {
-            if slot_index == c.end_slot {
-                clip = None;
-            }
-        }
-    }
+    let mut scratch = RenderScratch::new();
+    let emitted = render_with(skeleton, &mut scratch).len();
+    out.extend(scratch.commands.drain(..emitted));
 }
 
-/// Build the render command for one slot, or `None` if it has no renderable
-/// attachment. A clipping attachment instead starts masking via `clip`.
-fn build_command(
+/// Build the skeleton's draw-order render commands in `scratch`, returning the
+/// frame's commands. Equivalent to [`render_into`], but every buffer involved
+/// (the commands themselves and the clipper's intermediates) lives in
+/// `scratch` and is rebuilt in place: keep one scratch per render loop and,
+/// once its buffers have grown to the skeleton's working sizes, steady-state
+/// rendering — clipped or not — performs no heap allocation.
+#[must_use]
+pub fn render_with<'a>(skeleton: &Skeleton, scratch: &'a mut RenderScratch) -> &'a [RenderCommand] {
+    let RenderScratch {
+        commands,
+        staging,
+        clip_world,
+        poly_points,
+        poly_ranges,
+        ear,
+        subject,
+        clipped,
+    } = scratch;
+    poly_points.clear();
+    poly_ranges.clear();
+    let mut emitted = 0;
+    // The active clip's end slot: clipping stops once that slot is drawn.
+    let mut clip_end: Option<usize> = None;
+    for &slot_index in skeleton.draw_order() {
+        if let Some((setup, slot, att)) = resolve_attachment(skeleton, slot_index) {
+            if let Attachment::Clipping(c) = att {
+                // Start masking: decompose the clip polygon into convex
+                // pieces. A degenerate polygon leaves any active clip running.
+                clip_world.clear();
+                c.compute_world_vertices_into(skeleton, setup.bone, clip_world);
+                if replace_clip(clip_world, ear, poly_points, poly_ranges) {
+                    let end = skeleton.data().find_slot(&c.end_slot);
+                    clip_end = Some(end.unwrap_or(usize::MAX));
+                }
+            } else {
+                // Build a drawable slot into the next output command, or into
+                // the staging command first when a clip is active.
+                let dst = if clip_end.is_some() {
+                    &mut *staging
+                } else {
+                    command_slot(commands, emitted)
+                };
+                if fill_command(skeleton, setup, slot, att, dst) {
+                    if clip_end.is_some() {
+                        let dst = command_slot(commands, emitted);
+                        if clip_into(staging, poly_points, poly_ranges, subject, clipped, dst) {
+                            emitted += 1;
+                        }
+                    } else {
+                        emitted += 1;
+                    }
+                }
+            }
+        }
+        if clip_end == Some(slot_index) {
+            clip_end = None;
+        }
+    }
+    &commands[..emitted]
+}
+
+/// Resolve a slot's drawable state: its setup data, runtime state, and current
+/// attachment. `None` if the slot shows nothing or a reference is dangling.
+fn resolve_attachment(
     skeleton: &Skeleton,
     slot_index: usize,
-    clip: &mut Option<Clip>,
-) -> Option<RenderCommand> {
+) -> Option<(&SlotData, &Slot, &Attachment)> {
     let data = skeleton.data();
     let setup = data.slots.get(slot_index)?;
     let slot = skeleton.slot(slot_index)?;
     let name = slot.attachment.as_deref()?;
     let att = data.attachment(slot_index, name, skeleton.active_skin())?;
+    Some((setup, slot, att))
+}
+
+/// The command at `index` in the scratch's grow-only pool, pushing an empty
+/// command first when the pool is shorter. A reused command is overwritten in
+/// place, so its buffers keep their capacity across frames.
+fn command_slot(commands: &mut Vec<RenderCommand>, index: usize) -> &mut RenderCommand {
+    if index == commands.len() {
+        commands.push(RenderCommand::default());
+    }
+    &mut commands[index]
+}
+
+/// Fill `dst` (clearing and reusing its buffers) with one slot's draw data.
+/// `false`, leaving `dst` untouched, for attachments that draw nothing:
+/// paths, bounding boxes, points, and unresolved linked meshes. Clipping
+/// attachments are handled by the caller, not here.
+fn fill_command(
+    skeleton: &Skeleton,
+    setup: &SlotData,
+    slot: &Slot,
+    att: &Attachment,
+    dst: &mut RenderCommand,
+) -> bool {
     match att {
         Attachment::Region(r) => {
-            let bone = skeleton.bone(setup.bone)?;
-            let (uvs, page) = sequence_frame(r.sequence.as_ref(), slot.sequence_index)
-                .map_or_else(|| (r.uvs.to_vec(), r.page), |(u, p)| (u.to_vec(), p));
-            Some(RenderCommand {
-                positions: r.compute_world_vertices(bone).to_vec(),
-                uvs,
-                triangles: vec![0, 1, 2, 2, 3, 0],
-                color: mul(slot.color, r.color),
-                dark_color: slot.dark_color,
-                page,
-                blend: setup.blend,
-            })
+            let Some(bone) = skeleton.bone(setup.bone) else {
+                return false;
+            };
+            dst.positions.clear();
+            dst.positions
+                .extend_from_slice(&r.compute_world_vertices(bone));
+            dst.uvs.clear();
+            match sequence_frame(r.sequence.as_ref(), slot.sequence_index) {
+                Some((uvs, page)) => {
+                    dst.uvs.extend_from_slice(uvs);
+                    dst.page = page;
+                }
+                None => {
+                    dst.uvs.extend_from_slice(&r.uvs);
+                    dst.page = r.page;
+                }
+            }
+            dst.triangles.clear();
+            dst.triangles.extend_from_slice(&[0, 1, 2, 2, 3, 0]);
+            dst.color = mul(slot.color, r.color);
+            dst.dark_color = slot.dark_color;
+            dst.blend = setup.blend;
+            true
         }
         Attachment::Mesh(m) => {
-            let (uvs, page) = sequence_frame(m.sequence.as_ref(), slot.sequence_index)
-                .map_or_else(|| (m.uvs.clone(), m.page), |(u, p)| (u.to_vec(), p));
-            Some(RenderCommand {
-                positions: m.compute_world_vertices(skeleton, setup.bone, &slot.deform),
-                uvs,
-                triangles: m.triangles.clone(),
-                color: mul(slot.color, m.color),
-                dark_color: slot.dark_color,
-                page,
-                blend: setup.blend,
-            })
-        }
-        Attachment::Clipping(c) => {
-            let pieces = clip_pieces(c.compute_world_vertices(skeleton, setup.bone));
-            if !pieces.is_empty() {
-                let end = data.find_slot(&c.end_slot).unwrap_or(usize::MAX);
-                *clip = Some(Clip {
-                    polygons: pieces,
-                    end_slot: end,
-                });
+            m.compute_world_vertices_into(skeleton, setup.bone, &slot.deform, &mut dst.positions);
+            dst.uvs.clear();
+            match sequence_frame(m.sequence.as_ref(), slot.sequence_index) {
+                Some((uvs, page)) => {
+                    dst.uvs.extend_from_slice(uvs);
+                    dst.page = page;
+                }
+                None => {
+                    dst.uvs.extend_from_slice(&m.uvs);
+                    dst.page = m.page;
+                }
             }
-            None
+            dst.triangles.clear();
+            dst.triangles.extend_from_slice(&m.triangles);
+            dst.color = mul(slot.color, m.color);
+            dst.dark_color = slot.dark_color;
+            dst.blend = setup.blend;
+            true
         }
-        Attachment::Path(_)
+        Attachment::Clipping(_)
+        | Attachment::Path(_)
         | Attachment::BoundingBox(_)
         | Attachment::Point(_)
-        | Attachment::LinkedMesh(_) => None,
+        | Attachment::LinkedMesh(_) => false,
     }
-}
-
-/// An active clip region: one or more convex (CCW) polygons in world space (a
-/// concave clip is decomposed into several) and the draw-order slot index after
-/// which clipping stops.
-struct Clip {
-    polygons: Vec<Vec<Vec2>>,
-    end_slot: usize,
-}
-
-/// Clip a command's triangles against the convex `polygons` (a decomposed clip
-/// region), interpolating UVs at the new edges and unioning the pieces. Returns
-/// `None` if nothing survives.
-fn clip_command(cmd: RenderCommand, polygons: &[Vec<Vec2>]) -> Option<RenderCommand> {
-    let mut positions = Vec::new();
-    let mut uvs = Vec::new();
-    let mut triangles = Vec::new();
-    for tri in cmd.triangles.chunks_exact(3) {
-        let idx = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
-        let p = [
-            cmd.positions[idx[0]],
-            cmd.positions[idx[1]],
-            cmd.positions[idx[2]],
-        ];
-        let uv = [
-            (cmd.uvs[idx[0] * 2], cmd.uvs[idx[0] * 2 + 1]),
-            (cmd.uvs[idx[1] * 2], cmd.uvs[idx[1] * 2 + 1]),
-            (cmd.uvs[idx[2] * 2], cmd.uvs[idx[2] * 2 + 1]),
-        ];
-        for polygon in polygons {
-            let clipped = clip_triangle(&p, &uv, polygon);
-            if clipped.len() < 3 {
-                continue;
-            }
-            let base = positions.len() as u16;
-            for (pt, (u, v)) in &clipped {
-                positions.push(*pt);
-                uvs.push(*u);
-                uvs.push(*v);
-            }
-            for k in 1..clipped.len() as u16 - 1 {
-                triangles.extend_from_slice(&[base, base + k, base + k + 1]);
-            }
-        }
-    }
-    if triangles.is_empty() {
-        return None;
-    }
-    Some(RenderCommand {
-        positions,
-        uvs,
-        triangles,
-        color: cmd.color,
-        dark_color: cmd.dark_color,
-        page: cmd.page,
-        blend: cmd.blend,
-    })
-}
-
-/// Sutherland-Hodgman clip of one triangle against a convex polygon (CCW),
-/// returning the clipped polygon's vertices with interpolated UVs.
-fn clip_triangle(p: &[Vec2; 3], uv: &[(f32, f32); 3], polygon: &[Vec2]) -> Vec<(Vec2, (f32, f32))> {
-    let mut subject = vec![(p[0], uv[0]), (p[1], uv[1]), (p[2], uv[2])];
-    let m = polygon.len();
-    for i in 0..m {
-        if subject.len() < 3 {
-            break;
-        }
-        subject = clip_against_edge(&subject, polygon[i], polygon[(i + 1) % m]);
-    }
-    subject
-}
-
-/// Clip a subject polygon against the inside half-plane of directed edge
-/// `e1 -> e2` (left side, for a CCW clip polygon), interpolating UVs at crossings.
-fn clip_against_edge(
-    subject: &[(Vec2, (f32, f32))],
-    e1: Vec2,
-    e2: Vec2,
-) -> Vec<(Vec2, (f32, f32))> {
-    let n = subject.len();
-    let edge = e2 - e1;
-    let inside = |pt: Vec2| edge.x * (pt.y - e1.y) - edge.y * (pt.x - e1.x) >= 0.0;
-    let mut out = Vec::with_capacity(n + 1);
-    for i in 0..n {
-        let (cur, cur_uv) = subject[i];
-        let (prev, prev_uv) = subject[(i + n - 1) % n];
-        let cur_in = inside(cur);
-        let prev_in = inside(prev);
-        if cur_in {
-            if !prev_in {
-                out.push(edge_intersect(prev, prev_uv, cur, cur_uv, e1, e2));
-            }
-            out.push((cur, cur_uv));
-        } else if prev_in {
-            out.push(edge_intersect(prev, prev_uv, cur, cur_uv, e1, e2));
-        }
-    }
-    out
-}
-
-/// The point (with interpolated UV) where segment `a -> b` crosses the line
-/// through `e1 -> e2`.
-fn edge_intersect(
-    a: Vec2,
-    a_uv: (f32, f32),
-    b: Vec2,
-    b_uv: (f32, f32),
-    e1: Vec2,
-    e2: Vec2,
-) -> (Vec2, (f32, f32)) {
-    let d = b - a;
-    let edge = e2 - e1;
-    let denom = edge.x * d.y - edge.y * d.x;
-    let t = if denom.abs() > 1e-9 {
-        (edge.x * (e1.y - a.y) - edge.y * (e1.x - a.x)) / denom
-    } else {
-        0.0
-    };
-    let pt = a + d * t;
-    (
-        pt,
-        (
-            a_uv.0 + (b_uv.0 - a_uv.0) * t,
-            a_uv.1 + (b_uv.1 - a_uv.1) * t,
-        ),
-    )
-}
-
-/// Reverse `poly` to counter-clockwise winding (positive signed area) if needed,
-/// so the clip half-plane tests treat its interior as "inside".
-fn make_ccw(mut poly: Vec<Vec2>) -> Vec<Vec2> {
-    let n = poly.len();
-    let mut area = 0.0;
-    for i in 0..n {
-        let a = poly[i];
-        let b = poly[(i + 1) % n];
-        area += a.x * b.y - b.x * a.y;
-    }
-    if area < 0.0 {
-        poly.reverse();
-    }
-    poly
-}
-
-/// Decompose a clip polygon into convex CCW pieces: the polygon itself when it is
-/// already convex, otherwise an ear-clipping triangulation. Empty if degenerate.
-fn clip_pieces(poly: Vec<Vec2>) -> Vec<Vec<Vec2>> {
-    if poly.len() < 3 {
-        return Vec::new();
-    }
-    let poly = make_ccw(poly);
-    if is_convex(&poly) {
-        vec![poly]
-    } else {
-        triangulate(&poly)
-    }
-}
-
-/// Whether `poly`'s corners all turn the same way (it is convex).
-fn is_convex(poly: &[Vec2]) -> bool {
-    let n = poly.len();
-    let mut sign = 0.0_f32;
-    for i in 0..n {
-        let a = poly[i];
-        let b = poly[(i + 1) % n];
-        let c = poly[(i + 2) % n];
-        let cross = (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x);
-        if cross.abs() > 1e-6 {
-            if sign == 0.0 {
-                sign = cross.signum();
-            } else if cross.signum() != sign {
-                return false;
-            }
-        }
-    }
-    true
-}
-
-/// Ear-clipping triangulation of a simple CCW polygon into CCW triangles.
-fn triangulate(poly: &[Vec2]) -> Vec<Vec<Vec2>> {
-    let mut indices: Vec<usize> = (0..poly.len()).collect();
-    let mut tris = Vec::new();
-    while indices.len() > 3 {
-        let m = indices.len();
-        let mut ear = None;
-        for i in 0..m {
-            let a = poly[indices[(i + m - 1) % m]];
-            let b = poly[indices[i]];
-            let c = poly[indices[(i + 1) % m]];
-            // A convex corner with no other vertex inside triangle a,b,c is an ear.
-            if (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x) <= 0.0 {
-                continue;
-            }
-            let clear = indices.iter().enumerate().all(|(j, &vi)| {
-                j == (i + m - 1) % m
-                    || j == i
-                    || j == (i + 1) % m
-                    || !point_in_triangle(poly[vi], a, b, c)
-            });
-            if clear {
-                ear = Some((i, [a, b, c]));
-                break;
-            }
-        }
-        let Some((i, tri)) = ear else {
-            break; // degenerate polygon: stop with what we have
-        };
-        tris.push(tri.to_vec());
-        indices.remove(i);
-    }
-    if indices.len() == 3 {
-        tris.push(vec![poly[indices[0]], poly[indices[1]], poly[indices[2]]]);
-    }
-    tris
-}
-
-/// Whether point `p` lies within triangle `a, b, c` (inclusive of edges).
-fn point_in_triangle(p: Vec2, a: Vec2, b: Vec2, c: Vec2) -> bool {
-    let d1 = tri_sign(p, a, b);
-    let d2 = tri_sign(p, b, c);
-    let d3 = tri_sign(p, c, a);
-    let has_neg = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
-    let has_pos = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
-    !(has_neg && has_pos)
-}
-
-/// Signed area (doubled) of triangle `p, a, b`; its sign gives the turn side.
-fn tri_sign(p: Vec2, a: Vec2, b: Vec2) -> f32 {
-    (p.x - b.x) * (a.y - b.y) - (a.x - b.x) * (p.y - b.y)
 }
 
 /// Component-wise color multiply (slot tint times attachment tint).
@@ -609,60 +468,9 @@ mod tests {
         assert_eq!(buf[0].triangles, fresh[0].triangles);
     }
 
-    #[test]
-    fn clip_triangle_inside_is_unchanged() {
-        let square = vec![
-            Vec2::new(0.0, 0.0),
-            Vec2::new(10.0, 0.0),
-            Vec2::new(10.0, 10.0),
-            Vec2::new(0.0, 10.0),
-        ];
-        let p = [
-            Vec2::new(2.0, 2.0),
-            Vec2::new(8.0, 2.0),
-            Vec2::new(2.0, 8.0),
-        ];
-        let uv = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)];
-        let clipped = clip_triangle(&p, &uv, &square);
-        assert_eq!(clipped.len(), 3);
-    }
-
-    #[test]
-    fn clip_triangle_crosses_right_edge() {
-        let square = vec![
-            Vec2::new(0.0, 0.0),
-            Vec2::new(10.0, 0.0),
-            Vec2::new(10.0, 10.0),
-            Vec2::new(0.0, 10.0),
-        ];
-        // A=(5,5) inside, B=(15,5) outside (x>10), C=(5,8) inside.
-        let p = [
-            Vec2::new(5.0, 5.0),
-            Vec2::new(15.0, 5.0),
-            Vec2::new(5.0, 8.0),
-        ];
-        let uv = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)];
-        let clipped = clip_triangle(&p, &uv, &square);
-        // Clipped to four vertices including the two right-edge crossings.
-        assert_eq!(clipped.len(), 4);
-        // The (10,5) crossing lies halfway along A->B, so its UV is (0.5, 0).
-        let at = clipped
-            .iter()
-            .find(|(pt, _)| (pt.x - 10.0).abs() < 1e-3 && (pt.y - 5.0).abs() < 1e-3)
-            .expect("a vertex at (10,5)");
-        let &(_, (u, v)) = at;
-        assert!((u - 0.5).abs() < 1e-3, "u={u}");
-        assert!(v.abs() < 1e-3, "v={v}");
-        // Nothing escapes the clip square.
-        for (pt, _) in &clipped {
-            assert!(pt.x <= 10.0 + 1e-3, "{pt:?}");
-        }
-    }
-
-    #[test]
-    fn clipping_masks_a_following_slot() {
-        // Slot 0: a clipping square [0,10]^2; slot 1: a mesh triangle that spills
-        // past it. The clip ends on slot 1 ("m"), so the mesh is masked.
+    /// Slot 0: a clipping square `[0,10]^2`; slot 1: a mesh triangle that
+    /// spills past it. The clip ends on slot 1 ("m"), so the mesh is masked.
+    fn clipped_skeleton() -> Skeleton {
         let mut skin = Skin::new("default");
         skin.set(
             0,
@@ -716,6 +524,12 @@ mod tests {
         };
         let mut sk = Skeleton::new(Arc::new(data));
         sk.update_world_transform();
+        sk
+    }
+
+    #[test]
+    fn clipping_masks_a_following_slot() {
+        let sk = clipped_skeleton();
         let cmds = render(&sk);
         // The clip attachment emits nothing; only the masked mesh remains.
         assert_eq!(cmds.len(), 1);
@@ -731,58 +545,21 @@ mod tests {
         }
     }
 
+    // A reused scratch must be invisible in the output: rendering the same
+    // clipped skeleton a second time through one scratch (whose buffers now
+    // hold the first frame) yields exactly the commands of a fresh scratch
+    // and of the allocating wrappers.
     #[test]
-    fn convex_clip_stays_one_piece() {
-        let square = vec![
-            Vec2::new(0.0, 0.0),
-            Vec2::new(10.0, 0.0),
-            Vec2::new(10.0, 10.0),
-            Vec2::new(0.0, 10.0),
-        ];
-        assert!(is_convex(&square));
-        assert_eq!(clip_pieces(square).len(), 1);
-    }
+    fn reused_scratch_render_matches_a_fresh_render() {
+        let sk = clipped_skeleton();
+        let mut reused = RenderScratch::new();
+        let first = render_with(&sk, &mut reused).to_vec();
+        let second = render_with(&sk, &mut reused);
 
-    #[test]
-    fn concave_clip_decomposes_and_excludes_the_notch() {
-        // L-shape (concave); the top-right region (x>4, y>4) is outside it.
-        let l = vec![
-            Vec2::new(0.0, 0.0),
-            Vec2::new(10.0, 0.0),
-            Vec2::new(10.0, 4.0),
-            Vec2::new(4.0, 4.0),
-            Vec2::new(4.0, 10.0),
-            Vec2::new(0.0, 10.0),
-        ];
-        assert!(!is_convex(&l));
-        let pieces = clip_pieces(l);
-        assert!(
-            pieces.len() >= 2,
-            "concave clip should decompose: {}",
-            pieces.len()
-        );
-        let uv = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)];
-        // A triangle entirely in the notch survives against no piece.
-        let notch = [
-            Vec2::new(6.0, 6.0),
-            Vec2::new(9.0, 6.0),
-            Vec2::new(6.0, 9.0),
-        ];
-        let hits = pieces
-            .iter()
-            .filter(|poly| clip_triangle(&notch, &uv, poly).len() >= 3)
-            .count();
-        assert_eq!(hits, 0, "notch triangle must be fully clipped");
-        // A triangle inside the L survives against at least one piece.
-        let inside = [
-            Vec2::new(1.0, 1.0),
-            Vec2::new(3.0, 1.0),
-            Vec2::new(1.0, 3.0),
-        ];
-        let hits2 = pieces
-            .iter()
-            .filter(|poly| clip_triangle(&inside, &uv, poly).len() >= 3)
-            .count();
-        assert!(hits2 >= 1, "inside triangle must survive");
+        let mut fresh = RenderScratch::new();
+        let expected = render_with(&sk, &mut fresh);
+        assert_eq!(second, expected);
+        assert_eq!(second, first.as_slice());
+        assert_eq!(second, render(&sk).as_slice());
     }
 }

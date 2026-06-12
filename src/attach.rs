@@ -321,13 +321,28 @@ impl MeshAttachment {
         slot_bone: usize,
         deform: &[f32],
     ) -> Vec<Vec2> {
-        compute_vertices(
+        let mut out = Vec::with_capacity(self.vertex_count());
+        self.compute_world_vertices_into(skeleton, slot_bone, deform, &mut out);
+        out
+    }
+
+    /// [`Self::compute_world_vertices`] into a reused buffer, which is cleared
+    /// first: a render loop avoids a fresh allocation per mesh per frame.
+    pub fn compute_world_vertices_into(
+        &self,
+        skeleton: &Skeleton,
+        slot_bone: usize,
+        deform: &[f32],
+        out: &mut Vec<Vec2>,
+    ) {
+        compute_vertices_into(
             &self.vertices,
             self.vertex_count(),
             skeleton,
             slot_bone,
             deform,
-        )
+            out,
+        );
     }
 
     /// The unweighted setup vertex positions (`2 * vertex_count`), or `None` for
@@ -382,10 +397,24 @@ fn compute_vertices(
     deform: &[f32],
 ) -> Vec<Vec2> {
     let mut out = Vec::with_capacity(count);
+    compute_vertices_into(vertices, count, skeleton, slot_bone, deform, &mut out);
+    out
+}
+
+/// [`compute_vertices`] into a reused buffer, which is cleared first.
+fn compute_vertices_into(
+    vertices: &MeshVertices,
+    count: usize,
+    skeleton: &Skeleton,
+    slot_bone: usize,
+    deform: &[f32],
+    out: &mut Vec<Vec2>,
+) {
+    out.clear();
     match vertices {
         MeshVertices::Unweighted(v) => {
             let Some(bone) = skeleton.bone(slot_bone) else {
-                return out;
+                return;
             };
             // A deform timeline overrides the local vertices for unweighted
             // meshes.
@@ -427,7 +456,6 @@ fn compute_vertices(
             }
         }
     }
-    out
 }
 
 /// A path attachment: a composite cubic-Bezier curve whose control points are a
@@ -661,6 +689,17 @@ impl ClippingAttachment {
     #[must_use]
     pub fn compute_world_vertices(&self, skeleton: &Skeleton, slot_bone: usize) -> Vec<Vec2> {
         compute_vertices(&self.vertices, self.vertex_count, skeleton, slot_bone, &[])
+    }
+
+    /// [`Self::compute_world_vertices`] into a reused buffer, which is cleared
+    /// first: a render loop avoids a fresh allocation per clip per frame.
+    pub fn compute_world_vertices_into(
+        &self,
+        skeleton: &Skeleton,
+        slot_bone: usize,
+        out: &mut Vec<Vec2>,
+    ) {
+        compute_vertices_into(&self.vertices, self.vertex_count, skeleton, slot_bone, &[], out);
     }
 }
 
