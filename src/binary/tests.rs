@@ -701,6 +701,58 @@ fn from_binary_round_trips_a_minimal_skeleton() {
     assert_eq!(data.slots[0].bone, 0);
 }
 
+/// A complete, minimal essential `.skel` (one root bone, no slots /
+/// constraints / skins / events / animations) whose header declares
+/// `version`, so version-validation tests doctor only the version field.
+fn minimal_skeleton_bytes(version: &str) -> Vec<u8> {
+    let mut b = Vec::new();
+    b.extend_from_slice(&[0; 8]); // hash
+    enc_str(&mut b, version);
+    for v in [0.0_f32, 0.0, 100.0, 200.0, 1.0] {
+        b.extend_from_slice(&v.to_be_bytes()); // bounds + reference scale
+    }
+    b.push(0); // essential (nonessential = false)
+    b.push(0); // string table: 0 entries
+    b.push(1); // bone count
+    enc_str(&mut b, "root");
+    for v in [0.0_f32, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0] {
+        b.extend_from_slice(&v.to_be_bytes()); // bone transform
+    }
+    b.push(0); // inherit = Normal
+    b.push(0); // skin required = false
+    // No slots / constraints, an empty default skin, no skins / events / anims.
+    b.extend_from_slice(&[0; 6]);
+    b
+}
+
+// A doctored header from another Spine release must be rejected up front:
+// the section layouts differ, so reading on would misparse silently. This
+// includes "4.30", which a naive prefix test would accept as "4.3".
+#[test]
+fn rejects_an_export_from_another_spine_version() {
+    for wrong in ["4.4.00", "4.2.43", "3.8.99", "4.30.1", "5.0.00"] {
+        match from_binary(&minimal_skeleton_bytes(wrong)) {
+            Err(BinaryError::UnsupportedVersion { found, expected }) => {
+                assert_eq!(found, wrong);
+                assert_eq!(expected, "4.3");
+            }
+            other => panic!("version {wrong} must be rejected, got {other:?}"),
+        }
+    }
+}
+
+// Any 4.3 patch release uses the 4.3 layout, so all of them load; a missing
+// or empty version string (hand-built data, as in the tests above) is also
+// accepted as-is.
+#[test]
+fn accepts_any_4_3_patch_release() {
+    for ok in ["4.3", "4.3.00", "4.3.99", ""] {
+        let data = from_binary(&minimal_skeleton_bytes(ok))
+            .unwrap_or_else(|e| panic!("version {ok:?} must load: {e}"));
+        assert_eq!(data.bones.len(), 1);
+    }
+}
+
 // A header that declares 100 bones but provides no bone data: each bone
 // needs many bytes, so the count exceeds the remaining data and must be
 // rejected as corrupt rather than driving the read loop. (A real attack

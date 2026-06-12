@@ -36,11 +36,25 @@ use crate::data::{BlendMode, BoneData, Color, Inherit, SkeletonData, SlotData};
 use crate::event::{Event, EventData};
 use crate::skin::Skin;
 
+/// The Spine `major.minor` release whose binary layout this loader reads.
+///
+/// The header's version string selects the section layouts: other releases
+/// add, drop, or re-pack fields, so their exports cannot be read as 4.3 data.
+const SUPPORTED_VERSION: &str = "4.3";
+
 /// An error from binary skeleton loading.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BinaryError {
     /// The data ended before the skeleton could be read.
     Truncated,
+    /// The header declared an export from a Spine release whose binary layout
+    /// this loader does not read (it reads [`SUPPORTED_VERSION`] exports).
+    UnsupportedVersion {
+        /// The version string the header declared.
+        found: String,
+        /// The `major.minor` release this loader reads.
+        expected: &'static str,
+    },
     /// A list declared more items than the remaining bytes could hold. Since
     /// every item occupies at least one byte, the declared length is corrupt.
     CorruptLength,
@@ -54,6 +68,9 @@ impl std::fmt::Display for BinaryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             BinaryError::Truncated => write!(f, "binary skeleton data is truncated"),
+            BinaryError::UnsupportedVersion { found, expected } => {
+                write!(f, "unsupported Spine version {found} (this loader reads {expected} exports)")
+            }
             BinaryError::CorruptLength => {
                 write!(f, "a list length exceeds the remaining data")
             }
@@ -213,6 +230,16 @@ impl<'a> BinaryReader<'a> {
     }
 }
 
+/// Whether a header version string declares the `major.minor` release this
+/// loader reads. The editor writes `major.minor.patch`, and only `major.minor`
+/// selects the binary layout, so every 4.3 patch release is accepted.
+fn version_supported(version: &str) -> bool {
+    match version.strip_prefix(SUPPORTED_VERSION) {
+        Some(rest) => rest.is_empty() || rest.starts_with('.'),
+        None => false,
+    }
+}
+
 /// Map a Spine inherit-mode ordinal to [`Inherit`].
 fn inherit_from(ordinal: usize) -> Inherit {
     match ordinal {
@@ -234,7 +261,9 @@ fn inherit_from(ordinal: usize) -> Inherit {
 /// constraint timelines, and the slider and sequence timelines.
 ///
 /// # Errors
-/// Returns [`BinaryError::Truncated`] if the data ends mid-skeleton.
+/// Returns [`BinaryError::UnsupportedVersion`] if the header declares an
+/// export from a Spine release other than 4.3, and
+/// [`BinaryError::Truncated`] if the data ends mid-skeleton.
 pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
     let mut r = BinaryReader::new(bytes);
     let mut data = SkeletonData::default();
@@ -243,6 +272,17 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
     // and a non-essential flag (with editor-only fields when set).
     let _hash = (r.u32(), r.u32());
     data.spine_version = r.string();
+    // Validate the version before trusting the section layouts below: an
+    // export from another release (4.4+, 4.2, 3.x) would otherwise misparse
+    // silently. A missing or empty version (hand-built data) is accepted.
+    if let Some(found) = data.spine_version.as_deref() {
+        if !found.is_empty() && !version_supported(found) {
+            return Err(BinaryError::UnsupportedVersion {
+                found: found.to_string(),
+                expected: SUPPORTED_VERSION,
+            });
+        }
+    }
     let x = r.float();
     let y = r.float();
     let _width = r.float();
