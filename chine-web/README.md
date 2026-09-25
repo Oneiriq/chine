@@ -4,7 +4,7 @@ A WebAssembly + WebGL2 web-component runtime for [chine](../), the pure-Rust
 Spine 4.3 runtime. It renders a Spine animation in the browser with a custom
 element, as a lightweight drop-in for Spine's official HTML export.
 
-chine stays renderer-agnostic; this crate compiles it to WebAssembly and adds
+chine stays renderer-agnostic. This crate compiles it to WebAssembly and adds
 the only web-specific pieces: a WebGL2 backend for chine's `RenderCommand`
 stream and a custom element that loads the assets and runs the animation loop.
 
@@ -27,7 +27,7 @@ wasm-pack build chine-web --target web --release
 ```
 
 This writes the `pkg/` module (`chine_web.js` + `chine_web_bg.wasm`) that the
-element imports. The default build loads binary `.skel` only; add
+element imports. The default build loads binary `.skel` only. Add
 `-- --features json` for JSON exports (it pulls in serde_json and enlarges the
 wasm).
 
@@ -46,12 +46,12 @@ images alongside the page, then:
 ></chine-spine>
 ```
 
-The skeleton type (binary or JSON) is auto-detected; JSON needs a
+The skeleton type (binary or JSON) is detected automatically. JSON needs a
 `--features json` build. The skeleton is auto-fit and centered in the element.
 
 ## Drop in for a Spine HTML export
 
-A Spine "Export → HTML" file embeds its data as base64 globals
+A Spine "Export > HTML" file embeds its data as base64 globals
 (`skeletonData`, `atlasData`, `textureData`) and drives a `<spine-skeleton>`
 element with a bundled spine-webgl runtime. To render it with chine instead,
 replace that runtime `<script>` with this module:
@@ -66,8 +66,8 @@ reads the same embedded globals, so the export renders unchanged.
 ## Demos
 
 - `examples/diamond.html`: the diamond rig loaded by URL.
-- `examples/diamond-embedded.html`: a self-contained drop-in build (generated
-  locally; embeds the rig's data).
+- `examples/diamond-embedded.html`: a self-contained drop-in build. It is
+  generated locally and embeds the rig's data.
 
 Serve the crate directory and open a demo:
 
@@ -76,5 +76,4 @@ node chine-web/scripts/serve.js chine-web 8090
 # then open http://localhost:8090/examples/diamond.html
 ```
 
-Spine example rigs are not committed; provide your own assets under
-`examples/`.
+Spine example rigs are not committed. Put your own assets under `examples/`.
