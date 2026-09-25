@@ -4,7 +4,7 @@
 //! [`render`] walks a skeleton's slots in draw order and emits a
 //! [`RenderCommand`] per visible attachment: world-space positions, page UVs,
 //! triangles, tint, blend mode, and atlas page. The host uploads these to the
-//! GPU; chine does no rendering itself. Call [`bind_atlas`] once after loading
+//! GPU. chine does no rendering itself. Call [`bind_atlas`] once after loading
 //! so attachment UVs and page indices are resolved against the atlas.
 //!
 //! A render loop should hold a [`RenderScratch`] and call [`render_with`]
@@ -262,7 +262,7 @@ impl<'a> Binder<'a> {
 }
 
 /// The bound UVs and page of a sequenced attachment at the slot's frame index
-/// (`-1` uses the attachment's setup index); `None` for a non-sequenced
+/// (`-1` uses the attachment's setup index), or `None` for a non-sequenced
 /// attachment (so the caller falls back to the static UVs).
 fn sequence_frame(seq: Option<&Sequence>, slot_index: i32) -> Option<(&[f32], usize)> {
     let seq = seq?;
@@ -279,7 +279,7 @@ fn sequence_frame(seq: Option<&Sequence>, slot_index: i32) -> Option<(&[f32], us
 /// Call [`Skeleton::update_world_transform`] first (to pose the bones) and
 /// [`bind_atlas`] once at load time (to resolve UVs). Walks the skeleton's
 /// runtime draw order, reading each slot's current attachment and tint (driven
-/// by slot timelines); the blend mode comes from the setup data.
+/// by slot timelines). The blend mode comes from the setup data.
 #[must_use]
 pub fn render(skeleton: &Skeleton) -> Vec<RenderCommand> {
     let mut out = Vec::new();
@@ -290,7 +290,7 @@ pub fn render(skeleton: &Skeleton) -> Vec<RenderCommand> {
 /// Build the skeleton's draw-order render commands into `out`, which is cleared
 /// first. A render loop should keep one buffer and call this every frame to
 /// reuse its capacity, rather than calling [`render`] and allocating a fresh
-/// `Vec` each frame; to also reuse the commands' own buffers and the clipper's
+/// `Vec` each frame. To also reuse the commands' own buffers and the clipper's
 /// internals, hold a [`RenderScratch`] and call [`render_with`] instead.
 pub fn render_into(skeleton: &Skeleton, out: &mut Vec<RenderCommand>) {
     out.clear();
@@ -631,7 +631,7 @@ mod tests {
         assert_eq!(buf[0].triangles, fresh[0].triangles);
     }
 
-    /// Slot 0: a clipping square `[0,10]^2`; slot 1: a mesh triangle that
+    /// Slot 0: a clipping square `[0,10]^2`. Slot 1: a mesh triangle that
     /// spills past it. The clip ends on slot 1 ("m"), so the mesh is masked.
     fn clipped_skeleton() -> Skeleton {
         let mut skin = Skin::new("default");
@@ -694,7 +694,7 @@ mod tests {
     fn clipping_masks_a_following_slot() {
         let sk = clipped_skeleton();
         let cmds = render(&sk);
-        // The clip attachment emits nothing; only the masked mesh remains.
+        // The clip attachment emits nothing. Only the masked mesh remains.
         assert_eq!(cmds.len(), 1);
         let c = &cmds[0];
         // The mesh overflowed the square, so clipping bounded it and introduced

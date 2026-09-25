@@ -4,7 +4,7 @@
 //! constrained bones via a configurable property map: each source property
 //! (rotate / x / y / scaleX / scaleY / shearY) drives one or more target
 //! properties, scaled and offset. World-target constraints modify the
-//! constrained bones' world matrices directly; local-target ones modify their
+//! constrained bones' world matrices directly. Local-target ones modify their
 //! local pose. It re-implements Spine 4.3's `TransformConstraintData`.
 
 use core::f32::consts::{PI, TAU};
@@ -168,7 +168,7 @@ struct SourcePose {
 
 /// Apply transform constraint `c`, copying the source bone's mapped properties
 /// onto the constrained bones. World-target writes modify the bones' world
-/// matrices; local-target writes modify their local pose (recomputed by the
+/// matrices. Local-target writes modify their local pose (recomputed by the
 /// update cache). An out-of-range constraint or source index skips the
 /// constraint, and an out-of-range constrained bone is skipped.
 pub(crate) fn solve(

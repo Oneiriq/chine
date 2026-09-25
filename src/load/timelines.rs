@@ -631,7 +631,7 @@ impl CurveBuilder for DeformTimeline {
 }
 
 /// Apply one keyframe's `curve` field (absent = linear, `"stepped"`, or a Bezier
-/// array; the array holds 4 floats per value channel at offset `value_ord * 4`).
+/// array, which holds 4 floats per value channel at offset `value_ord * 4`).
 /// Mirrors Spine's `readCurve`.
 #[allow(clippy::too_many_arguments)]
 fn read_curve(
@@ -711,7 +711,7 @@ fn read_curve_timeline(
     (tl, duration)
 }
 
-/// Read an IK constraint timeline: mix and softness are Bezier-curved; bend
+/// Read an IK constraint timeline: mix and softness are Bezier-curved. Bend
 /// direction, compress, and stretch are stored stepped.
 fn read_ik_timeline(keys: &[Value], constraint: usize) -> (ConstraintTimeline, f32) {
     let n = keys.len();
@@ -781,7 +781,7 @@ fn read_slot_rgba_timeline(keys: &[Value], slot: usize) -> (ConstraintTimeline, 
 }
 
 /// Read a slot RGB color timeline (three channels from each keyframe's `color`
-/// hex string; the slot's alpha is left unchanged).
+/// hex string, and the slot's alpha is left unchanged).
 fn read_slot_rgb_timeline(keys: &[Value], slot: usize) -> (ConstraintTimeline, f32) {
     let n = keys.len();
     let mut tl = ConstraintTimeline::new(slot, n, n * 3, 4);

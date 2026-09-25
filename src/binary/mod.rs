@@ -205,7 +205,7 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
     }
 
     // String table: names (attachments, events, ...) the later sections refer to
-    // by index. Consumed here; used once those sections are read.
+    // by index. Consumed here and used once those sections are read.
     let string_count = r.count();
     let strings: Vec<String> = (0..string_count)
         .map(|_| r.string().unwrap_or_default())
@@ -233,7 +233,7 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
         if nonessential {
             let _color = r.u32();
             let _icon = r.string();
-            // Spine 4.3 added two editor-only bone floats here; consume them.
+            // Spine 4.3 added two editor-only bone floats here. Consume them.
             let _f0 = r.float();
             let _f1 = r.float();
             let _visible = r.bool();
@@ -293,7 +293,7 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
     status(&r)?;
 
     // Constraints are one typed list. Each begins with a name and a one-byte
-    // type (Spine 4.3: IK=0, path=1, transform=2, physics=3, slider=4); there
+    // type (Spine 4.3: IK=0, path=1, transform=2, physics=3, slider=4). There
     // is no explicit order (it is the read order across all types). IK packs
     // its flags into one byte and stores only non-default mix/softness.
     let constraint_count = r.count();
@@ -470,7 +470,7 @@ fn parse_slider(
     data.additive = flags & 4 != 0;
     if flags & 8 != 0 {
         let value = r.float();
-        // When nonessential, this float is the editor maximum; otherwise it is
+        // When nonessential, this float is the editor maximum. Otherwise it is
         // the setup-pose slider time.
         if nonessential && flags & 64 != 0 {
             data.max = value;
@@ -549,7 +549,7 @@ fn parse_path(r: &mut BinaryReader, name: String, order: usize) -> PathConstrain
 }
 
 /// Parse one physics constraint (Spine 4.3 bit-packed layout). A negative packed
-/// scale-X encodes the Y-scale mode; chine loads at scale 1.
+/// scale-X encodes the Y-scale mode. chine loads at scale 1.
 fn parse_physics(r: &mut BinaryReader, name: String, order: usize) -> PhysicsConstraintData {
     let bone = r.var_usize();
     let flags = r.byte();
@@ -635,7 +635,7 @@ fn to_prop_byte(b: u8) -> Option<ToProp> {
 }
 
 /// Parse one transform constraint (Spine 4.3 property-mapping layout). The flags
-/// byte's high bits hold the source-property count; offsets default to 0 and
+/// byte's high bits hold the source-property count. Offsets default to 0 and
 /// mixes to 1 when their flag is clear. chine loads at scale 1.
 fn parse_transform(r: &mut BinaryReader, name: String, order: usize) -> TransformConstraintData {
     let bone_count = r.count();

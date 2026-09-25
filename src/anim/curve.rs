@@ -26,7 +26,7 @@ type BezierTable = [f32; BEZIER_SIZE];
 /// Shared keyframe storage with stepped / linear / Bezier interpolation.
 #[derive(Debug, Clone)]
 pub(crate) struct Curve {
-    /// Interleaved `[time, v1, (v2)]` per frame; `entries` floats per frame.
+    /// Interleaved `[time, v1, (v2)]` per frame, with `entries` floats per frame.
     frames: Vec<f32>,
     /// Per-frame interpolation type, followed by packed Bezier segments.
     curves: Vec<f32>,

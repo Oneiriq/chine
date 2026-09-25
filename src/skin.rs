@@ -1,7 +1,7 @@
 //! Skins: named sets of attachments.
 //!
 //! A [`Skin`] maps `(slot index, attachment name)` to an [`Attachment`]. A
-//! skeleton's *default* skin holds its base attachments; *named* skins (e.g.
+//! skeleton's *default* skin holds its base attachments. *Named* skins (e.g.
 //! character variants) override or add to it. Resolving an attachment checks
 //! the active skin first, then the default.
 

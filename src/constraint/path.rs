@@ -10,7 +10,7 @@
 //! at slightly different points than in Spine.
 //!
 //! Path constraints modify the constrained bones' **world** transforms, like
-//! world-mode transform constraints; the update cache recomputes descendants.
+//! world-mode transform constraints. The update cache recomputes descendants.
 
 use core::f32::consts::{PI, TAU};
 
@@ -358,8 +358,8 @@ fn compute_world_positions(
     let spaces_count = spaces.len();
     let vertices_length = world_pts.len() * 2;
 
-    // Build the flat working vertex array (skips the leading control point;
-    // closed paths wrap the start back onto the end).
+    // Build the flat working vertex array (skips the leading control point,
+    // and closed paths wrap the start back onto the end).
     let mut world: Vec<f32> = Vec::new();
     let curve_count = if closed {
         let [first, second, ..] = world_pts else {

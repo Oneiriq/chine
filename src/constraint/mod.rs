@@ -2,10 +2,10 @@
 //!
 //! Constraints run inside [`crate::skel::Skeleton::update_world_transform`],
 //! after the FK pass and in their defined order. Each adjusts the *local* pose
-//! of its constrained bones; those bones are then re-solved by FK. Because the
+//! of its constrained bones. Those bones are then re-solved by FK. Because the
 //! local pose is modified in place, the host must reset bones to their setup or
 //! animated pose each frame before posing (Spine separates an animated pose from
-//! an applied pose; chine collapses them by re-applying the pose every frame).
+//! an applied pose, and chine collapses them by re-applying the pose every frame).
 //!
 //! Each constraint kind lives in its own submodule: [`ik`], [`transform`],
 //! [`path`], [`physics`], and [`slider`].

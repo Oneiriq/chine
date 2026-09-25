@@ -71,7 +71,7 @@ fn unweighted_mesh_follows_its_bone() {
 
 #[test]
 fn weighted_mesh_blends_two_bones() {
-    // Two roots at (0,0) and (100,0); a vertex weighted 50/50 lands at the
+    // Two roots at (0,0) and (100,0). A vertex weighted 50/50 lands at the
     // midpoint of where each bone places its local origin.
     let data = SkeletonData {
         bones: vec![
@@ -200,7 +200,7 @@ fn linked_mesh_borrows_parent_geometry() {
     let link =
         LinkedMeshAttachment::new("wing-blue", "wing-blue", None, "wing", Color::WHITE, true);
     let m = link.resolve(&parent);
-    // Identity stays the link's own; geometry is borrowed from the parent.
+    // Identity stays the link's own. Geometry is borrowed from the parent.
     assert_eq!(m.name, "wing-blue");
     assert_eq!(m.path, "wing-blue");
     assert_eq!(m.triangles, parent.triangles);

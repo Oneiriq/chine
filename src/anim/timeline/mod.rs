@@ -181,7 +181,7 @@ impl DrawOrderTimeline {
 }
 
 /// Compute a draw order from slot offsets, mirroring Spine: each listed slot
-/// moves by its offset; the rest keep their relative order. Shared by the JSON
+/// moves by its offset, and the rest keep their relative order. Shared by the JSON
 /// and binary loaders.
 ///
 /// Spine never exports a slot index past `slot_count`, a slot listed twice, or
@@ -267,7 +267,7 @@ impl SequenceTimeline {
 }
 
 /// A mesh deform timeline: per-keyframe vertex offsets. For an unweighted mesh
-/// they add to the setup vertices; for a weighted mesh the setup is zero and the
+/// they add to the setup vertices. For a weighted mesh the setup is zero and the
 /// offsets add per-influence in `compute_vertices`. Only applies while the slot
 /// shows the matching attachment.
 #[derive(Debug, Clone)]
@@ -412,12 +412,12 @@ pub(crate) enum Timeline {
     SliderTime(ConstraintTimeline),
     /// Slider mix.
     SliderMix(ConstraintTimeline),
-    /// Slot tint color; the index is the slot, the flag whether alpha is keyed
+    /// Slot tint color. The index is the slot, and the flag is whether alpha is keyed
     /// (RGBA vs RGB).
     SlotColor(ConstraintTimeline, bool),
     /// Slot tint alpha only (the slot color's alpha channel).
     SlotAlpha(ConstraintTimeline),
-    /// Slot two-color (light + dark); the flag is whether the light has alpha
+    /// Slot two-color (light + dark). The flag is whether the light has alpha
     /// (RGBA2 vs RGB2).
     SlotTwoColor(ConstraintTimeline, bool),
     /// Slot attachment swap (stepped).
@@ -524,7 +524,7 @@ mod tests {
 
     #[test]
     fn rotate_respects_setup_offset_and_alpha() {
-        // Setup rotation 30; animation keys +60 at full; mix at half weight.
+        // Setup rotation 30. Animation keys +60 at full. Mix at half weight.
         let mut sk = skeleton(30.0);
         let mut t = BoneTimeline::one_value(0, 2, 0);
         t.set_frame1(0, 0.0, 0.0);

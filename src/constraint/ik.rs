@@ -1,7 +1,7 @@
 //! Inverse-kinematics constraints.
 //!
 //! An [`IkConstraint`] rotates 1 or 2 bones so the tip of the last bone reaches
-//! toward a target bone. The solver re-implements Spine 4.3's `IkConstraint`; it
+//! toward a target bone. The solver re-implements Spine 4.3's `IkConstraint`. It
 //! reads each bone's world transform and writes
 //! the constrained bones' local rotation (and scale, when stretching).
 
@@ -570,8 +570,8 @@ mod tests {
 
     #[test]
     fn child_of_ik_chain_follows() {
-        // foot is a child of the IK-controlled shin (not itself constrained);
-        // the update cache must recompute it after the IK runs.
+        // foot is a child of the IK-controlled shin (not itself constrained).
+        // The update cache must recompute it after the IK runs.
         let data = SkeletonData {
             bones: vec![
                 bone(0, "root", None, 0.0, 0.0, 0.0),

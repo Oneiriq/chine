@@ -51,13 +51,13 @@ pub(crate) fn spend(budget: &mut usize, cost: usize) -> bool {
 /// Holds the emitted commands (rebuilt in place each frame) and every
 /// intermediate the clipper needs: the clip attachment's world polygon, its
 /// decomposed convex pieces, the ear-clipping working set, and the
-/// Sutherland-Hodgman ping-pong buffers. Keep one scratch per render loop;
-/// once its buffers have grown to the skeleton's working sizes, steady-state
+/// Sutherland-Hodgman ping-pong buffers. Keep one scratch per render loop.
+/// Once its buffers have grown to the skeleton's working sizes, steady-state
 /// rendering of a clipped skeleton performs no heap allocation. Buffers only
-/// grow; dropping the scratch releases them.
+/// grow. Dropping the scratch releases them.
 #[derive(Debug, Default)]
 pub struct RenderScratch {
-    /// Grow-only pool of output commands; a frame's commands are the prefix
+    /// Grow-only pool of output commands. A frame's commands are the prefix
     /// that [`render_with`](crate::render::render_with) returns, overwritten
     /// in place so their buffers keep their capacity.
     pub(crate) commands: Vec<RenderCommand>,
@@ -79,7 +79,7 @@ pub struct RenderScratch {
 }
 
 impl RenderScratch {
-    /// An empty scratch; its buffers grow on first use.
+    /// An empty scratch. Its buffers grow on first use.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -229,7 +229,7 @@ fn corners(src: &RenderCommand, tri: &[u16; 3]) -> Option<[ClipVertex; 3]> {
 
 /// Sutherland-Hodgman clip of one triangle against a convex polygon (CCW),
 /// leaving the clipped polygon's vertices (with interpolated UVs) in
-/// `subject`; `clipped` is the per-edge ping-pong buffer. Fewer than three
+/// `subject`. `clipped` is the per-edge ping-pong buffer. Fewer than three
 /// remaining vertices means the triangle was clipped away.
 fn clip_triangle(
     subject: &mut Vec<ClipVertex>,
@@ -402,7 +402,7 @@ fn point_in_triangle(p: Vec2, a: Vec2, b: Vec2, c: Vec2) -> bool {
     !(has_neg && has_pos)
 }
 
-/// Signed area (doubled) of triangle `p, a, b`; its sign gives the turn side.
+/// Signed area (doubled) of triangle `p, a, b`. Its sign gives the turn side.
 fn tri_sign(p: Vec2, a: Vec2, b: Vec2) -> f32 {
     (p.x - b.x) * (a.y - b.y) - (a.x - b.x) * (p.y - b.y)
 }
@@ -438,7 +438,7 @@ mod tests {
         ALLOCATIONS.with(Cell::get)
     }
 
-    // SAFETY: delegates every operation directly to `System`; the counter is a
+    // SAFETY: delegates every operation directly to `System`. The counter is a
     // const-initialized thread-local `Cell`, which does not itself allocate.
     unsafe impl GlobalAlloc for CountingAlloc {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
@@ -674,7 +674,7 @@ mod tests {
 
     #[test]
     fn concave_clip_decomposes_and_excludes_the_notch() {
-        // L-shape (concave); the top-right region (x>4, y>4) is outside it.
+        // L-shape (concave). The top-right region (x>4, y>4) is outside it.
         let mut l = vec![
             Vec2::new(0.0, 0.0),
             Vec2::new(10.0, 0.0),

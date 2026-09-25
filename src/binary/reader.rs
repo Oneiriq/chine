@@ -2,7 +2,7 @@
 //!
 //! [`BinaryReader`] provides the format's primitive reads (big-endian ints and
 //! floats, variable-length integers, length-prefixed strings) over a byte
-//! slice. The primitives are stable across Spine 4.x; the section layouts that
+//! slice. The primitives are stable across Spine 4.x. The section layouts that
 //! consume them live in the parent module.
 
 use super::BinaryError;
@@ -58,7 +58,7 @@ impl<'a> BinaryReader<'a> {
     }
 
     /// Record the first structural error seen. Truncation is tracked separately
-    /// by [`Self::overran`]; later errors do not overwrite the first.
+    /// by [`Self::overran`]. Later errors do not overwrite the first.
     pub fn fail(&mut self, error: BinaryError) {
         if self.error.is_none() {
             self.error = Some(error);

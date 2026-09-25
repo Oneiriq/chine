@@ -3,7 +3,7 @@
 //! A Spine export can declare a "linked mesh" that borrows another mesh's
 //! vertices, triangles, and UVs (only its color, sequence, and deform differ).
 //! Both the JSON and binary loaders build [`LinkedMeshAttachment`] placeholders
-//! while reading skins; this pass replaces each with the concrete
+//! while reading skins. This pass replaces each with the concrete
 //! [`MeshAttachment`] it resolves to, once every skin is loaded and before any
 //! deform timeline binds to it.
 //!
@@ -71,7 +71,7 @@ fn resolve_skin(
                 };
                 *budget = rest;
                 let mut m = lm.resolve(parent);
-                // An inheriting link shares the parent's deform source; otherwise
+                // An inheriting link shares the parent's deform source. Otherwise
                 // it uses its own skin's deforms.
                 m.deform_skin = if lm.inherit_deform {
                     parent.deform_skin.clone()

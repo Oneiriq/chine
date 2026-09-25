@@ -5,7 +5,7 @@
 //! attachments, animations, and IK / transform / path / physics / slider
 //! constraints. (The binary `.skel` loader lives in the `binary` module.)
 //!
-//! Region attachments are parsed with their transform but without UVs; those
+//! Region attachments are parsed with their transform but without UVs. Those
 //! are filled in once an [`crate::atlas::Atlas`] is bound (the UV/offset layout
 //! depends on the packed region).
 

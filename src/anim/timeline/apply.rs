@@ -172,7 +172,7 @@ pub(super) fn apply_shear(
 }
 
 /// Apply a single-axis bone timeline. Translation and shear axes add to the
-/// setup; scale axes multiply it with sign-aware mixing.
+/// setup. Scale axes multiply it with sign-aware mixing.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn apply_bone_axis(
     t: &BoneTimeline,
@@ -283,7 +283,7 @@ fn scale_channel(
     }
 }
 
-/// IK constraint timeline: mix and softness are interpolated; bend direction,
+/// IK constraint timeline: mix and softness are interpolated. Bend direction,
 /// compress, and stretch are stepped (read from the frame).
 pub(super) fn apply_ik(
     t: &ConstraintTimeline,
@@ -559,7 +559,7 @@ fn property_global(data: &PhysicsConstraintData, property: PhysicsProperty) -> b
 }
 
 /// Apply one physics tunable to a single constraint pose. Mass is animated as a
-/// mass value but stored inverted; wind and gravity blend additively.
+/// mass value but stored inverted. Wind and gravity blend additively.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn apply_physics_one(
     pose: &mut PhysicsConstraint,

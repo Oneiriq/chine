@@ -1,8 +1,8 @@
 //! A minimal WebGL2 renderer for chine's [`RenderCommand`] stream.
 //!
-//! Each command is a textured, tinted triangle list referencing one atlas page;
-//! the renderer uploads its geometry, binds the page texture, selects the blend
-//! mode, and draws. chine stays renderer-agnostic; this is the web GPU backend.
+//! Each command is a textured, tinted triangle list referencing one atlas page.
+//! The renderer uploads its geometry, binds the page texture, selects the blend
+//! mode, and draws. chine stays renderer-agnostic. This is the web GPU backend.
 
 use chine::data::BlendMode;
 use chine::render::RenderCommand;
@@ -128,7 +128,7 @@ impl GlRenderer {
     }
 
     /// Upload one atlas-page image as a texture. Pages must be added in chine
-    /// page order; `pma` is the page's premultiplied-alpha flag.
+    /// page order. `pma` is the page's premultiplied-alpha flag.
     ///
     /// # Errors
     /// Returns a message if the texture cannot be created or uploaded.
@@ -380,7 +380,7 @@ mod tests {
 
     #[test]
     fn blend_factors_follow_spines_table() {
-        // Premultiplied normal/additive use ONE for the source factor; straight
+        // Premultiplied normal/additive use ONE for the source factor. Straight
         // alpha uses SRC_ALPHA.
         assert_eq!(
             blend_factors(BlendMode::Normal, true),

@@ -2,10 +2,10 @@
 //!
 //! [`RegionAttachment`] (a textured quad on one bone) and [`MeshAttachment`] (a
 //! textured mesh whose vertices may be weighted across several bones) are the
-//! renderable types; [`PathAttachment`] holds the Bezier control points that
+//! renderable types. [`PathAttachment`] holds the Bezier control points that
 //! path constraints follow. Bounding-box and point attachments are exposed as
-//! geometry/transform data; linked meshes resolve to their parent's geometry at
-//! load time; clipping attachments mask the slots they cover with a polygon.
+//! geometry/transform data. Linked meshes resolve to their parent's geometry at
+//! load time. Clipping attachments mask the slots they cover with a polygon.
 
 use glam::Vec2;
 
@@ -80,7 +80,7 @@ struct SequenceFrame {
 }
 
 impl Sequence {
-    /// A sequence with the given counts and setup frame; its per-frame UVs are
+    /// A sequence with the given counts and setup frame. Its per-frame UVs are
     /// resolved at bind time.
     #[must_use]
     pub fn new(count: usize, start: usize, digits: usize, setup_index: usize) -> Self {
@@ -293,7 +293,7 @@ impl RegionAttachment {
 pub enum MeshVertices {
     /// Each vertex is `[x, y]` in the slot bone's local space.
     Unweighted(Vec<f32>),
-    /// Weighted skinning. `bones` is, per vertex, `[count, boneIndex...]`;
+    /// Weighted skinning. `bones` is, per vertex, `[count, boneIndex...]`.
     /// `vertices` is, per influence, `[vx, vy, weight]`.
     Weighted {
         /// Per-vertex bone-influence layout: `[count, boneIndex...]`.
@@ -360,7 +360,7 @@ impl MeshAttachment {
     }
 
     /// Compute world-space positions for every vertex. `slot_bone` is the index
-    /// of the bone the slot follows (used for unweighted meshes); `deform`
+    /// of the bone the slot follows (used for unweighted meshes). `deform`
     /// overrides the local vertices when non-empty (unweighted only).
     #[must_use]
     pub fn compute_world_vertices(
@@ -451,7 +451,7 @@ impl MeshAttachment {
 
 /// Transform a vertex attachment's bind-pose vertices into world space. Shared
 /// by [`MeshAttachment`] and [`PathAttachment`]: unweighted vertices follow the
-/// slot bone; weighted vertices are a blend across their influence bones.
+/// slot bone, and weighted vertices are a blend across their influence bones.
 fn compute_vertices(
     vertices: &MeshVertices,
     count: usize,
@@ -548,7 +548,7 @@ fn compute_vertices_into(
 
 /// A path attachment: a composite cubic-Bezier curve whose control points are a
 /// vertex set (weighted or not, like a mesh). A path constraint samples
-/// positions and tangents along it; this type provides the control-point
+/// positions and tangents along it. This type provides the control-point
 /// geometry.
 #[derive(Debug, Clone)]
 pub struct PathAttachment {
@@ -601,7 +601,7 @@ impl PathAttachment {
 }
 
 /// A bounding-box attachment: a (weighted or unweighted) polygon used for
-/// collision/hit queries. Not rendered; the host transforms it to world space.
+/// collision/hit queries. It is not rendered. The host transforms it to world space.
 #[derive(Debug, Clone)]
 pub struct BoundingBoxAttachment {
     /// Attachment name (the key within a skin).
@@ -736,8 +736,8 @@ impl LinkedMeshAttachment {
 }
 
 /// A clipping attachment: a polygon that masks the slots from its own slot up to
-/// and including `end_slot` (in draw order). Convex polygons clip exactly;
-/// concave polygons clip against their convex span (a known simplification).
+/// and including `end_slot` (in draw order). Convex polygons clip exactly.
+/// Concave polygons clip against their convex span (a known simplification).
 #[derive(Debug, Clone)]
 pub struct ClippingAttachment {
     /// Attachment name (the key within a skin).

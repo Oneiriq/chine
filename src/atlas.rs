@@ -1,7 +1,7 @@
 //! Spine texture-atlas (`.atlas`) parsing.
 //!
 //! An [`Atlas`] describes how a skeleton's images are packed into one or more
-//! texture [`AtlasPage`]s. `chine` parses the metadata; loading the page images
+//! texture [`AtlasPage`]s. `chine` parses the metadata. Loading the page images
 //! (by [`AtlasPage::name`]) and creating GPU textures is left to the host.
 //!
 //! The current (Spine 4.1+) text format is supported, plus the common legacy
@@ -74,7 +74,7 @@ impl AtlasPage {
 }
 
 /// One packed image region within a page. An attachment's `path` names a
-/// region; its UVs come from the packed rect, its layout from the offsets.
+/// region. Its UVs come from the packed rect, its layout from the offsets.
 #[derive(Debug, Clone)]
 pub struct AtlasRegion {
     /// Region name (the attachment `path` references this).

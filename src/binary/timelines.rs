@@ -248,7 +248,7 @@ pub(super) fn read_animation(
     let physics_groups = r.count();
     for _ in 0..physics_groups {
         // A stream index of 0 marks a global timeline (the GLOBAL_PHYSICS
-        // sentinel); any other value is one-based.
+        // sentinel). Any other value is one-based.
         let raw = r.var_usize();
         let index = match raw.checked_sub(1) {
             None => GLOBAL_PHYSICS,
@@ -605,7 +605,7 @@ pub(super) fn read_curve_timeline_n(
 
 /// Read an IK constraint timeline (Spine 4.3 flags-packed). Each frame packs mix
 /// presence, softness presence, bend direction, compress, and stretch into one
-/// flags byte (also carrying the following segment's curve type); mix and
+/// flags byte (also carrying the following segment's curve type). Mix and
 /// softness are the two curved channels.
 pub(super) fn read_ik_constraint_timeline(
     r: &mut BinaryReader,
@@ -764,7 +764,7 @@ fn resolve_draw_order(
 
 /// Read an event timeline: per frame a time and the fired event. Each event's
 /// base values come from the skeleton's [`EventData`] (by index) and are
-/// overridden by the keyframe; volume / balance are only stored when the event
+/// overridden by the keyframe. Volume / balance are only stored when the event
 /// has an audio path. An index past the events is corrupt.
 pub(super) fn read_event_timeline(
     r: &mut BinaryReader,

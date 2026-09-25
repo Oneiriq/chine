@@ -6,7 +6,7 @@ use glam::Vec2;
 const EPS: f32 = 1e-4;
 
 fn chain() -> Skeleton {
-    // root at (10, 20); child "arm" offset (5, 0) from root.
+    // root at (10, 20), and child "arm" offset (5, 0) from root.
     let data = SkeletonData {
         bones: vec![
             BoneData {
@@ -58,7 +58,7 @@ fn rotating_root_rotates_and_orbits_child() {
     let mut sk = chain();
     sk.bone_mut(0).unwrap().rotation = 90.0;
     sk.update_world_transform();
-    // root world matrix is a +90deg rotation: [0,-1; 1,0].
+    // root world matrix is a +90deg rotation with rows [0,-1] and [1,0].
     let root = sk.bone(0).unwrap();
     assert!(close(root.a(), 0.0) && close(root.b(), -1.0));
     assert!(close(root.c(), 1.0) && close(root.d(), 0.0));
@@ -93,7 +93,7 @@ fn only_translation_child_ignores_parent_rotation() {
     assert!(close(arm.world_x(), 10.0) && close(arm.world_y(), 25.0));
 }
 
-// A root at the origin with a "tail" child at (10, 0); the physics
+// A root at the origin with a "tail" child at (10, 0). The physics
 // constraint drives the tail's world y under gravity.
 fn physics_skel(gravity: f32) -> Skeleton {
     let data = SkeletonData {
@@ -165,7 +165,7 @@ fn physics_inert_without_forces() {
 #[test]
 fn physics_gravity_droops_and_settles() {
     let mut sk = physics_skel(1.0);
-    // The tail starts at world y = 0; run long enough for the spring to
+    // The tail starts at world y = 0. Run long enough for the spring to
     // settle.
     for _ in 0..600 {
         step_frame(&mut sk);

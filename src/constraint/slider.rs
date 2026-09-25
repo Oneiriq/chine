@@ -155,7 +155,7 @@ pub(crate) fn solve(skel: &mut Skeleton, c: usize) {
         return;
     };
     let duration = animation.duration();
-    // A driving bone computes the scrub time from its property; otherwise the
+    // A driving bone computes the scrub time from its property. Otherwise the
     // (possibly animated) pose time is used directly.
     let mut time = if let (Some(bone_index), Some(property)) = (slider.bone, slider.property) {
         let value = match skel.bone(bone_index) {
@@ -246,7 +246,7 @@ mod tests {
         rot.set_frame1(1, 1.0, 90.0);
         let scrub = Animation::new("scrub", 1.0, vec![Timeline::Rotate(rot)]);
 
-        // A bone-less slider scrubbing that animation; its time comes from a
+        // A bone-less slider scrubbing that animation. Its time comes from a
         // SLIDER_TIME timeline rather than a bone.
         let slider = SliderData {
             name: "s".into(),

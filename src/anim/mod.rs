@@ -6,10 +6,11 @@
 //! track.
 //! Interpolation and blending re-implement Spine 4.3's behavior.
 //!
-//! Covered: every Spine 4.3 timeline (bone rotate / translate / scale / shear
-//! and single-axis variants; IK / transform / path / physics / slider mixes;
-//! slot color / alpha / two-color / attachment / draw-order; deform; events;
-//! sequences) plus multi-track playback with crossfade mixing and a queue.
+//! Covered: every Spine 4.3 timeline plus multi-track playback with crossfade
+//! mixing and a queue. The timelines are bone rotate / translate / scale / shear
+//! and single-axis variants, IK / transform / path / physics / slider mixes,
+//! slot color / alpha / two-color / attachment / draw-order, deform, events, and
+//! sequences.
 
 mod channels;
 mod curve;

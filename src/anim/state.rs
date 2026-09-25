@@ -1,6 +1,6 @@
 //! Multi-track animation playback with crossfade mixing.
 //!
-//! [`AnimationState`] holds a stack of tracks; each [`TrackEntry`] plays one
+//! [`AnimationState`] holds a stack of tracks. Each [`TrackEntry`] plays one
 //! animation, and higher tracks layer over lower ones. Setting a new animation
 //! on a track while [`AnimationState::default_mix`] is non-zero crossfades from
 //! the previous animation over that duration.
@@ -205,7 +205,7 @@ impl AnimationState {
     }
 
     /// Queue `animation` on track 0 after the current animation and any already
-    /// queued; it crossfades in over [`Self::default_mix`] as the previous one
+    /// queued. It crossfades in over [`Self::default_mix`] as the previous one
     /// ends.
     pub fn add_animation(&mut self, animation: Arc<Animation>, looping: bool) {
         self.add_animation_on(0, animation, looping);
@@ -377,7 +377,7 @@ mod tests {
         state.apply(&mut sk);
         assert!((sk.bone(0).unwrap().rotation - 0.0).abs() < 1e-4);
 
-        // Switch to rotation 90 with a crossfade; halfway is ~45.
+        // Switch to rotation 90 with a crossfade. Halfway is ~45.
         state.set_animation(hold(90.0), true);
         state.update(0.5);
         sk.set_bones_to_setup_pose();
@@ -403,7 +403,7 @@ mod tests {
     fn higher_tracks_layer_over_lower() {
         let mut sk = one_bone();
         let mut state = AnimationState::new();
-        // Track 0 holds 100; track 1 layers 20 at half weight over it.
+        // Track 0 holds 100. Track 1 layers 20 at half weight over it.
         state.set_animation_on(0, hold(100.0), true);
         state.set_animation_on(1, hold(20.0), true).alpha = 0.5;
         sk.set_bones_to_setup_pose();

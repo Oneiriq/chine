@@ -230,7 +230,7 @@ pub struct Skeleton {
     sliders: Vec<SliderPose>,
     slots: Vec<Slot>,
     draw_order: Vec<usize>,
-    // Active named skin (index into `data.skins`); `None` uses the default skin.
+    // Active named skin (index into `data.skins`). `None` uses the default skin.
     skin: Option<usize>,
     events: Vec<Event>,
     update_cache: Vec<Updatable>,

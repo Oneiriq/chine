@@ -111,7 +111,7 @@ pub(super) fn deform_mesh_info(
 }
 
 /// Read a mesh-deform timeline into chine's relative-offset model: per frame a
-/// time and a sparse run of vertex offsets (zeros elsewhere; the setup vertices
+/// time and a sparse run of vertex offsets (zeros elsewhere, and the setup vertices
 /// are added at apply time), with stepped / linear / Bezier curves. The offsets
 /// are read raw, never adding the setup, which matches the JSON loader. A run
 /// that ends past the mesh's `frame_len` deform values is corrupt.
