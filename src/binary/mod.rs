@@ -55,8 +55,10 @@ pub enum BinaryError {
         /// The `major.minor` release this loader reads.
         expected: &'static str,
     },
-    /// A list declared more items than the remaining bytes could hold. Since
-    /// every item occupies at least one byte, the declared length is corrupt.
+    /// A length or index in the data is out of range. Either a list declared
+    /// more items than the remaining bytes could hold (every item takes at
+    /// least one byte), or a stored index, such as a bone parent, a slot, or a
+    /// constraint target, points past the table it names.
     CorruptLength,
     /// A constraint carried an unrecognized type tag (valid tags are 0 to 4).
     UnknownConstraintType(u8),
@@ -75,7 +77,7 @@ impl std::fmt::Display for BinaryError {
                 )
             }
             BinaryError::CorruptLength => {
-                write!(f, "a list length exceeds the remaining data")
+                write!(f, "a length or index in the skeleton data is out of range")
             }
             BinaryError::UnknownConstraintType(tag) => {
                 write!(f, "unknown constraint type tag {tag}")
