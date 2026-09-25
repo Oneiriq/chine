@@ -4,20 +4,22 @@
 //!
 //! Usage: `cargo run --example inspect -- skeleton.json atlas.atlas`
 
+use std::error::Error;
 use std::sync::Arc;
 
-fn main() {
+fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().collect();
-    assert!(
-        args.len() >= 3,
-        "usage: inspect <skeleton.json> <atlas.atlas>"
-    );
+    let [_, json_path, atlas_path, ..] = args.as_slice() else {
+        return Err("usage: inspect <skeleton.json> <atlas.atlas>".into());
+    };
 
-    let json = std::fs::read_to_string(&args[1]).expect("read json");
-    let atlas_text = std::fs::read_to_string(&args[2]).expect("read atlas");
+    let json = std::fs::read_to_string(json_path)
+        .map_err(|e| format!("cannot read skeleton {json_path}: {e}"))?;
+    let atlas_text = std::fs::read_to_string(atlas_path)
+        .map_err(|e| format!("cannot read atlas {atlas_path}: {e}"))?;
 
     let atlas = chine::atlas::Atlas::parse(&atlas_text);
-    let mut data = chine::load::from_json(&json).expect("load skeleton");
+    let mut data = chine::load::from_json(&json)?;
     chine::render::bind_atlas(&mut data, &atlas);
 
     println!(
@@ -57,4 +59,5 @@ fn main() {
         }
     }
     println!("OK");
+    Ok(())
 }
