@@ -20,6 +20,10 @@ use crate::data::{BoneData, Color, Inherit, SkeletonData, SlotData};
 use crate::event::Event;
 use crate::skin::Skin;
 
+mod cache;
+
+use cache::{build_update_cache, valid_parent, Updatable};
+
 /// Degrees-to-radians factor.
 const DEG_RAD: f32 = core::f32::consts::PI / 180.0;
 /// Below this squared length the `NoRotationOrReflection` branch treats the
@@ -59,9 +63,11 @@ pub struct Bone {
 }
 
 impl Bone {
-    fn from_data(data: &BoneData) -> Self {
+    /// A bone at `data`'s setup pose in a rig of `bone_count` bones. A parent
+    /// index outside the rig is dropped, so the bone poses as a root.
+    fn from_data(data: &BoneData, bone_count: usize) -> Self {
         let mut bone = Self {
-            parent: data.parent,
+            parent: valid_parent(data.parent, bone_count),
             inherit: data.inherit,
             x: 0.0,
             y: 0.0,
@@ -244,7 +250,12 @@ impl Skeleton {
     /// Instantiate a skeleton from shared rig data, posed at the setup pose.
     #[must_use]
     pub fn new(data: Arc<SkeletonData>) -> Self {
-        let bones = data.bones.iter().map(Bone::from_data).collect();
+        let bone_count = data.bones.len();
+        let bones = data
+            .bones
+            .iter()
+            .map(|b| Bone::from_data(b, bone_count))
+            .collect();
         let ik_constraints = data
             .ik_constraints
             .iter()
@@ -421,9 +432,13 @@ impl Skeleton {
         Some((slot, setup))
     }
 
-    /// A slider's runtime pose (its current scrub time and mix).
+    /// A slider's runtime pose (its current scrub time and mix). An unknown
+    /// index reads as a pose with zero mix, which applies nothing.
     pub(crate) fn slider_pose(&self, c: usize) -> SliderPose {
-        self.sliders[c]
+        self.sliders.get(c).copied().unwrap_or(SliderPose {
+            time: 0.0,
+            mix: 0.0,
+        })
     }
 
     /// A slider's mutable pose paired with its setup data, for the animation
@@ -521,45 +536,62 @@ impl Skeleton {
     pub fn update_world_transform(&mut self) {
         let reference_scale = self.data.reference_scale;
         let time = self.time;
+        // The cache only names bones and constraints of this rig (see
+        // `build_update_cache`), so the lookups below always succeed. They are
+        // checked anyway, and a miss skips the entry.
         let len = self.update_cache.len();
         for k in 0..len {
-            match self.update_cache[k] {
+            let Some(&entry) = self.update_cache.get(k) else {
+                break;
+            };
+            match entry {
                 Updatable::Bone(i) => self.fk_one(i),
-                Updatable::Ik(c) => ik::solve(
-                    &mut self.bones,
-                    &self.data,
-                    c,
-                    &self.ik_constraints[c],
-                    self.scale_x,
-                    self.scale_y,
-                ),
-                Updatable::Transform(c) => transform::solve(
-                    &mut self.bones,
-                    &self.data,
-                    c,
-                    &self.transform_constraints[c],
-                    self.scale_x,
-                    self.scale_y,
-                ),
+                Updatable::Ik(c) => {
+                    if let Some(pose) = self.ik_constraints.get(c) {
+                        ik::solve(
+                            &mut self.bones,
+                            &self.data,
+                            c,
+                            pose,
+                            self.scale_x,
+                            self.scale_y,
+                        );
+                    }
+                }
+                Updatable::Transform(c) => {
+                    if let Some(pose) = self.transform_constraints.get(c) {
+                        transform::solve(
+                            &mut self.bones,
+                            &self.data,
+                            c,
+                            pose,
+                            self.scale_x,
+                            self.scale_y,
+                        );
+                    }
+                }
                 Updatable::Path(c) => {
-                    let pose = self.path_constraints[c];
-                    path::solve(self, c, pose);
+                    if let Some(&pose) = self.path_constraints.get(c) {
+                        path::solve(self, c, pose);
+                    }
                 }
                 Updatable::Physics(c) => {
-                    let mode = if self.physics_constraints[c].take_pending_reset() {
-                        Physics::Reset
-                    } else {
-                        Physics::Update
-                    };
-                    physics::solve(
-                        &mut self.bones,
-                        &self.data,
-                        c,
-                        &mut self.physics_constraints[c],
-                        time,
-                        reference_scale,
-                        mode,
-                    );
+                    if let Some(pose) = self.physics_constraints.get_mut(c) {
+                        let mode = if pose.take_pending_reset() {
+                            Physics::Reset
+                        } else {
+                            Physics::Update
+                        };
+                        physics::solve(
+                            &mut self.bones,
+                            &self.data,
+                            c,
+                            pose,
+                            time,
+                            reference_scale,
+                            mode,
+                        );
+                    }
                 }
                 Updatable::Slider(c) => slider::solve(self, c),
             }
@@ -567,13 +599,17 @@ impl Skeleton {
     }
 
     /// Compute the world transform for bone `i` from its local pose and parent.
+    /// An unknown bone is ignored.
     fn fk_one(&mut self, i: usize) {
         let (sx, sy) = (self.scale_x, self.scale_y);
         let (skel_x, skel_y) = (self.x, self.y);
-        let world = match self.bones[i].parent {
-            None => root_world(&self.bones[i], skel_x, skel_y, sx, sy),
-            Some(p) => {
-                let parent = &self.bones[p];
+        let Some(bone) = self.bones.get(i) else {
+            return;
+        };
+        // `Skeleton::new` drops out-of-range parents, so a named parent exists.
+        let world = match bone.parent.and_then(|p| self.bones.get(p)) {
+            None => root_world(bone, skel_x, skel_y, sx, sy),
+            Some(parent) => {
                 let pose = ParentPose {
                     a: parent.a,
                     b: parent.b,
@@ -582,10 +618,12 @@ impl Skeleton {
                     world_x: parent.world_x,
                     world_y: parent.world_y,
                 };
-                child_world(&self.bones[i], &pose, sx, sy)
+                child_world(bone, &pose, sx, sy)
             }
         };
-        let bone = &mut self.bones[i];
+        let Some(bone) = self.bones.get_mut(i) else {
+            return;
+        };
         bone.a = world.0;
         bone.b = world.1;
         bone.c = world.2;
@@ -723,251 +761,6 @@ fn child_world(b: &Bone, p: &ParentPose, sx: f32, sy: f32) -> World {
                 world_y,
             )
         }
-    }
-}
-
-/// One entry in a [`Skeleton`]'s update cache: compute a bone's world transform,
-/// or apply a constraint. Built by [`build_update_cache`] in dependency order.
-#[derive(Debug, Clone, Copy)]
-enum Updatable {
-    /// Compute the world transform for the bone at this index.
-    Bone(usize),
-    /// Apply the IK constraint at this index.
-    Ik(usize),
-    /// Apply the transform constraint at this index.
-    Transform(usize),
-    /// Apply the path constraint at this index.
-    Path(usize),
-    /// Apply the physics constraint at this index.
-    Physics(usize),
-    /// Apply the slider constraint at this index.
-    Slider(usize),
-}
-
-/// Build the ordered update cache: a topological interleaving of bone
-/// world-transform updates and constraint applications, mirroring Spine's
-/// `Skeleton.updateCache`. Bones a constraint reads are computed before it;
-/// bones it modifies are recomputed after.
-fn build_update_cache(data: &SkeletonData) -> Vec<Updatable> {
-    let n = data.bones.len();
-    let parents: Vec<Option<usize>> = data.bones.iter().map(|b| b.parent).collect();
-    let mut children: Vec<Vec<usize>> = vec![Vec::new(); n];
-    for (i, b) in data.bones.iter().enumerate() {
-        if let Some(p) = b.parent {
-            children[p].push(i);
-        }
-    }
-
-    // Merge constraints of all kinds and process them in global order.
-    let mut ordered: Vec<(usize, Updatable)> = Vec::new();
-    for (i, ik) in data.ik_constraints.iter().enumerate() {
-        ordered.push((ik.order, Updatable::Ik(i)));
-    }
-    for (i, tc) in data.transform_constraints.iter().enumerate() {
-        ordered.push((tc.order, Updatable::Transform(i)));
-    }
-    for (i, pc) in data.path_constraints.iter().enumerate() {
-        ordered.push((pc.order, Updatable::Path(i)));
-    }
-    for (i, pc) in data.physics_constraints.iter().enumerate() {
-        ordered.push((pc.order, Updatable::Physics(i)));
-    }
-    for (i, sl) in data.sliders.iter().enumerate() {
-        ordered.push((sl.order, Updatable::Slider(i)));
-    }
-    ordered.sort_by_key(|(order, _)| *order);
-
-    let mut sorted = vec![false; n];
-    let mut cache = Vec::new();
-    for (_, kind) in ordered {
-        match kind {
-            Updatable::Ik(i) => {
-                sort_ik(
-                    &data.ik_constraints[i],
-                    i,
-                    &parents,
-                    &children,
-                    &mut sorted,
-                    &mut cache,
-                );
-            }
-            Updatable::Transform(i) => {
-                sort_transform(
-                    &data.transform_constraints[i],
-                    i,
-                    &parents,
-                    &children,
-                    &mut sorted,
-                    &mut cache,
-                );
-            }
-            Updatable::Path(i) => {
-                let pc = &data.path_constraints[i];
-                let slot_bone = data.slots[pc.slot].bone;
-                sort_path(
-                    pc,
-                    i,
-                    slot_bone,
-                    &parents,
-                    &children,
-                    &mut sorted,
-                    &mut cache,
-                );
-            }
-            Updatable::Physics(i) => {
-                sort_physics(
-                    &data.physics_constraints[i],
-                    i,
-                    &parents,
-                    &children,
-                    &mut sorted,
-                    &mut cache,
-                );
-            }
-            Updatable::Slider(i) => {
-                sort_slider(&data.sliders[i], i, &parents, &mut sorted, &mut cache);
-            }
-            Updatable::Bone(_) => {}
-        }
-    }
-    for i in 0..n {
-        sort_bone(i, &parents, &mut sorted, &mut cache);
-    }
-    cache
-}
-
-/// Sort an IK constraint into the cache: its target and constrained bones are
-/// computed before it, the constrained bones recomputed after.
-fn sort_ik(
-    ik: &IkConstraintData,
-    idx: usize,
-    parents: &[Option<usize>],
-    children: &[Vec<usize>],
-    sorted: &mut [bool],
-    cache: &mut Vec<Updatable>,
-) {
-    let Some(&parent) = ik.bones.first() else {
-        return;
-    };
-    sort_bone(ik.target, parents, sorted, cache);
-    sort_bone(parent, parents, sorted, cache);
-    cache.push(Updatable::Ik(idx));
-    sorted[parent] = false;
-    sort_reset(parent, children, sorted);
-}
-
-/// Sort a transform constraint into the cache. For world targets the
-/// constrained bones are computed before it and kept (their world is the
-/// constraint's output); their descendants are recomputed. For local targets
-/// the constrained bones themselves are recomputed afterward.
-fn sort_transform(
-    tc: &TransformConstraintData,
-    idx: usize,
-    parents: &[Option<usize>],
-    children: &[Vec<usize>],
-    sorted: &mut [bool],
-    cache: &mut Vec<Updatable>,
-) {
-    if !tc.local_source {
-        sort_bone(tc.source, parents, sorted, cache);
-    }
-    let world_target = !tc.local_target;
-    if world_target {
-        for &b in &tc.bones {
-            sort_bone(b, parents, sorted, cache);
-        }
-    }
-    cache.push(Updatable::Transform(idx));
-    for &b in &tc.bones {
-        sort_reset(b, children, sorted);
-    }
-    for &b in &tc.bones {
-        sorted[b] = world_target;
-    }
-}
-
-/// Sort a path constraint into the cache. The slot bone and constrained bones
-/// are computed before it; the constrained bones keep their world (the
-/// constraint's output) and their descendants are recomputed.
-fn sort_path(
-    pc: &PathConstraintData,
-    idx: usize,
-    slot_bone: usize,
-    parents: &[Option<usize>],
-    children: &[Vec<usize>],
-    sorted: &mut [bool],
-    cache: &mut Vec<Updatable>,
-) {
-    sort_bone(slot_bone, parents, sorted, cache);
-    for &b in &pc.bones {
-        sort_bone(b, parents, sorted, cache);
-    }
-    cache.push(Updatable::Path(idx));
-    for &b in &pc.bones {
-        sort_reset(b, children, sorted);
-    }
-    for &b in &pc.bones {
-        sorted[b] = true;
-    }
-}
-
-/// Sort a physics constraint into the cache. Its bone is computed before it;
-/// the constraint then writes that bone's world transform, so the bone keeps
-/// its computed slot (the constraint's output) and only its descendants are
-/// recomputed afterward.
-fn sort_physics(
-    pd: &PhysicsConstraintData,
-    idx: usize,
-    parents: &[Option<usize>],
-    children: &[Vec<usize>],
-    sorted: &mut [bool],
-    cache: &mut Vec<Updatable>,
-) {
-    sort_bone(pd.bone, parents, sorted, cache);
-    cache.push(Updatable::Physics(idx));
-    sort_reset(pd.bone, children, sorted);
-}
-
-/// Add `bone` (and any unsorted ancestors) to the cache once, parents first.
-fn sort_bone(
-    bone: usize,
-    parents: &[Option<usize>],
-    sorted: &mut [bool],
-    cache: &mut Vec<Updatable>,
-) {
-    if sorted[bone] {
-        return;
-    }
-    if let Some(p) = parents[bone] {
-        sort_bone(p, parents, sorted, cache);
-    }
-    sorted[bone] = true;
-    cache.push(Updatable::Bone(bone));
-}
-
-/// Sort a slider into the cache: its source bone is computed before it so its
-/// property can be read; the animation it scrubs is applied when the slider
-/// runs.
-fn sort_slider(
-    slider: &SliderData,
-    i: usize,
-    parents: &[Option<usize>],
-    sorted: &mut [bool],
-    cache: &mut Vec<Updatable>,
-) {
-    if let Some(bone) = slider.bone {
-        sort_bone(bone, parents, sorted, cache);
-    }
-    cache.push(Updatable::Slider(i));
-}
-
-/// Mark `bone`'s descendants unsorted so they are recomputed after a constraint.
-fn sort_reset(bone: usize, children: &[Vec<usize>], sorted: &mut [bool]) {
-    for &child in &children[bone] {
-        if sorted[child] {
-            sort_reset(child, children, sorted);
-        }
-        sorted[child] = false;
     }
 }
 
