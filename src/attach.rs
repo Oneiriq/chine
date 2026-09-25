@@ -45,6 +45,11 @@ pub enum Attachment {
     Clipping(ClippingAttachment),
 }
 
+/// The most zero-padding digits [`Sequence::region_name`] honors. Real exports
+/// use a handful. The cap keeps a hostile `digits` value from allocating a
+/// huge name.
+const MAX_SEQUENCE_DIGITS: usize = 1024;
+
 /// An animated (flipbook) attachment: a run of atlas regions shown over time.
 /// Each region's UVs and atlas page are resolved at bind time and selected per
 /// frame by the slot's sequence index.
@@ -58,13 +63,18 @@ pub struct Sequence {
     pub digits: usize,
     /// Region index shown in the setup pose.
     pub setup_index: usize,
+    /// The bound frames as runs, sorted by first frame index. A run covers
+    /// every frame from its `first` up to the next run's `first`, so frames
+    /// that share UVs and a page (such as a long tail of frames with no atlas
+    /// region) take one entry.
     frames: Vec<SequenceFrame>,
 }
 
-/// One resolved sequence frame: its bound UVs (8 for a region, `2 * vertices`
-/// for a mesh) and atlas page.
+/// One run of bound sequence frames: the first frame index it covers, the
+/// frames' UVs (8 for a region, `2 * vertices` for a mesh), and atlas page.
 #[derive(Debug, Clone)]
 struct SequenceFrame {
+    first: usize,
     uvs: Vec<f32>,
     page: usize,
 }
@@ -84,27 +94,63 @@ impl Sequence {
     }
 
     /// The atlas region name for frame `index`: the base path plus the
-    /// zero-padded `start + index`.
+    /// zero-padded `start + index`. Padding stops at 1024 digits.
     #[must_use]
     pub fn region_name(&self, base: &str, index: usize) -> String {
-        let frame = (self.start + index).to_string();
-        let pad = self.digits.saturating_sub(frame.len());
+        // Summed in u128 so a large `start` cannot overflow.
+        let frame = (self.start as u128 + index as u128).to_string();
+        let pad = self.pad_digits().saturating_sub(frame.len());
         format!("{base}{}{frame}", "0".repeat(pad))
     }
 
-    /// Record a frame's bound UVs and atlas page (called at bind time).
-    pub(crate) fn push_frame(&mut self, uvs: Vec<f32>, page: usize) {
-        self.frames.push(SequenceFrame { uvs, page });
+    /// The zero-padding width [`Self::region_name`] uses.
+    fn pad_digits(&self) -> usize {
+        self.digits.min(MAX_SEQUENCE_DIGITS)
     }
 
-    /// The bound UVs and page for frame `index` (clamped to the resolved range).
-    #[must_use]
-    pub(crate) fn frame(&self, index: usize) -> Option<(&[f32], usize)> {
-        if self.frames.is_empty() {
+    /// The longest name [`Self::region_name`] can return for `base`. A frame
+    /// number (`start + index`) has at most 20 digits.
+    pub(crate) fn max_name_len(&self, base: &str) -> usize {
+        base.len().saturating_add(self.pad_digits().max(20))
+    }
+
+    /// The frame index whose [`Self::region_name`] is `name`, if any. This is
+    /// the inverse of `region_name`, so a bind can match atlas regions to
+    /// frames without generating the name of every frame. The index may be at
+    /// or past `count`.
+    pub(crate) fn frame_index(&self, base: &str, name: &str) -> Option<usize> {
+        let suffix = name.strip_prefix(base)?;
+        if suffix.is_empty() || !suffix.bytes().all(|b| b.is_ascii_digit()) {
             return None;
         }
-        let i = index.min(self.frames.len() - 1);
-        self.frames.get(i).map(|f| (f.uvs.as_slice(), f.page))
+        // `region_name` writes the number without leading zeros ("0" for
+        // zero), then left-pads it with zeros to the padding width.
+        let digits = suffix.trim_start_matches('0');
+        if suffix.len() != self.pad_digits().max(digits.len().max(1)) {
+            return None;
+        }
+        let number: u128 = if digits.is_empty() {
+            0
+        } else {
+            digits.parse().ok()?
+        };
+        let index = number.checked_sub(self.start as u128)?;
+        usize::try_from(index).ok()
+    }
+
+    /// Record the bound UVs and atlas page for the frames from `first` up to
+    /// the next recorded run (called at bind time, with `first` increasing).
+    pub(crate) fn push_frame(&mut self, first: usize, uvs: Vec<f32>, page: usize) {
+        self.frames.push(SequenceFrame { first, uvs, page });
+    }
+
+    /// The bound UVs and page for frame `index`. An index past the last bound
+    /// frame reads the last one.
+    #[must_use]
+    pub(crate) fn frame(&self, index: usize) -> Option<(&[f32], usize)> {
+        let runs_at_or_before = self.frames.partition_point(|f| f.first <= index);
+        let run = self.frames.get(runs_at_or_before.checked_sub(1)?)?;
+        Some((run.uvs.as_slice(), run.page))
     }
 }
 
@@ -214,9 +260,11 @@ impl RegionAttachment {
 
         let pw = page_w.max(1) as f32;
         let ph = page_h.max(1) as f32;
+        // Region edges are summed in u64: atlas values near `u32::MAX` must
+        // not overflow.
         let u = region.x as f32 / pw;
-        let v = (region.y + region.height) as f32 / ph;
-        let u2 = (region.x + region.width) as f32 / pw;
+        let v = (u64::from(region.y) + u64::from(region.height)) as f32 / ph;
+        let u2 = (u64::from(region.x) + u64::from(region.width)) as f32 / pw;
         let v2 = region.y as f32 / ph;
         if region.degrees == 90 {
             self.uvs = [u, v2, u2, v2, u2, v, u, v];
@@ -355,6 +403,21 @@ impl MeshAttachment {
         }
     }
 
+    /// The number of values in this mesh's geometry arrays (UVs, triangles, and
+    /// vertex data): a measure of what a copy of the mesh costs.
+    pub(crate) fn geometry_len(&self) -> usize {
+        let vertices = match &self.vertices {
+            MeshVertices::Unweighted(v) => v.len(),
+            MeshVertices::Weighted { bones, vertices } => {
+                bones.len().saturating_add(vertices.len())
+            }
+        };
+        self.uvs
+            .len()
+            .saturating_add(self.triangles.len())
+            .saturating_add(vertices)
+    }
+
     /// The length of a deform vertex array for this mesh: `2 * vertex_count` for
     /// an unweighted mesh, or `2 *` the total influence count for a weighted one.
     #[must_use]
@@ -396,12 +459,16 @@ fn compute_vertices(
     slot_bone: usize,
     deform: &[f32],
 ) -> Vec<Vec2> {
-    let mut out = Vec::with_capacity(count);
+    let mut out = Vec::new();
     compute_vertices_into(vertices, count, skeleton, slot_bone, deform, &mut out);
     out
 }
 
 /// [`compute_vertices`] into a reused buffer, which is cleared first.
+///
+/// Emits at most `count` vertices, and fewer when the vertex data runs out
+/// first (malformed data): then the buffer holds the vertices that were fully
+/// described.
 fn compute_vertices_into(
     vertices: &MeshVertices,
     count: usize,
@@ -417,36 +484,54 @@ fn compute_vertices_into(
                 return;
             };
             // A deform timeline overrides the local vertices for unweighted
-            // meshes.
-            let local = if deform.len() >= count * 2 { deform } else { v };
+            // meshes when it covers every vertex.
+            let local = if deform.len() / 2 >= count { deform } else { v };
             let (a, b, c, d) = (bone.a(), bone.b(), bone.c(), bone.d());
             let (wx, wy) = (bone.world_x(), bone.world_y());
-            for i in 0..count {
-                let vx = local[i * 2];
-                let vy = local[i * 2 + 1];
+            let (pairs, _) = local.as_chunks::<2>();
+            let pairs = pairs.get(..count).unwrap_or(pairs);
+            out.reserve(pairs.len());
+            for &[vx, vy] in pairs {
                 out.push(Vec2::new(vx * a + vy * b + wx, vx * c + vy * d + wy));
             }
         }
         MeshVertices::Weighted { bones, vertices } => {
+            // Each vertex takes at least one entry of `bones`, which bounds
+            // the reservation.
+            out.reserve(count.min(bones.len()));
             // A deform timeline adds a per-influence offset to each bind vertex.
-            let mut bi = 0;
-            let mut vi = 0;
+            let mut bi: usize = 0;
+            let mut vi: usize = 0;
             let mut fi = 0;
             for _ in 0..count {
-                let influences = bones[bi];
-                bi += 1;
+                // The vertex's influence count, then that many bone indices,
+                // then three bind values per influence. Stop at the first
+                // vertex the data does not fully describe.
+                let Some(&influences) = bones.get(bi) else {
+                    break;
+                };
+                let bone_ids = bi
+                    .checked_add(1)
+                    .and_then(|from| Some(from..from.checked_add(influences)?))
+                    .and_then(|ids| bones.get(ids));
+                let binds = influences
+                    .checked_mul(3)
+                    .and_then(|len| vi.checked_add(len))
+                    .and_then(|end| vertices.get(vi..end));
+                let (Some(bone_ids), Some(binds)) = (bone_ids, binds) else {
+                    break;
+                };
+                bi += 1 + influences;
+                vi += binds.len();
                 let mut wx = 0.0;
                 let mut wy = 0.0;
-                for _ in 0..influences {
-                    let bone_index = bones[bi];
-                    bi += 1;
+                let (binds, _) = binds.as_chunks::<3>();
+                for (&bone_index, &[bx, by, weight]) in bone_ids.iter().zip(binds) {
                     let dx = deform.get(fi).copied().unwrap_or(0.0);
                     let dy = deform.get(fi + 1).copied().unwrap_or(0.0);
                     fi += 2;
-                    let vx = vertices[vi] + dx;
-                    let vy = vertices[vi + 1] + dy;
-                    let weight = vertices[vi + 2];
-                    vi += 3;
+                    let vx = bx + dx;
+                    let vy = by + dy;
                     if let Some(bone) = skeleton.bone(bone_index) {
                         wx += (vx * bone.a() + vy * bone.b() + bone.world_x()) * weight;
                         wy += (vx * bone.c() + vy * bone.d() + bone.world_y()) * weight;
@@ -709,6 +794,9 @@ impl ClippingAttachment {
         );
     }
 }
+
+#[cfg(test)]
+mod robustness;
 
 #[cfg(test)]
 mod tests {
