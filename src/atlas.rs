@@ -143,54 +143,32 @@ impl Atlas {
                 continue; // blank lines separate pages
             }
 
-            // Page: the filename line, then indented page-property lines.
+            // Page: the filename line, then its property lines.
             let mut page = AtlasPage::new(line.trim().to_string());
-            while let Some(next) = lines.peek() {
-                let t = next.trim();
-                // A property line is indented (legacy) or `key:value` (4.x);
-                // a bare name line (neither) ends the page header.
-                if t.is_empty() || (!is_indented(next) && !t.contains(':')) {
-                    break;
-                }
-                apply_page_prop(&mut page, lines.next().unwrap().trim());
+            while let Some(prop) = lines.next_if(|l| is_property(l)) {
+                apply_page_prop(&mut page, prop.trim());
             }
             let page_index = atlas.pages.len();
             atlas.pages.push(page);
 
-            // Regions: a non-indented name line, then indented region properties,
-            // until a blank line (next page) or end of input.
-            loop {
-                match lines.peek() {
-                    None => break,
-                    Some(l) if l.trim().is_empty() => {
-                        lines.next();
-                        break;
-                    }
-                    Some(l) if is_indented(l) => {
-                        lines.next(); // stray indented line; ignore
-                    }
-                    Some(_) => {
-                        let name = lines.next().unwrap().trim().to_string();
-                        let mut region = AtlasRegion::new(name, page_index);
-                        while let Some(next) = lines.peek() {
-                            let t = next.trim();
-                            // A property line is indented (legacy) or `key:value`
-                            // (4.x); a bare name line ends this region.
-                            if t.is_empty() || (!is_indented(next) && !t.contains(':')) {
-                                break;
-                            }
-                            apply_region_prop(&mut region, lines.next().unwrap().trim());
-                        }
-                        if region.original_width == 0 {
-                            region.original_width = region.width;
-                        }
-                        if region.original_height == 0 {
-                            region.original_height = region.height;
-                        }
-                        atlas.regions.push(region);
-                    }
+            // Regions: a name line, then its property lines, until a blank line
+            // (next page) or end of input. The property loops consume every
+            // indented or `key:value` line, so each line reached here is a name.
+            while let Some(name) = lines.next_if(|l| !l.trim().is_empty()) {
+                let mut region = AtlasRegion::new(name.trim().to_string(), page_index);
+                while let Some(prop) = lines.next_if(|l| is_property(l)) {
+                    apply_region_prop(&mut region, prop.trim());
                 }
+                if region.original_width == 0 {
+                    region.original_width = region.width;
+                }
+                if region.original_height == 0 {
+                    region.original_height = region.height;
+                }
+                atlas.regions.push(region);
             }
+            // Consume the blank line that ends the page, if any.
+            lines.next();
         }
 
         atlas
@@ -207,14 +185,33 @@ fn is_indented(line: &str) -> bool {
     line.starts_with([' ', '\t'])
 }
 
+/// A property line is indented (legacy) or `key:value` (4.x). A blank line or
+/// a bare name line (neither) is not.
+fn is_property(line: &str) -> bool {
+    let t = line.trim();
+    !t.is_empty() && (is_indented(line) || t.contains(':'))
+}
+
 fn split_kv(line: &str) -> Option<(&str, &str)> {
     line.split_once(':').map(|(k, v)| (k.trim(), v.trim()))
+}
+
+/// Parse a pixel size or position. Spine reads these as signed 32-bit
+/// integers, so a value past `i32::MAX` is invalid and reads as 0, like any
+/// other unparsable value. The limit also keeps `x + width` and
+/// `y + height` within `u32`.
+fn parse_pixels(part: &str) -> u32 {
+    part.trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|&n| i32::try_from(n).is_ok())
+        .unwrap_or(0)
 }
 
 fn parse_u32s<const N: usize>(v: &str) -> [u32; N] {
     let mut out = [0u32; N];
     for (slot, part) in out.iter_mut().zip(v.split(',')) {
-        *slot = part.trim().parse().unwrap_or(0);
+        *slot = parse_pixels(part);
     }
     out
 }
@@ -324,7 +321,7 @@ fn parse_f32(part: Option<&str>) -> f32 {
 }
 
 fn parse_u32(part: Option<&str>) -> u32 {
-    part.and_then(|p| p.trim().parse().ok()).unwrap_or(0)
+    part.map_or(0, parse_pixels)
 }
 
 #[cfg(test)]
@@ -378,5 +375,55 @@ mod tests {
     #[test]
     fn missing_region_is_none() {
         assert!(Atlas::parse(SAMPLE).find_region("nope").is_none());
+    }
+
+    /// Every region's packed rect and original size, as `(x + w, y + h)` sums
+    /// that must not overflow.
+    fn rect_ends(atlas: &Atlas) -> Vec<Option<(u32, u32)>> {
+        atlas
+            .regions
+            .iter()
+            .map(|r| Some((r.x.checked_add(r.width)?, r.y.checked_add(r.height)?)))
+            .collect()
+    }
+
+    #[test]
+    fn pixel_values_past_i32_max_read_as_zero() {
+        // A fuzzed atlas whose rect sums overflowed `u32` when binding UVs.
+        let text = "p.png\nsize: 4294967295,1\nr\n  bounds: 4294967295,4294967295,4294967295,4294967295\n  offsets: -1e30,1e30,4294967295,0\n  rotate: 65535\nm\n  bounds: 1,2\n  rotate: -90\ns0\n  index: 99999999999\n";
+        let atlas = Atlas::parse(text);
+        assert_eq!(atlas.pages.len(), 1);
+        assert_eq!(atlas.pages[0].width, 0);
+        assert_eq!(atlas.regions.len(), 3);
+        let r = atlas.find_region("r").unwrap();
+        assert_eq!((r.x, r.y, r.width, r.height), (0, 0, 0, 0));
+        assert_eq!((r.original_width, r.original_height), (0, 0));
+        assert!(rect_ends(&atlas).iter().all(Option::is_some));
+        // Unparsable index and rotate values keep their defaults.
+        assert_eq!(atlas.find_region("s0").unwrap().index, -1);
+        assert_eq!(atlas.find_region("m").unwrap().degrees, 0);
+    }
+
+    #[test]
+    fn largest_i32_pixel_values_are_kept_and_sum_in_range() {
+        let atlas =
+            Atlas::parse("p.png\nr\n  bounds: 2147483647,2147483647,2147483647,2147483647\n");
+        let r = &atlas.regions[0];
+        assert_eq!((r.x, r.width), (2_147_483_647, 2_147_483_647));
+        assert!(rect_ends(&atlas).iter().all(Option::is_some));
+    }
+
+    #[test]
+    fn odd_line_layouts_end_pages_and_regions_cleanly() {
+        // CRLF endings, an indented line without a colon, a page with no
+        // regions, and a property on the last line with no final newline.
+        let text = "a.png\r\n  size: 8,8\r\n  stray\r\n\r\nb.png\nsize: 4,4\nr\n  bounds: 1,1,2,2\n  rotate: true\n\nc.png\n  size: 2,2";
+        let atlas = Atlas::parse(text);
+        let names: Vec<&str> = atlas.pages.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["a.png", "b.png", "c.png"]);
+        assert_eq!((atlas.pages[0].width, atlas.pages[2].height), (8, 2));
+        assert_eq!(atlas.regions.len(), 1);
+        assert_eq!(atlas.regions[0].page, 1);
+        assert_eq!(atlas.regions[0].degrees, 90);
     }
 }
