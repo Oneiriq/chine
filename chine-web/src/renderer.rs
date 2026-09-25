@@ -268,14 +268,15 @@ fn append_geometry(
     } else {
         (c.r, c.g, c.b)
     };
-    let (uvs, _) = cmd.uvs.as_chunks::<2>();
-    let vertex_count = cmd.positions.len().min(uvs.len());
-    for (pos, &[u, v]) in cmd.positions.iter().zip(uvs) {
+    let vertex_count = cmd.positions.len().min(cmd.uvs.len() / 2);
+    for (pos, uv) in cmd.positions.iter().zip(cmd.uvs.chunks(2)) {
+        let Ok(&[u, v]) = <&[f32; 2]>::try_from(uv) else {
+            break;
+        };
         verts.extend_from_slice(&[pos.x, pos.y, u, v, r, g, b, c.a, dr, dg, db, da]);
     }
-    let (triangles, _) = cmd.triangles.as_chunks::<3>();
-    for tri in triangles {
-        if tri.iter().all(|&t| usize::from(t) < vertex_count) {
+    for tri in cmd.triangles.chunks(3) {
+        if tri.len() == 3 && tri.iter().all(|&t| usize::from(t) < vertex_count) {
             indices.extend(tri.iter().map(|&t| base.saturating_add(u32::from(t))));
         }
     }

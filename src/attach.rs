@@ -488,10 +488,11 @@ fn compute_vertices_into(
             let local = if deform.len() / 2 >= count { deform } else { v };
             let (a, b, c, d) = (bone.a(), bone.b(), bone.c(), bone.d());
             let (wx, wy) = (bone.world_x(), bone.world_y());
-            let (pairs, _) = local.as_chunks::<2>();
-            let pairs = pairs.get(..count).unwrap_or(pairs);
-            out.reserve(pairs.len());
-            for &[vx, vy] in pairs {
+            out.reserve(count.min(local.len() / 2));
+            for pair in local.chunks(2).take(count) {
+                let Ok(&[vx, vy]) = <&[f32; 2]>::try_from(pair) else {
+                    break;
+                };
                 out.push(Vec2::new(vx * a + vy * b + wx, vx * c + vy * d + wy));
             }
         }
@@ -525,8 +526,10 @@ fn compute_vertices_into(
                 vi += binds.len();
                 let mut wx = 0.0;
                 let mut wy = 0.0;
-                let (binds, _) = binds.as_chunks::<3>();
-                for (&bone_index, &[bx, by, weight]) in bone_ids.iter().zip(binds) {
+                for (&bone_index, bind) in bone_ids.iter().zip(binds.chunks(3)) {
+                    let Ok(&[bx, by, weight]) = <&[f32; 3]>::try_from(bind) else {
+                        break;
+                    };
                     let dx = deform.get(fi).copied().unwrap_or(0.0);
                     let dy = deform.get(fi + 1).copied().unwrap_or(0.0);
                     fi += 2;

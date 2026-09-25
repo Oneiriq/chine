@@ -159,8 +159,10 @@ pub(crate) fn clip_into(
     dst.positions.clear();
     dst.uvs.clear();
     dst.triangles.clear();
-    let (triangles, _) = src.triangles.as_chunks::<3>();
-    'triangles: for tri in triangles {
+    'triangles: for tri in src.triangles.chunks(3) {
+        let Ok(tri) = <&[u16; 3]>::try_from(tri) else {
+            continue;
+        };
         let Some([a, b, c]) = corners(src, tri) else {
             continue;
         };

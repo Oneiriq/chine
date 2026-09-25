@@ -462,9 +462,8 @@ fn fill_command(
             dst.positions.truncate(vertices);
             dst.uvs.truncate(vertices * 2);
             dst.triangles.clear();
-            let (corners, _) = m.triangles.as_chunks::<3>();
-            for tri in corners {
-                if tri.iter().all(|&t| usize::from(t) < vertices) {
+            for tri in m.triangles.chunks(3) {
+                if tri.len() == 3 && tri.iter().all(|&t| usize::from(t) < vertices) {
                     dst.triangles.extend_from_slice(tri);
                 }
             }
