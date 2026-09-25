@@ -2,15 +2,19 @@
 //!
 //! A skin lists, per slot, the attachments it defines. Each attachment is a
 //! flags byte (the type in the low three bits) followed by that type's fields.
+//! Every index a skin stores (slots, skin bones and constraints, weighted
+//! vertex bones, mesh triangles, the clipping end slot, string table
+//! references) is checked against the table it points into.
 
 use super::*;
 
 /// Read a skin: the default skin (`is_default`, a slot count then attachments)
 /// or a named skin (name, bone/constraint index lists, then attachments).
+/// `data` holds the bones, slots, and constraints read so far.
 pub(super) fn read_skin(
     r: &mut BinaryReader,
     strings: &[String],
-    slot_names: &[String],
+    data: &SkeletonData,
     is_default: bool,
     nonessential: bool,
 ) -> Skin {
@@ -27,22 +31,32 @@ pub(super) fn read_skin(
         if nonessential {
             let _ = r.u32();
         }
-        let bone_count = r.count();
-        for _ in 0..bone_count {
-            r.var_usize();
+        // The skin's bone and constraint lists are not kept, but they are
+        // still indices into those tables.
+        let bones = r.count();
+        for _ in 0..bones {
+            if r.var_usize() >= data.bones.len() {
+                corrupt(r);
+            }
         }
-        let constraint_count = r.count();
-        for _ in 0..constraint_count {
-            r.var_usize();
+        let constraints = constraint_count(data);
+        let listed = r.count();
+        for _ in 0..listed {
+            if r.var_usize() >= constraints {
+                corrupt(r);
+            }
         }
         slot_count = r.count();
     }
     for _ in 0..slot_count {
         let slot = r.var_usize();
+        if slot >= data.slots.len() {
+            corrupt(r);
+        }
         let att_count = r.count();
         for _ in 0..att_count {
             let placeholder = string_ref(r, strings).unwrap_or_default();
-            if let Some(att) = read_attachment(r, strings, slot_names, &placeholder, nonessential) {
+            if let Some(att) = read_attachment(r, strings, data, &placeholder, nonessential) {
                 skin.set(slot, placeholder, att);
             }
         }
@@ -55,10 +69,11 @@ pub(super) fn read_skin(
 fn read_attachment(
     r: &mut BinaryReader,
     strings: &[String],
-    slot_names: &[String],
+    data: &SkeletonData,
     placeholder: &str,
     nonessential: bool,
 ) -> Option<Attachment> {
+    let bones = data.bones.len();
     let flags = r.byte();
     let name = if flags & 8 != 0 {
         string_ref(r, strings).unwrap_or_default()
@@ -88,7 +103,7 @@ fn read_attachment(
             Some(Attachment::Region(reg))
         }
         1 => {
-            let (vertices, count) = read_vertices(r, flags & 16 != 0);
+            let (vertices, count) = read_vertices(r, flags & 16 != 0, bones);
             skip_nonessential_color(r, nonessential);
             Some(Attachment::BoundingBox(BoundingBoxAttachment::new(
                 name, vertices, count,
@@ -103,10 +118,13 @@ fn read_attachment(
             let color = read_att_color(r, flags & 32 != 0);
             let sequence = read_sequence(r, flags & 64 != 0);
             let hull = r.var_usize();
-            let (vertices, count) = read_vertices(r, flags & 128 != 0);
-            let uvs = read_float_array(r, count * 2);
-            let tri_count = (count * 2).saturating_sub(hull + 2) * 3;
-            let triangles = read_short_array(r, tri_count);
+            let (vertices, count) = read_vertices(r, flags & 128 != 0, bones);
+            let uvs = read_float_array(r, count.saturating_mul(2));
+            let tri_count = count
+                .saturating_mul(2)
+                .saturating_sub(hull.saturating_add(2))
+                .saturating_mul(3);
+            let triangles = read_triangles(r, tri_count, count);
             let timeline_slots = r.count();
             for _ in 0..timeline_slots {
                 r.var_usize();
@@ -148,7 +166,7 @@ fn read_attachment(
         4 => {
             let closed = flags & 16 != 0;
             let constant_speed = flags & 32 != 0;
-            let (vertices, count) = read_vertices(r, flags & 64 != 0);
+            let (vertices, count) = read_vertices(r, flags & 64 != 0, bones);
             let lengths = read_float_array(r, count / 3);
             skip_nonessential_color(r, nonessential);
             Some(Attachment::Path(PathAttachment::new(
@@ -171,14 +189,24 @@ fn read_attachment(
         }
         6 => {
             let end = r.var_usize();
-            let (vertices, count) = read_vertices(r, flags & 16 != 0);
+            let (vertices, count) = read_vertices(r, flags & 16 != 0, bones);
             skip_nonessential_color(r, nonessential);
-            let end_slot = slot_names.get(end).cloned().unwrap_or_default();
+            let end_slot = match data.slots.get(end) {
+                Some(slot) => slot.name.clone(),
+                None => {
+                    corrupt(r);
+                    String::new()
+                }
+            };
             Some(Attachment::Clipping(ClippingAttachment::new(
                 name, end_slot, vertices, count,
             )))
         }
-        _ => None,
+        // Type 7 is not an attachment type, and its fields cannot be skipped.
+        _ => {
+            corrupt(r);
+            None
+        }
     }
 }
 
@@ -211,37 +239,72 @@ fn read_sequence(r: &mut BinaryReader, present: bool) -> Option<Sequence> {
 }
 
 /// Read mesh/polygon vertices: unweighted (`2 * vertexCount` floats) or weighted
-/// (per-vertex bone influences). Returns the vertices and the vertex count.
-fn read_vertices(r: &mut BinaryReader, weighted: bool) -> (MeshVertices, usize) {
+/// (per-vertex bone influences, each naming one of `bone_count` bones).
+/// Returns the vertices and the vertex count.
+fn read_vertices(r: &mut BinaryReader, weighted: bool, bone_count: usize) -> (MeshVertices, usize) {
     let count = r.count();
     if !weighted {
         return (
-            MeshVertices::Unweighted(read_float_array(r, count * 2)),
+            MeshVertices::Unweighted(read_float_array(r, count.saturating_mul(2))),
             count,
         );
     }
+    // `total` is the length of the `[influences, bone...]` layout. Spine sizes
+    // the layout from it and the weights from `total - count`, so the layout
+    // must end exactly at `total` and describe at least `count` vertices.
     let total = r.count();
     let mut bones = Vec::new();
     let mut vertices = Vec::new();
+    let mut described = 0_usize;
     while bones.len() < total {
         let influences = r.count();
         bones.push(influences);
         for _ in 0..influences {
-            bones.push(r.var_usize());
+            let bone = r.var_usize();
+            if bone >= bone_count {
+                corrupt(r);
+            }
+            bones.push(bone);
             vertices.push(r.float());
             vertices.push(r.float());
             vertices.push(r.float());
         }
+        described += 1;
+    }
+    if bones.len() != total || described < count {
+        corrupt(r);
     }
     (MeshVertices::Weighted { bones, vertices }, count)
 }
 
-/// Read `n` big-endian floats.
+/// Read `n` big-endian floats. A count the remaining data cannot hold is
+/// corrupt, and reads as an empty array.
 fn read_float_array(r: &mut BinaryReader, n: usize) -> Vec<f32> {
+    if n > r.remaining() / 4 {
+        corrupt(r);
+        return Vec::new();
+    }
     (0..n).map(|_| r.float()).collect()
 }
 
-/// Read `n` var-uint shorts (triangle / edge indices).
-fn read_short_array(r: &mut BinaryReader, n: usize) -> Vec<u16> {
-    (0..n).map(|_| r.var_usize() as u16).collect()
+/// Read `n` var-uint triangle indices into a mesh of `vertex_count` vertices.
+/// A list longer than the remaining data, or an index that names no vertex
+/// (or does not fit the `u16` index type), is corrupt.
+fn read_triangles(r: &mut BinaryReader, n: usize, vertex_count: usize) -> Vec<u16> {
+    if n > r.remaining() {
+        corrupt(r);
+        return Vec::new();
+    }
+    (0..n)
+        .map(|_| {
+            let index = r.var_usize();
+            match u16::try_from(index) {
+                Ok(t) if index < vertex_count => t,
+                _ => {
+                    corrupt(r);
+                    0
+                }
+            }
+        })
+        .collect()
 }

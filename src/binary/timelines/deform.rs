@@ -67,6 +67,7 @@ pub(super) fn read_sequence_timeline(
     count: usize,
     frames: usize,
 ) -> (SequenceTimeline, f32) {
+    let frames = fitting_frames(r, frames, 12);
     let mut times = Vec::with_capacity(frames);
     let mut mode_and_index = Vec::with_capacity(frames);
     let mut delays = Vec::with_capacity(frames);
@@ -112,7 +113,8 @@ pub(super) fn deform_mesh_info(
 /// Read a mesh-deform timeline into chine's relative-offset model: per frame a
 /// time and a sparse run of vertex offsets (zeros elsewhere; the setup vertices
 /// are added at apply time), with stepped / linear / Bezier curves. The offsets
-/// are read raw, never adding the setup, which matches the JSON loader.
+/// are read raw, never adding the setup, which matches the JSON loader. A run
+/// that ends past the mesh's `frame_len` deform values is corrupt.
 pub(super) fn read_deform_timeline(
     r: &mut BinaryReader,
     slot: usize,
@@ -123,7 +125,8 @@ pub(super) fn read_deform_timeline(
     frames: usize,
 ) -> (DeformTimeline, f32) {
     let bezier_count = r.count();
-    let last = frames.saturating_sub(1);
+    let (frames, beziers) = curve_sizes(r, frames, bezier_count, 5, 1);
+    let last = frames - 1;
     let mut times = Vec::with_capacity(frames);
     let mut offsets = Vec::with_capacity(frames);
     let mut segments: Vec<(u8, [f32; 4])> = Vec::new();
@@ -133,9 +136,13 @@ pub(super) fn read_deform_timeline(
         let end = r.count();
         if end != 0 {
             let start = r.var_usize();
+            let in_mesh = matches!(start.checked_add(end), Some(run_end) if run_end <= frame_len);
+            if !in_mesh {
+                corrupt(r);
+            }
             for i in 0..end {
                 let value = r.float();
-                if let Some(v) = deform.get_mut(start + i) {
+                if let Some(v) = start.checked_add(i).and_then(|k| deform.get_mut(k)) {
                     *v = value;
                 }
             }
@@ -162,27 +169,19 @@ pub(super) fn read_deform_timeline(
         setup,
         times.clone(),
         offsets,
-        bezier_count,
+        beziers,
     );
     let mut bezier = 0;
-    for (frame, &(kind, c)) in segments.iter().enumerate() {
+    // Segment `frame` runs from `times[frame]` to `times[frame + 1]`.
+    let spans = times.iter().zip(times.iter().skip(1));
+    for (frame, (&(kind, c), (&time1, &time2))) in segments.iter().zip(spans).enumerate() {
         match kind {
             1 => tl.set_stepped(frame),
             2 => {
-                tl.set_bezier(
-                    bezier,
-                    frame,
-                    0,
-                    times[frame],
-                    0.0,
-                    c[0],
-                    c[1],
-                    c[2],
-                    c[3],
-                    times[frame + 1],
-                    1.0,
-                );
-                bezier += 1;
+                if let Some(b) = next_bezier(r, &mut bezier, beziers) {
+                    let [cx1, cy1, cx2, cy2] = c;
+                    tl.set_bezier(b, frame, 0, time1, 0.0, cx1, cy1, cx2, cy2, time2, 1.0);
+                }
             }
             _ => {}
         }

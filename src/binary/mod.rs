@@ -99,6 +99,43 @@ fn version_supported(version: &str) -> bool {
     }
 }
 
+/// Record a corrupt index or length as [`BinaryError::CorruptLength`].
+///
+/// Once the data has run out, every read returns zero, so a bad value read
+/// after that point is a side effect of the truncation. It is not recorded,
+/// and the load reports [`BinaryError::Truncated`] instead.
+fn corrupt(r: &mut BinaryReader) {
+    if !r.overran() {
+        r.fail(BinaryError::CorruptLength);
+    }
+}
+
+/// The load's outcome so far: the first structural error, then truncation.
+fn status(r: &BinaryReader) -> Result<(), BinaryError> {
+    if let Some(error) = r.error() {
+        return Err(error.clone());
+    }
+    if r.overran() {
+        return Err(BinaryError::Truncated);
+    }
+    Ok(())
+}
+
+/// Whether every index in `indices` is below `len`.
+fn all_below(indices: &[usize], len: usize) -> bool {
+    indices.iter().all(|&i| i < len)
+}
+
+/// The number of constraints of every type. Spine 4.3 keeps one constraint
+/// list, and constraint timelines and skins index into it.
+fn constraint_count(data: &SkeletonData) -> usize {
+    data.ik_constraints.len()
+        + data.path_constraints.len()
+        + data.transform_constraints.len()
+        + data.physics_constraints.len()
+        + data.sliders.len()
+}
+
 /// Map a Spine inherit-mode ordinal to [`Inherit`].
 fn inherit_from(ordinal: usize) -> Inherit {
     match ordinal {
@@ -114,15 +151,27 @@ fn inherit_from(ordinal: usize) -> Inherit {
 ///
 /// The full section sequence is read: header, bones, slots, the IK / transform
 /// / path / physics / slider constraints, skins (including sequence
-/// attachments), events, and animations. Every timeline group is decoded: bone
+/// attachments), events, and animations. The timeline groups decoded are bone
 /// (rotate / translate / scale / shear), slot (attachment, color, two-color,
 /// alpha), deform, draw order, event, the IK / transform / path / physics
-/// constraint timelines, and the slider and sequence timelines.
+/// constraint timelines, and the slider and sequence timelines. Bone inherit
+/// timelines are not decoded and report
+/// [`BinaryError::UnknownTimelineType`], and draw order folder timelines are
+/// read past without being kept.
+///
+/// Every index the file stores (bone parents, slot bones, constraint bones and
+/// targets, timeline targets, skin slots, weighted vertex bones, mesh
+/// triangles, string table references, draw order moves, event and animation
+/// references) is checked against the table it points into, so the loaded
+/// data never indexes out of range.
 ///
 /// # Errors
 /// Returns [`BinaryError::UnsupportedVersion`] if the header declares an
-/// export from a Spine release other than 4.3, and
-/// [`BinaryError::Truncated`] if the data ends mid-skeleton.
+/// export from a Spine release other than 4.3,
+/// [`BinaryError::Truncated`] if the data ends mid-skeleton,
+/// [`BinaryError::CorruptLength`] if a length exceeds the remaining data or
+/// an index is out of range, and [`BinaryError::UnknownConstraintType`] or
+/// [`BinaryError::UnknownTimelineType`] for an unrecognized type tag.
 pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
     let mut r = BinaryReader::new(bytes);
     let mut data = SkeletonData::default();
@@ -201,6 +250,17 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
             inherit,
         });
     }
+    // Spine writes every parent before its children, so a parent at or after
+    // its child is corrupt. This also rules out parent cycles.
+    if !data
+        .bones
+        .iter()
+        .enumerate()
+        .all(|(i, b)| !matches!(b.parent, Some(p) if p >= i))
+    {
+        corrupt(&mut r);
+    }
+    status(&r)?;
 
     // Slots: draw order, each with a setup color, an optional dark (two-color)
     // tint, and the setup attachment (referenced into the string table).
@@ -226,6 +286,11 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
             blend,
         });
     }
+    let bone_count = data.bones.len();
+    if !data.slots.iter().all(|s| s.bone < bone_count) {
+        corrupt(&mut r);
+    }
+    status(&r)?;
 
     // Constraints are one typed list. Each begins with a name and a one-byte
     // type (Spine 4.3: IK=0, path=1, transform=2, physics=3, slider=4); there
@@ -253,16 +318,20 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
             }
         }
     }
+    if !constraint_indices_valid(&data) {
+        corrupt(&mut r);
+    }
+    status(&r)?;
 
     // Skins: the default skin, then named skins. Attachments resolve their
     // names and paths through the string table.
-    let slot_names: Vec<String> = data.slots.iter().map(|s| s.name.clone()).collect();
-    data.default_skin = read_skin(&mut r, &strings, &slot_names, true, nonessential);
+    data.default_skin = read_skin(&mut r, &strings, &data, true, nonessential);
     let skin_count = r.count();
     for _ in 0..skin_count {
-        let skin = read_skin(&mut r, &strings, &slot_names, false, nonessential);
+        let skin = read_skin(&mut r, &strings, &data, false, nonessential);
         data.skins.push(skin);
     }
+    status(&r)?;
 
     // Resolve linked meshes before animations so deform timelines bind to the
     // resolved (parent-shared) geometry rather than unresolved links.
@@ -298,21 +367,44 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
         let aname = r.string().unwrap_or_default();
         let anim = read_animation(&mut r, aname, &data, &strings, nonessential);
         data.animations.push(Arc::new(anim));
+        status(&r)?;
     }
 
     // After the animations, each slider constraint records the index of the
     // animation it scrubs (read in constraint order, which is slider order).
+    let animation_count = data.animations.len();
     for slider in &mut data.sliders {
-        slider.animation_index = Some(r.var_usize());
+        let index = r.var_usize();
+        if index >= animation_count {
+            corrupt(&mut r);
+        }
+        slider.animation_index = Some(index);
     }
 
-    if let Some(error) = r.error() {
-        return Err(error.clone());
-    }
-    if r.overran() {
-        return Err(BinaryError::Truncated);
-    }
+    status(&r)?;
     Ok(data)
+}
+
+/// Whether every constraint's bone, target, and slot index is in range.
+fn constraint_indices_valid(data: &SkeletonData) -> bool {
+    let bones = data.bones.len();
+    let slots = data.slots.len();
+    data.ik_constraints
+        .iter()
+        .all(|c| c.target < bones && all_below(&c.bones, bones))
+        && data
+            .transform_constraints
+            .iter()
+            .all(|c| c.source < bones && all_below(&c.bones, bones))
+        && data
+            .path_constraints
+            .iter()
+            .all(|c| c.slot < slots && all_below(&c.bones, bones))
+        && data.physics_constraints.iter().all(|c| c.bone < bones)
+        && data
+            .sliders
+            .iter()
+            .all(|c| !matches!(c.bone, Some(b) if b >= bones))
 }
 
 /// Map a scale-Y-mode ordinal to [`ScaleYMode`].
@@ -400,9 +492,12 @@ fn parse_slider(
             3 => data.property = Some(SliderProperty::ScaleX),
             4 => data.property = Some(SliderProperty::ScaleY),
             5 => data.property = Some(SliderProperty::ShearY),
-            // An unknown property ordinal stops this constraint's property
-            // block (matching the reference's `continue`).
-            _ => return data,
+            // An unknown property ordinal is corrupt (Spine's reader cannot
+            // load it), and the fields after it are left unread.
+            _ => {
+                corrupt(r);
+                return data;
+            }
         }
         data.property_offset = property_offset;
         data.offset = r.float();
@@ -554,7 +649,10 @@ fn parse_transform(r: &mut BinaryReader, name: String, order: usize) -> Transfor
     let property_count = (flags >> 5) as usize;
     let mut properties = Vec::with_capacity(property_count);
     for _ in 0..property_count {
+        // An unknown property ordinal is corrupt (Spine's reader cannot load
+        // it), and the mapping is skipped.
         let Some(property) = from_prop_byte(r.byte()) else {
+            corrupt(r);
             continue;
         };
         let offset = r.float();
@@ -562,6 +660,7 @@ fn parse_transform(r: &mut BinaryReader, name: String, order: usize) -> Transfor
         let mut to = Vec::with_capacity(to_count);
         for _ in 0..to_count {
             let Some(to_property) = to_prop_byte(r.byte()) else {
+                corrupt(r);
                 continue;
             };
             to.push(ToMapping {
@@ -636,12 +735,14 @@ fn blend_from(ordinal: usize) -> BlendMode {
 }
 
 /// Read a string-table reference: a `var_uint` index where `0` is `None` and `i`
-/// is `strings[i - 1]`.
+/// is `strings[i - 1]`. An index past the table is corrupt.
 fn string_ref(r: &mut BinaryReader, strings: &[String]) -> Option<String> {
-    match r.var_usize() {
-        0 => None,
-        i => strings.get(i - 1).cloned(),
+    let index = r.var_usize().checked_sub(1)?;
+    let s = strings.get(index).cloned();
+    if s.is_none() {
+        corrupt(r);
     }
+    s
 }
 
 mod reader;
@@ -653,5 +754,7 @@ use skins::read_skin;
 mod timelines;
 use timelines::read_animation;
 
+#[cfg(test)]
+mod robustness;
 #[cfg(test)]
 mod tests;

@@ -136,14 +136,13 @@ impl<'a> BinaryReader<'a> {
             0 => None,
             1 => Some(String::new()),
             n => {
-                let len = n - 1;
-                let end = self.pos.saturating_add(len);
-                if end > self.data.len() {
+                let end = self.pos.saturating_add(n - 1);
+                let Some(bytes) = self.data.get(self.pos..end) else {
                     self.overran = true;
                     self.pos = self.data.len();
                     return Some(String::new());
-                }
-                let s = String::from_utf8_lossy(&self.data[self.pos..end]).into_owned();
+                };
+                let s = String::from_utf8_lossy(bytes).into_owned();
                 self.pos = end;
                 Some(s)
             }
