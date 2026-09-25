@@ -70,7 +70,8 @@ impl IkConstraint {
 
 /// Solve IK constraint `c` against the current world transforms, writing the
 /// constrained bones' local pose. The update cache recomputes their world
-/// transforms afterward.
+/// transforms afterward. A constraint, target, or bone index that is out of
+/// range skips the constraint.
 pub(crate) fn solve(
     bones: &mut [Bone],
     data: &SkeletonData,
@@ -79,17 +80,22 @@ pub(crate) fn solve(
     skel_sx: f32,
     skel_sy: f32,
 ) {
-    let ik = &data.ik_constraints[c];
+    let Some(ik) = data.ik_constraints.get(c) else {
+        return;
+    };
     if pose.mix == 0.0 || ik.bones.is_empty() {
         return;
     }
-    let target_x = bones[ik.target].world_x();
-    let target_y = bones[ik.target].world_y();
-    match ik.bones.len() {
-        1 => apply1(
+    let Some(target) = bones.get(ik.target) else {
+        return;
+    };
+    let target_x = target.world_x();
+    let target_y = target.world_y();
+    match *ik.bones.as_slice() {
+        [bone] => apply1(
             bones,
             data,
-            ik.bones[0],
+            bone,
             target_x,
             target_y,
             pose.compress,
@@ -99,7 +105,7 @@ pub(crate) fn solve(
             skel_sx,
             skel_sy,
         ),
-        2 => apply2(bones, data, ik, target_x, target_y, pose, skel_sx, skel_sy),
+        [_, _] => apply2(bones, data, ik, target_x, target_y, pose, skel_sx, skel_sy),
         _ => {}
     }
 }
@@ -130,27 +136,33 @@ fn apply1(
     skel_sx: f32,
     skel_sy: f32,
 ) {
-    let Some(parent_idx) = bones[bone_idx].parent() else {
+    let Some(b) = bones.get(bone_idx) else {
         return;
     };
-    let inherit = data.bones[bone_idx].inherit;
-    let length = data.bones[bone_idx].length;
-    let (bx, by, brot, bshear_x, bscale_x, bscale_y, bwx, bwy) = {
-        let b = &bones[bone_idx];
-        (
-            b.x,
-            b.y,
-            b.rotation,
-            b.shear_x,
-            b.scale_x,
-            b.scale_y,
-            b.world_x(),
-            b.world_y(),
-        )
+    let Some(parent_idx) = b.parent() else {
+        return;
     };
-    let (pa, mut pb, pc, mut pd, pwx, pwy) = {
-        let p = &bones[parent_idx];
-        (p.a(), p.b(), p.c(), p.d(), p.world_x(), p.world_y())
+    let Some(bone_data) = data.bones.get(bone_idx) else {
+        return;
+    };
+    let inherit = bone_data.inherit;
+    let length = bone_data.length;
+    let (bx, by, brot, bshear_x, bscale_x, bscale_y, bwx, bwy) = (
+        b.x,
+        b.y,
+        b.rotation,
+        b.shear_x,
+        b.scale_x,
+        b.scale_y,
+        b.world_x(),
+        b.world_y(),
+    );
+    let Some(p) = bones.get(parent_idx) else {
+        return;
+    };
+    let (pa, mut pb, pc, mut pd, pwx, pwy) = (p.a(), p.b(), p.c(), p.d(), p.world_x(), p.world_y());
+    let Some(bone) = bones.get_mut(bone_idx) else {
+        return;
     };
 
     let mut rotation_ik = -bshear_x - brot;
@@ -188,7 +200,7 @@ fn apply1(
     } else if rotation_ik <= -180.0 {
         rotation_ik += 360.0;
     }
-    bones[bone_idx].rotation = brot + rotation_ik * mix;
+    bone.rotation = brot + rotation_ik * mix;
 
     if compress || stretch {
         if matches!(inherit, Inherit::NoScale | Inherit::NoScaleOrReflection) {
@@ -200,12 +212,12 @@ fn apply1(
             let dd = tx * tx + ty * ty;
             if (compress && dd < b_len * b_len) || (stretch && dd > b_len * b_len) {
                 let s = (dd.sqrt() / b_len - 1.0) * mix + 1.0;
-                bones[bone_idx].scale_x = bscale_x * s;
+                bone.scale_x = bscale_x * s;
                 match scale_y_mode {
-                    ScaleYMode::Uniform => bones[bone_idx].scale_y = bscale_y * s,
+                    ScaleYMode::Uniform => bone.scale_y = bscale_y * s,
                     ScaleYMode::Volume => {
                         let div = if s < 0.7 { 0.25 + 0.642_857 * s } else { s };
-                        bones[bone_idx].scale_y = bscale_y / div;
+                        bone.scale_y = bscale_y / div;
                     }
                     ScaleYMode::None => {}
                 }
@@ -215,11 +227,7 @@ fn apply1(
 }
 
 /// 2-bone IK: bend `parent`/`child` so the child's tip reaches the world target.
-#[allow(
-    clippy::too_many_arguments,
-    clippy::similar_names,
-    clippy::many_single_char_names
-)]
+#[allow(clippy::too_many_arguments)]
 fn apply2(
     bones: &mut [Bone],
     data: &SkeletonData,
@@ -230,26 +238,44 @@ fn apply2(
     skel_sx: f32,
     skel_sy: f32,
 ) {
-    let parent_idx = ik.bones[0];
-    let child_idx = ik.bones[1];
-    if !matches!(data.bones[parent_idx].inherit, Inherit::Normal)
-        || !matches!(data.bones[child_idx].inherit, Inherit::Normal)
+    let [parent_idx, child_idx] = *ik.bones.as_slice() else {
+        return;
+    };
+    let (Some(parent_data), Some(child_data)) =
+        (data.bones.get(parent_idx), data.bones.get(child_idx))
+    else {
+        return;
+    };
+    if !matches!(parent_data.inherit, Inherit::Normal)
+        || !matches!(child_data.inherit, Inherit::Normal)
     {
         return;
     }
+    let (Some(parent), Some(child)) = (bones.get(parent_idx), bones.get(child_idx)) else {
+        return;
+    };
     let bend_dir = pose.bend_direction as f32;
     let mix = pose.mix;
     let stretch = pose.stretch;
     let mut softness = pose.softness;
 
-    let (px, py) = (bones[parent_idx].x, bones[parent_idx].y);
-    let (mut psx, mut psy) = (bones[parent_idx].scale_x, bones[parent_idx].scale_y);
-    let cx = bones[child_idx].x;
-    let cy = bones[child_idx].y;
-    let mut csx = bones[child_idx].scale_x;
-    let parent_rot = bones[parent_idx].rotation;
-    let child_rot = bones[child_idx].rotation;
-    let child_shear_x = bones[child_idx].shear_x;
+    let (px, py) = (parent.x, parent.y);
+    let (mut psx, mut psy) = (parent.scale_x, parent.scale_y);
+    let cx = child.x;
+    let cy = child.y;
+    let mut csx = child.scale_x;
+    let parent_rot = parent.rotation;
+    let child_rot = child.rotation;
+    let child_shear_x = child.shear_x;
+    let (pa, pb, pc, pd, pwx, pwy) = (
+        parent.a(),
+        parent.b(),
+        parent.c(),
+        parent.d(),
+        parent.world_x(),
+        parent.world_y(),
+    );
+    let grandparent = parent.parent();
 
     let os1;
     let os2;
@@ -273,16 +299,14 @@ fn apply2(
         os2 = 0.0;
     }
 
-    let (pa, pb, pc, pd, pwx, pwy) = {
-        let p = &bones[parent_idx];
-        (p.a(), p.b(), p.c(), p.d(), p.world_x(), p.world_y())
-    };
     let u = (psx - psy).abs() <= EPSILON;
     let mut child_y = cy;
     let (cwx, cwy);
     if !u || stretch {
         child_y = 0.0;
-        bones[child_idx].y = 0.0;
+        if let Some(child) = bones.get_mut(child_idx) {
+            child.y = 0.0;
+        }
         cwx = pa * cx + pwx;
         cwy = pc * cx + pwy;
     } else {
@@ -290,13 +314,10 @@ fn apply2(
         cwy = pc * cx + pd * cy + pwy;
     }
 
-    let Some(gp_idx) = bones[parent_idx].parent() else {
+    let Some(g) = grandparent.and_then(|gp_idx| bones.get(gp_idx)) else {
         return;
     };
-    let (ga, gb, gc, gd, gwx, gwy) = {
-        let g = &bones[gp_idx];
-        (g.a(), g.b(), g.c(), g.d(), g.world_x(), g.world_y())
-    };
+    let (ga, gb, gc, gd, gwx, gwy) = (g.a(), g.b(), g.c(), g.d(), g.world_x(), g.world_y());
     let id0 = ga * gd - gb * gc;
     let id = if id0.abs() <= EPSILON { 0.0 } else { 1.0 / id0 };
     let mut x = cwx - gwx;
@@ -304,7 +325,7 @@ fn apply2(
     let dx = (x * gd - y * gb) * id - px;
     let dy = (y * ga - x * gc) * id - py;
     let l1 = (dx * dx + dy * dy).sqrt();
-    let mut l2 = data.bones[child_idx].length * csx;
+    let mut l2 = child_data.length * csx;
 
     if l1 < EPSILON {
         apply1(
@@ -320,7 +341,9 @@ fn apply2(
             skel_sx,
             skel_sy,
         );
-        bones[child_idx].rotation = 0.0;
+        if let Some(child) = bones.get_mut(child_idx) {
+            child.rotation = 0.0;
+        }
         return;
     }
 
@@ -354,15 +377,17 @@ fn apply2(
             cos = 1.0;
             a2 = 0.0;
             if stretch {
-                let s = (dd.sqrt() / (l1 + l2) - 1.0) * mix + 1.0;
-                bones[parent_idx].scale_x *= s;
-                match ik.scale_y_mode {
-                    ScaleYMode::Uniform => bones[parent_idx].scale_y *= s,
-                    ScaleYMode::Volume => {
-                        let div = if s < 0.7 { 0.25 + 0.642_857 * s } else { s };
-                        bones[parent_idx].scale_y /= div;
+                if let Some(parent) = bones.get_mut(parent_idx) {
+                    let s = (dd.sqrt() / (l1 + l2) - 1.0) * mix + 1.0;
+                    parent.scale_x *= s;
+                    match ik.scale_y_mode {
+                        ScaleYMode::Uniform => parent.scale_y *= s,
+                        ScaleYMode::Volume => {
+                            let div = if s < 0.7 { 0.25 + 0.642_857 * s } else { s };
+                            parent.scale_y /= div;
+                        }
+                        ScaleYMode::None => {}
                     }
-                    ScaleYMode::None => {}
                 }
             }
         } else {
@@ -445,14 +470,18 @@ fn apply2(
     } else if a1d <= -180.0 {
         a1d += 360.0;
     }
-    bones[parent_idx].rotation = parent_rot + a1d * mix;
+    if let Some(parent) = bones.get_mut(parent_idx) {
+        parent.rotation = parent_rot + a1d * mix;
+    }
     let mut a2d = ((a2 + os).to_degrees() - child_shear_x) * s2 + os2 - child_rot;
     if a2d > 180.0 {
         a2d -= 360.0;
     } else if a2d <= -180.0 {
         a2d += 360.0;
     }
-    bones[child_idx].rotation = child_rot + a2d * mix;
+    if let Some(child) = bones.get_mut(child_idx) {
+        child.rotation = child_rot + a2d * mix;
+    }
 }
 
 #[cfg(test)]
@@ -588,5 +617,95 @@ mod tests {
         // mix 0 -> aim keeps its setup orientation (+x): (a, c) ~= (1, 0).
         let aim = sk.bone(1).unwrap();
         assert!((aim.a() - 1.0).abs() < 1e-3 && aim.c().abs() < 1e-3);
+    }
+
+    /// The local pose fields the solver writes.
+    fn local_pose(bones: &[Bone]) -> Vec<[f32; 5]> {
+        bones
+            .iter()
+            .map(|b| [b.x, b.y, b.rotation, b.scale_x, b.scale_y])
+            .collect()
+    }
+
+    #[test]
+    fn out_of_range_indices_skip_the_constraint() {
+        let data = SkeletonData {
+            bones: vec![
+                bone(0, "root", None, 0.0, 0.0, 0.0),
+                bone(1, "thigh", Some(0), 0.0, 0.0, 10.0),
+                bone(2, "shin", Some(1), 10.0, 0.0, 10.0),
+            ],
+            ..Default::default()
+        };
+        let mut sk = Skeleton::new(Arc::new(data.clone()));
+        sk.update_world_transform();
+        let before = sk.bones().to_vec();
+        let bad = SkeletonData {
+            ik_constraints: vec![
+                ik("bad-target", vec![1], 99),
+                ik("bad-bone", vec![99], 0),
+                ik("bad-parent", vec![99, 2], 0),
+                ik("bad-child", vec![1, 99], 0),
+            ],
+            ..data
+        };
+        let pose = IkConstraint::from_data(&bad.ik_constraints[0]);
+        // The last index is past the constraint list.
+        for c in 0..=bad.ik_constraints.len() {
+            let mut bones = before.clone();
+            solve(&mut bones, &bad, c, &pose, 1.0, 1.0);
+            assert_eq!(local_pose(&bones), local_pose(&before), "constraint {c}");
+        }
+    }
+
+    #[test]
+    fn parent_outside_the_bone_list_skips_the_constraint() {
+        // Bone 1's parent is bone 3, which the slice below leaves out.
+        let data = SkeletonData {
+            bones: vec![
+                bone(0, "root", None, 0.0, 0.0, 0.0),
+                bone(1, "thigh", Some(3), 0.0, 0.0, 10.0),
+                bone(2, "shin", Some(1), 10.0, 0.0, 10.0),
+                bone(3, "hip", Some(0), 0.0, 0.0, 0.0),
+            ],
+            ik_constraints: vec![ik("one", vec![1], 0), ik("two", vec![1, 2], 0)],
+            ..Default::default()
+        };
+        let mut sk = Skeleton::new(Arc::new(data.clone()));
+        sk.update_world_transform();
+        let before = sk.bones()[..3].to_vec();
+        for c in 0..2 {
+            let mut bones = before.clone();
+            let pose = IkConstraint::from_data(&data.ik_constraints[c]);
+            solve(&mut bones, &data, c, &pose, 1.0, 1.0);
+            assert_eq!(local_pose(&bones), local_pose(&before), "constraint {c}");
+        }
+    }
+
+    #[test]
+    fn non_finite_values_do_not_panic() {
+        for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 0.0] {
+            let mut cdata = ik("leg-ik", vec![1, 2], 3);
+            cdata.mix = value;
+            cdata.softness = value;
+            cdata.stretch = true;
+            cdata.compress = true;
+            cdata.scale_y_mode = ScaleYMode::Volume;
+            let mut thigh = bone(1, "thigh", Some(0), 0.0, 0.0, value);
+            thigh.scale = Vec2::new(value, 1.0);
+            let data = SkeletonData {
+                bones: vec![
+                    bone(0, "root", None, 0.0, 0.0, 0.0),
+                    thigh,
+                    bone(2, "shin", Some(1), value, 0.0, 10.0),
+                    bone(3, "target", Some(0), value, 10.0, 0.0),
+                ],
+                ik_constraints: vec![cdata],
+                ..Default::default()
+            };
+            let mut sk = Skeleton::new(Arc::new(data));
+            sk.scale_x = value;
+            sk.update_world_transform();
+        }
     }
 }
