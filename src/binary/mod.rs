@@ -8,8 +8,8 @@
 //!
 //! The reader primitives ([`BinaryReader`]) are stable across Spine 4.x, while
 //! the section layouts follow the Spine 4.3 binary format. The loader
-//! covers the full format: header, bones, slots, constraints, skins, events,
-//! and animations (with the per-slider physics index trailer).
+//! reads every section: header, bones, slots, constraints, skins, events,
+//! and animations (with the per-slider animation index trailer).
 
 use std::sync::Arc;
 
@@ -48,7 +48,7 @@ pub enum BinaryError {
     /// The data ended before the skeleton could be read.
     Truncated,
     /// The header declared an export from a Spine release whose binary layout
-    /// this loader does not read (it reads [`SUPPORTED_VERSION`] exports).
+    /// this loader does not read (it reads Spine 4.3 exports).
     UnsupportedVersion {
         /// The version string the header declared.
         found: String,
