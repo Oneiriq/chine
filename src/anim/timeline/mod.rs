@@ -533,6 +533,19 @@ pub(crate) enum Timeline {
 }
 
 impl Timeline {
+    /// The bone this timeline changes, for a bone timeline.
+    pub(crate) fn bone(&self) -> Option<usize> {
+        match self {
+            Timeline::Rotate(t)
+            | Timeline::Translate(t)
+            | Timeline::Scale(t)
+            | Timeline::Shear(t)
+            | Timeline::BoneAxis(t, _) => Some(t.bone),
+            Timeline::Inherit(t) => Some(t.bone),
+            _ => None,
+        }
+    }
+
     /// Apply this timeline to `skeleton` over the window `(last_time, time]`.
     /// `from`, `add`, and `out` follow Spine's mix semantics. `out` only affects
     /// scale, IK, and inherit. `last_time` is used only by the physics reset and event

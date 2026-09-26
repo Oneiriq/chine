@@ -172,7 +172,12 @@ pub(super) fn build_update_cache(
                         None => true,
                     };
                     if bone_active && applies(slider.skin_required, SkinConstraint::Slider(i)) {
-                        walk.sort_slider(slider, i);
+                        let animated = slider
+                            .animation_index
+                            .and_then(|a| data.animations.get(a))
+                            .map(|a| a.bones())
+                            .unwrap_or_default();
+                        walk.sort_slider(slider, i, &animated);
                     }
                 }
             }
@@ -307,14 +312,19 @@ impl Walk<'_> {
         self.sort_reset(pd.bone);
     }
 
-    /// Sort a slider into the cache: its source bone is computed before it so
-    /// its property can be read. The animation it scrubs is applied when the
-    /// slider runs.
-    fn sort_slider(&mut self, slider: &SliderData, idx: usize) {
-        if let Some(bone) = slider.bone {
+    /// Sort a slider into the cache: a source bone read in world space is
+    /// computed before it so its property can be read. The animation it
+    /// scrubs is applied when the slider runs, so the `animated` bones that
+    /// animation changes, and their descendants, are computed again after it.
+    fn sort_slider(&mut self, slider: &SliderData, idx: usize, animated: &[usize]) {
+        if let (Some(bone), false) = (slider.bone, slider.local) {
             self.sort_bone(bone);
         }
         self.cache.push(Updatable::Slider(idx));
+        for &bone in animated {
+            self.set_sorted(bone, false);
+            self.sort_reset(bone);
+        }
     }
 
     /// Add `bone` and any unsorted ancestors to the cache once, parents first.

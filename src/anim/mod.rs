@@ -74,6 +74,14 @@ impl Animation {
         self.duration
     }
 
+    /// The bones this animation's timelines change, once each.
+    pub(crate) fn bones(&self) -> Vec<usize> {
+        let mut bones: Vec<usize> = self.timelines.iter().filter_map(Timeline::bone).collect();
+        bones.sort_unstable();
+        bones.dedup();
+        bones
+    }
+
     /// Apply every timeline to `skeleton` over the window `(last_time, time]`
     /// (seconds), mixing with weight `alpha` from `from`. `add` selects additive
     /// blending. `last_time` is used only by the physics reset and event

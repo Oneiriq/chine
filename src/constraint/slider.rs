@@ -340,6 +340,55 @@ mod tests {
         }
     }
 
+    // Spine computes the bones a slider's animation changes again after the
+    // slider, with their descendants. The update cache computed a bone once,
+    // so a bone sorted before the slider kept a world transform that ignored
+    // the slider.
+    #[test]
+    fn bones_a_slider_animates_are_computed_after_it() {
+        // The scrubbed animation rotates the root to 90 degrees at time 1.
+        let mut rot = BoneTimeline::one_value(0, 1, 0);
+        rot.set_frame1(0, 1.0, 90.0);
+        let scrub = Animation::new("scrub", 1.0, vec![Timeline::Rotate(rot)]);
+        // A slider on the root's child, read in world space, pinned to time 1.
+        let slider = SliderData {
+            name: "s".into(),
+            bone: Some(1),
+            property: Some(SliderProperty::Rotate),
+            animation_index: Some(0),
+            offset: 1.0,
+            scale: 0.0,
+            ..Default::default()
+        };
+        let data = SkeletonData {
+            bones: vec![
+                BoneData {
+                    index: 0,
+                    name: "root".into(),
+                    ..Default::default()
+                },
+                BoneData {
+                    index: 1,
+                    name: "child".into(),
+                    parent: Some(0),
+                    ..Default::default()
+                },
+            ],
+            sliders: vec![slider],
+            animations: vec![Arc::new(scrub)],
+            ..Default::default()
+        };
+        let mut sk = Skeleton::new(Arc::new(data));
+        sk.update_world_transform();
+        let root = sk.bone(0).unwrap();
+        assert!(
+            root.a().abs() < 1e-5 && (root.c() - 1.0).abs() < 1e-5,
+            "{root:?}"
+        );
+        let child = sk.bone(1).unwrap();
+        assert!((child.c() - 1.0).abs() < 1e-5, "{child:?}");
+    }
+
     #[test]
     fn out_of_range_slider_or_animation_index_is_ignored() {
         let slider = SliderData {
