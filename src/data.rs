@@ -2,7 +2,7 @@
 //!
 //! [`SkeletonData`] is the shared, read-only description of a rig: its bones,
 //! slots, skins, attachments, animations, events, and constraints. A posable
-//! `Skeleton` instance is created from it; many skeletons can share one
+//! `Skeleton` instance is created from it. Many skeletons can share one
 //! `SkeletonData`.
 
 use std::sync::Arc;
@@ -160,7 +160,7 @@ pub struct SkeletonData {
     pub position: Vec2,
     /// Setup-pose bounds size (the export's `width`/`height`).
     pub size: Vec2,
-    /// Spine's `referenceScale` for physics (the default is 100); physics
+    /// Spine's `referenceScale` for physics (the default is 100). Physics
     /// treats a non-positive value as that default.
     pub reference_scale: f32,
     /// Bones in hierarchy order: the root first, every parent before its

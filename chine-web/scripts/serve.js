@@ -20,14 +20,30 @@ const MIME = {
   ".css": "text/css",
 };
 
+function reply(res, status, text) {
+  res.writeHead(status, { "Content-Type": "text/plain" });
+  res.end(text);
+}
+
 http
   .createServer((req, res) => {
-    const rel = decodeURIComponent(req.url.split("?")[0]);
+    let rel;
+    try {
+      rel = decodeURIComponent(req.url.split("?")[0]);
+    } catch {
+      // A malformed percent escape would otherwise throw and stop the server.
+      reply(res, 400, "400 bad request");
+      return;
+    }
     const fp = path.join(root, rel === "/" ? "/index.html" : rel);
+    // Serve only files under the root: `..` segments must not climb out.
+    if (!fp.startsWith(root + path.sep)) {
+      reply(res, 403, "403 " + rel);
+      return;
+    }
     fs.readFile(fp, (err, data) => {
       if (err) {
-        res.writeHead(404, { "Content-Type": "text/plain" });
-        res.end("404 " + rel);
+        reply(res, 404, "404 " + rel);
         return;
       }
       res.writeHead(200, {

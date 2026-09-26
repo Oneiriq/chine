@@ -1,8 +1,12 @@
-//! Bone-property animation timelines (rotate / translate / scale).
+//! Animation timelines: bone, constraint, slot, draw order, event, deform, and
+//! sequence.
 //!
-//! Each timeline keys one bone over time via a [`Curve`]. The apply logic
-//! re-implements Spine 4.3's: rotate/translate values are **added** to the
-//! setup pose, scale values **multiply** it (with sign-adjusted mixing).
+//! Curve timelines key their values over time via a [`Curve`]. The apply logic
+//! re-implements Spine 4.3's: rotate / translate / shear values are **added**
+//! to the setup pose, scale values **multiply** it (with sign-adjusted mixing),
+//! and constraint and slot values replace it. The `apply` module holds the
+//! bone, constraint, physics reset, and event timelines, and the `slot` module
+//! holds the slot timelines.
 
 use super::curve::{absolute_value_with, Curve};
 use super::MixFrom;
@@ -177,35 +181,37 @@ impl DrawOrderTimeline {
 }
 
 /// Compute a draw order from slot offsets, mirroring Spine: each listed slot
-/// moves by its offset; the rest keep their relative order. Shared by the JSON
+/// moves by its offset, and the rest keep their relative order. Shared by the JSON
 /// and binary loaders.
+///
+/// Spine never exports a slot index past `slot_count`, a slot listed twice, or
+/// a move outside the draw order. Such entries are skipped here. A position no
+/// slot fills keeps `usize::MAX`, which the renderer skips.
 pub(crate) fn compute_draw_order(slot_count: usize, offsets: &mut [(usize, i32)]) -> Vec<usize> {
     offsets.sort_by_key(|(slot, _)| *slot);
     let mut draw_order = vec![usize::MAX; slot_count];
-    let mut unchanged = vec![0usize; slot_count.saturating_sub(offsets.len())];
+    let mut unchanged = Vec::with_capacity(slot_count.saturating_sub(offsets.len()));
     let mut original_index = 0;
-    let mut unchanged_index = 0;
     for &(slot_index, offset) in offsets.iter() {
-        while original_index != slot_index && original_index < slot_count {
-            unchanged[unchanged_index] = original_index;
-            unchanged_index += 1;
-            original_index += 1;
+        if slot_index >= slot_count || slot_index < original_index {
+            continue;
         }
-        let pos = original_index as i32 + offset;
-        if (0..slot_count as i32).contains(&pos) {
-            draw_order[pos as usize] = original_index;
+        unchanged.extend(original_index..slot_index);
+        let pos = i64::try_from(slot_index)
+            .ok()
+            .and_then(|slot| slot.checked_add(i64::from(offset)))
+            .and_then(|pos| usize::try_from(pos).ok());
+        if let Some(entry) = pos.and_then(|pos| draw_order.get_mut(pos)) {
+            *entry = slot_index;
         }
-        original_index += 1;
+        original_index = slot_index + 1;
     }
-    while original_index < slot_count {
-        unchanged[unchanged_index] = original_index;
-        unchanged_index += 1;
-        original_index += 1;
-    }
-    for i in (0..slot_count).rev() {
-        if draw_order[i] == usize::MAX && unchanged_index > 0 {
-            unchanged_index -= 1;
-            draw_order[i] = unchanged[unchanged_index];
+    unchanged.extend(original_index..slot_count);
+    for entry in draw_order.iter_mut().rev() {
+        if *entry == usize::MAX {
+            if let Some(slot) = unchanged.pop() {
+                *entry = slot;
+            }
         }
     }
     draw_order
@@ -261,7 +267,7 @@ impl SequenceTimeline {
 }
 
 /// A mesh deform timeline: per-keyframe vertex offsets. For an unweighted mesh
-/// they add to the setup vertices; for a weighted mesh the setup is zero and the
+/// they add to the setup vertices. For a weighted mesh the setup is zero and the
 /// offsets add per-influence in `compute_vertices`. Only applies while the slot
 /// shows the matching attachment.
 #[derive(Debug, Clone)]
@@ -374,7 +380,8 @@ pub(crate) enum BoneAxis {
     ShearY,
 }
 
-/// A keyframed animation channel for one bone property or constraint mix.
+/// A keyframed animation channel: one bone property, constraint mix, or slot
+/// property, or the draw order, events, or a mesh deform.
 #[derive(Debug, Clone)]
 pub(crate) enum Timeline {
     /// Local rotation (degrees).
@@ -405,12 +412,12 @@ pub(crate) enum Timeline {
     SliderTime(ConstraintTimeline),
     /// Slider mix.
     SliderMix(ConstraintTimeline),
-    /// Slot tint color; the index is the slot, the flag whether alpha is keyed
+    /// Slot tint color. The index is the slot, and the flag is whether alpha is keyed
     /// (RGBA vs RGB).
     SlotColor(ConstraintTimeline, bool),
     /// Slot tint alpha only (the slot color's alpha channel).
     SlotAlpha(ConstraintTimeline),
-    /// Slot two-color (light + dark); the flag is whether the light has alpha
+    /// Slot two-color (light + dark). The flag is whether the light has alpha
     /// (RGBA2 vs RGB2).
     SlotTwoColor(ConstraintTimeline, bool),
     /// Slot attachment swap (stepped).
@@ -419,7 +426,7 @@ pub(crate) enum Timeline {
     DrawOrder(DrawOrderTimeline),
     /// Animation events fired on keyframe crossings.
     Event(EventTimeline),
-    /// Mesh deform (unweighted local-vertex offsets).
+    /// Mesh deform (per-vertex offsets).
     Deform(DeformTimeline),
     /// Slot sequence (flipbook) frame index.
     Sequence(SequenceTimeline),
@@ -427,8 +434,9 @@ pub(crate) enum Timeline {
 
 impl Timeline {
     /// Apply this timeline to `skeleton` over the window `(last_time, time]`.
-    /// `from`/`add`/`out` follow Spine's mix semantics; `out` only affects
-    /// scale; `last_time` is used only by the physics reset timeline.
+    /// `from`, `add`, and `out` follow Spine's mix semantics. `out` only affects
+    /// scale and IK. `last_time` is used only by the physics reset and event
+    /// timelines.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn apply(
         &self,
@@ -476,7 +484,9 @@ impl Timeline {
 }
 
 mod apply;
+mod slot;
 use apply::*;
+use slot::*;
 
 #[cfg(test)]
 mod tests {
@@ -514,7 +524,7 @@ mod tests {
 
     #[test]
     fn rotate_respects_setup_offset_and_alpha() {
-        // Setup rotation 30; animation keys +60 at full; mix at half weight.
+        // Setup rotation 30. Animation keys +60 at full. Mix at half weight.
         let mut sk = skeleton(30.0);
         let mut t = BoneTimeline::one_value(0, 2, 0);
         t.set_frame1(0, 0.0, 0.0);

@@ -9,19 +9,20 @@ use crate::anim::{
 use crate::event::Event;
 
 /// Parse one animation: bone, slot, deform, event, draw-order, and constraint
-/// timelines.
+/// timelines. `names` resolves the names timelines refer to, and `budget`
+/// caps the data that deform, draw order, and event keys expand to.
 pub(super) fn parse_animation(
     name: &str,
     anim: &Value,
     data: &SkeletonData,
+    names: &Names,
+    budget: &mut Budget,
 ) -> Result<Animation, LoadError> {
     let mut timelines = Vec::new();
     let mut duration = 0.0_f32;
     if let Some(bones) = anim.get("bones").and_then(Value::as_object) {
         for (bone_name, props) in bones {
-            let bone = data
-                .find_bone(bone_name)
-                .ok_or_else(|| LoadError::BadReference(bone_name.clone()))?;
+            let bone = names.bone(bone_name)?;
             let Some(props) = props.as_object() else {
                 continue;
             };
@@ -88,11 +89,7 @@ pub(super) fn parse_animation(
             if keys.is_empty() {
                 continue;
             }
-            let idx = data
-                .ik_constraints
-                .iter()
-                .position(|c| c.name == *cname)
-                .ok_or_else(|| LoadError::BadReference(cname.clone()))?;
+            let idx = lookup(&names.ik, cname)?;
             let (tl, dur) = read_ik_timeline(keys, idx);
             duration = duration.max(dur);
             timelines.push(Timeline::Ik(tl));
@@ -106,11 +103,7 @@ pub(super) fn parse_animation(
             if keys.is_empty() {
                 continue;
             }
-            let idx = data
-                .transform_constraints
-                .iter()
-                .position(|c| c.name == *cname)
-                .ok_or_else(|| LoadError::BadReference(cname.clone()))?;
+            let idx = lookup(&names.transform, cname)?;
             let (tl, dur) = read_curve_timeline(keys, idx, TRANSFORM_MIX);
             duration = duration.max(dur);
             timelines.push(Timeline::TransformMix(tl));
@@ -118,11 +111,7 @@ pub(super) fn parse_animation(
     }
     if let Some(pcs) = anim.get("path").and_then(Value::as_object) {
         for (cname, channels) in pcs {
-            let idx = data
-                .path_constraints
-                .iter()
-                .position(|c| c.name == *cname)
-                .ok_or_else(|| LoadError::BadReference(cname.clone()))?;
+            let idx = lookup(&names.path, cname)?;
             let Some(channels) = channels.as_object() else {
                 continue;
             };
@@ -163,10 +152,7 @@ pub(super) fn parse_animation(
             let idx = if cname.is_empty() {
                 GLOBAL_PHYSICS
             } else {
-                data.physics_constraints
-                    .iter()
-                    .position(|c| c.name == *cname)
-                    .ok_or_else(|| LoadError::BadReference(cname.clone()))?
+                lookup(&names.physics, cname)?
             };
             let Some(channels) = channels.as_object() else {
                 continue;
@@ -205,9 +191,7 @@ pub(super) fn parse_animation(
 
     if let Some(slots) = anim.get("slots").and_then(Value::as_object) {
         for (slot_name, channels) in slots {
-            let idx = data
-                .find_slot(slot_name)
-                .ok_or_else(|| LoadError::BadReference(slot_name.clone()))?;
+            let idx = names.slot(slot_name)?;
             let Some(channels) = channels.as_object() else {
                 continue;
             };
@@ -272,8 +256,13 @@ pub(super) fn parse_animation(
         let mut times = Vec::with_capacity(dos.len());
         let mut orders = Vec::with_capacity(dos.len());
         for k in dos {
+            // Each key holds a full slot ordering.
+            budget.charge(
+                slot_count.saturating_mul(size_of::<usize>()),
+                "a draw order key",
+            )?;
             times.push(f(k, "time"));
-            orders.push(read_draw_order(k, slot_count, data));
+            orders.push(read_draw_order(k, slot_count, names)?);
         }
         if let Some(&dur) = times.last() {
             duration = duration.max(dur);
@@ -283,7 +272,7 @@ pub(super) fn parse_animation(
 
     if let Some(events) = anim.get("events").and_then(Value::as_array) {
         if !events.is_empty() {
-            let (tl, dur) = read_event_timeline(events, data);
+            let (tl, dur) = read_event_timeline(events, data, names, budget)?;
             duration = duration.max(dur);
             timelines.push(Timeline::Event(tl));
         }
@@ -294,13 +283,13 @@ pub(super) fn parse_animation(
             let skin = if skin_name == "default" {
                 None
             } else {
-                data.find_skin(skin_name)
+                names.skin(data, skin_name)
             };
             let Some(slots) = slots.as_object() else {
                 continue;
             };
             for (slot_name, attachments) in slots {
-                let Some(slot_idx) = data.find_slot(slot_name) else {
+                let Some(&slot_idx) = names.slots.get(slot_name.as_str()) else {
                     continue;
                 };
                 let Some(attachments) = attachments.as_object() else {
@@ -318,6 +307,14 @@ pub(super) fn parse_animation(
                         continue;
                     };
                     let frame_len = mesh.deform_len();
+                    let n = keys.len();
+                    // The setup vertices plus one full frame per key.
+                    budget.charge(
+                        n.saturating_add(1)
+                            .saturating_mul(frame_len)
+                            .saturating_mul(size_of::<f32>()),
+                        "a deform timeline",
+                    )?;
                     // Unweighted: setup = the bind vertices (offsets add to them).
                     // Weighted: setup = zeros (offsets are added per-influence to
                     // the bind positions in compute_vertices).
@@ -325,7 +322,6 @@ pub(super) fn parse_animation(
                         Some(v) => v.to_vec(),
                         None => vec![0.0; frame_len],
                     };
-                    let n = keys.len();
                     let mut times = Vec::with_capacity(n);
                     let mut frames = Vec::with_capacity(n);
                     for k in keys {
@@ -368,8 +364,9 @@ pub(super) fn parse_animation(
     // one-value curve keyed by slider name.
     if let Some(sliders) = anim.get("slider").and_then(Value::as_object) {
         for (slider_name, channels) in sliders {
-            // JSON slider constraint setup is not parsed yet (binary only), so a
-            // slider animation with no matching constraint is skipped, not an error.
+            // The JSON loader does not parse slider constraints (only the binary
+            // loader does), so a slider timeline with no matching constraint is
+            // skipped, not an error.
             let Some(idx) = data.sliders.iter().position(|s| s.name == *slider_name) else {
                 continue;
             };
@@ -407,13 +404,13 @@ pub(super) fn parse_animation(
             let skin = if skin_name == "default" {
                 None
             } else {
-                data.find_skin(skin_name)
+                names.skin(data, skin_name)
             };
             let Some(slots) = slots.as_object() else {
                 continue;
             };
             for (slot_name, atts) in slots {
-                let Some(slot_idx) = data.find_slot(slot_name) else {
+                let Some(&slot_idx) = names.slots.get(slot_name.as_str()) else {
                     continue;
                 };
                 let Some(atts) = atts.as_object() else {
@@ -436,7 +433,11 @@ pub(super) fn parse_animation(
                     let mut mode_and_index = Vec::with_capacity(n);
                     let mut delays = Vec::with_capacity(n);
                     for k in seq_keys {
-                        let index = k.get("index").and_then(Value::as_u64).unwrap_or(0) as u32;
+                        // The index shares a `u32` with the 4-bit mode, so a
+                        // larger index saturates instead of losing its high bits.
+                        let index = k.get("index").and_then(Value::as_u64).map_or(0, |i| {
+                            u32::try_from(i).unwrap_or(u32::MAX).min(u32::MAX >> 4)
+                        });
                         let mode = sequence_mode(k.get("mode").and_then(Value::as_str));
                         times.push(f(k, "time"));
                         mode_and_index.push((index << 4) | mode);
@@ -561,7 +562,6 @@ impl CurveBuilder for BoneTimeline {
     fn stepped(&mut self, frame: usize) {
         self.set_stepped(frame);
     }
-    #[allow(clippy::too_many_arguments)]
     fn bezier(
         &mut self,
         bezier: usize,
@@ -586,7 +586,6 @@ impl CurveBuilder for ConstraintTimeline {
     fn stepped(&mut self, frame: usize) {
         self.set_stepped(frame);
     }
-    #[allow(clippy::too_many_arguments)]
     fn bezier(
         &mut self,
         bezier: usize,
@@ -611,7 +610,6 @@ impl CurveBuilder for DeformTimeline {
     fn stepped(&mut self, frame: usize) {
         self.set_stepped(frame);
     }
-    #[allow(clippy::too_many_arguments)]
     fn bezier(
         &mut self,
         bezier: usize,
@@ -633,7 +631,7 @@ impl CurveBuilder for DeformTimeline {
 }
 
 /// Apply one keyframe's `curve` field (absent = linear, `"stepped"`, or a Bezier
-/// array; the array holds 4 floats per value channel at offset `value_ord * 4`).
+/// array, which holds 4 floats per value channel at offset `value_ord * 4`).
 /// Mirrors Spine's `readCurve`.
 #[allow(clippy::too_many_arguments)]
 fn read_curve(
@@ -713,7 +711,7 @@ fn read_curve_timeline(
     (tl, duration)
 }
 
-/// Read an IK constraint timeline: mix and softness are Bezier-curved; bend
+/// Read an IK constraint timeline: mix and softness are Bezier-curved. Bend
 /// direction, compress, and stretch are stored stepped.
 fn read_ik_timeline(keys: &[Value], constraint: usize) -> (ConstraintTimeline, f32) {
     let n = keys.len();
@@ -783,7 +781,7 @@ fn read_slot_rgba_timeline(keys: &[Value], slot: usize) -> (ConstraintTimeline, 
 }
 
 /// Read a slot RGB color timeline (three channels from each keyframe's `color`
-/// hex string; the slot's alpha is left unchanged).
+/// hex string, and the slot's alpha is left unchanged).
 fn read_slot_rgb_timeline(keys: &[Value], slot: usize) -> (ConstraintTimeline, f32) {
     let n = keys.len();
     let mut tl = ConstraintTimeline::new(slot, n, n * 3, 4);
@@ -870,46 +868,85 @@ fn read_slot_two_color_timeline(
 }
 
 /// Read one draw-order keyframe's `offsets` into a full slot ordering (the setup
-/// order when there are no offsets).
-fn read_draw_order(k: &Value, slot_count: usize, data: &SkeletonData) -> Vec<usize> {
+/// order when there are no offsets). Offsets naming an unknown slot are skipped.
+/// Spine moves each listed slot to `slot + offset`, so an offset that lands
+/// outside the slot list, a slot listed twice, or two slots moved to one
+/// position is corrupt data and is rejected.
+fn read_draw_order(k: &Value, slot_count: usize, names: &Names) -> Result<Vec<usize>, LoadError> {
+    let corrupt = || LoadError::Schema("draw order offsets do not form a slot order".to_string());
     let mut offsets: Vec<(usize, i32)> = Vec::new();
     if let Some(offs) = k.get("offsets").and_then(Value::as_array) {
         for o in offs {
             let Some(slot_name) = o.get("slot").and_then(Value::as_str) else {
                 continue;
             };
-            let Some(slot_index) = data.find_slot(slot_name) else {
+            let Some(&slot_index) = names.slots.get(slot_name) else {
                 continue;
             };
-            let offset = o.get("offset").and_then(Value::as_i64).unwrap_or(0) as i32;
+            let offset = o.get("offset").and_then(Value::as_i64).unwrap_or(0);
+            let in_range = i64::try_from(slot_index)
+                .ok()
+                .and_then(|slot| slot.checked_add(offset))
+                .and_then(|target| usize::try_from(target).ok())
+                .is_some_and(|target| target < slot_count);
+            if !in_range {
+                return Err(corrupt());
+            }
+            let offset = i32::try_from(offset).map_err(|_| corrupt())?;
             offsets.push((slot_index, offset));
         }
     }
     if offsets.is_empty() {
-        return (0..slot_count).collect();
+        return Ok((0..slot_count).collect());
     }
-    compute_draw_order(slot_count, &mut offsets)
+    offsets.sort_unstable_by_key(|&(slot, _)| slot);
+    if offsets
+        .windows(2)
+        .any(|pair| matches!(pair, [a, b] if a.0 == b.0))
+    {
+        return Err(corrupt());
+    }
+    let order = compute_draw_order(slot_count, &mut offsets);
+    // A position no slot filled keeps an out-of-range marker: two slots moved
+    // to the same position.
+    if order.iter().any(|&slot| slot >= slot_count) {
+        return Err(corrupt());
+    }
+    Ok(order)
 }
 
 /// Read an animation event timeline: each keyframe's event, resolving its value
 /// overrides against the named event's setup defaults.
-fn read_event_timeline(keys: &[Value], data: &SkeletonData) -> (EventTimeline, f32) {
+fn read_event_timeline(
+    keys: &[Value],
+    data: &SkeletonData,
+    names: &Names,
+    budget: &mut Budget,
+) -> Result<(EventTimeline, f32), LoadError> {
     let mut times = Vec::with_capacity(keys.len());
     let mut events = Vec::with_capacity(keys.len());
     let mut duration = 0.0_f32;
     for k in keys {
         let time = f(k, "time");
         let name = k.get("name").and_then(Value::as_str).unwrap_or("");
-        let setup = data.events.iter().find(|e| e.name == name);
+        let setup = names.events.get(name).and_then(|&i| data.events.get(i));
         let (di, df, ds, dv, db) = match setup {
             Some(e) => (
                 e.int_value,
                 e.float_value,
-                e.string_value.clone(),
+                e.string_value.as_str(),
                 e.volume,
                 e.balance,
             ),
-            None => (0, 0.0, String::new(), 1.0, 0.0),
+            None => (0, 0.0, "", 1.0, 0.0),
+        };
+        let string_value = match k.get("string").and_then(Value::as_str) {
+            Some(s) => s.to_string(),
+            None => {
+                // The key copies its event's setup string.
+                budget.charge(ds.len(), "an event key")?;
+                ds.to_string()
+            }
         };
         events.push(Event {
             name: name.to_string(),
@@ -919,27 +956,27 @@ fn read_event_timeline(keys: &[Value], data: &SkeletonData) -> (EventTimeline, f
                 .and_then(Value::as_i64)
                 .map_or(di, |v| v as i32),
             float_value: f_or(k, "float", df),
-            string_value: k
-                .get("string")
-                .and_then(Value::as_str)
-                .map_or(ds, String::from),
+            string_value,
             volume: f_or(k, "volume", dv),
             balance: f_or(k, "balance", db),
         });
         times.push(time);
         duration = duration.max(time);
     }
-    (EventTimeline::new(times, events), duration)
+    Ok((EventTimeline::new(times, events), duration))
 }
 
 /// Read one deform keyframe's sparse `offset`/`vertices` into a full `len`-long
-/// offset array (zero where unspecified).
+/// offset array (zero where unspecified). Values past the end are dropped.
 fn read_deform_frame(k: &Value, len: usize) -> Vec<f32> {
     let mut frame = vec![0.0; len];
-    let offset = k.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
-    for (j, v) in f_array(k, "vertices").into_iter().enumerate() {
-        if offset + j < len {
-            frame[offset + j] = v;
+    let offset = k.get("offset").and_then(Value::as_u64).unwrap_or(0);
+    let window = usize::try_from(offset)
+        .ok()
+        .and_then(|offset| frame.get_mut(offset..));
+    if let Some(window) = window {
+        for (slot, v) in window.iter_mut().zip(f_array(k, "vertices")) {
+            *slot = v;
         }
     }
     frame

@@ -8,8 +8,8 @@
 //!
 //! The reader primitives ([`BinaryReader`]) are stable across Spine 4.x, while
 //! the section layouts follow the Spine 4.3 binary format. The loader
-//! covers the full format: header, bones, slots, constraints, skins, events,
-//! and animations (with the per-slider physics index trailer).
+//! reads every section: header, bones, slots, constraints, skins, events,
+//! and animations (with the per-slider animation index trailer).
 
 use std::sync::Arc;
 
@@ -48,15 +48,17 @@ pub enum BinaryError {
     /// The data ended before the skeleton could be read.
     Truncated,
     /// The header declared an export from a Spine release whose binary layout
-    /// this loader does not read (it reads [`SUPPORTED_VERSION`] exports).
+    /// this loader does not read (it reads Spine 4.3 exports).
     UnsupportedVersion {
         /// The version string the header declared.
         found: String,
         /// The `major.minor` release this loader reads.
         expected: &'static str,
     },
-    /// A list declared more items than the remaining bytes could hold. Since
-    /// every item occupies at least one byte, the declared length is corrupt.
+    /// A length or index in the data is out of range. Either a list declared
+    /// more items than the remaining bytes could hold (every item takes at
+    /// least one byte), or a stored index, such as a bone parent, a slot, or a
+    /// constraint target, points past the table it names.
     CorruptLength,
     /// A constraint carried an unrecognized type tag (valid tags are 0 to 4).
     UnknownConstraintType(u8),
@@ -75,7 +77,7 @@ impl std::fmt::Display for BinaryError {
                 )
             }
             BinaryError::CorruptLength => {
-                write!(f, "a list length exceeds the remaining data")
+                write!(f, "a length or index in the skeleton data is out of range")
             }
             BinaryError::UnknownConstraintType(tag) => {
                 write!(f, "unknown constraint type tag {tag}")
@@ -99,6 +101,43 @@ fn version_supported(version: &str) -> bool {
     }
 }
 
+/// Record a corrupt index or length as [`BinaryError::CorruptLength`].
+///
+/// Once the data has run out, every read returns zero, so a bad value read
+/// after that point is a side effect of the truncation. It is not recorded,
+/// and the load reports [`BinaryError::Truncated`] instead.
+fn corrupt(r: &mut BinaryReader) {
+    if !r.overran() {
+        r.fail(BinaryError::CorruptLength);
+    }
+}
+
+/// The load's outcome so far: the first structural error, then truncation.
+fn status(r: &BinaryReader) -> Result<(), BinaryError> {
+    if let Some(error) = r.error() {
+        return Err(error.clone());
+    }
+    if r.overran() {
+        return Err(BinaryError::Truncated);
+    }
+    Ok(())
+}
+
+/// Whether every index in `indices` is below `len`.
+fn all_below(indices: &[usize], len: usize) -> bool {
+    indices.iter().all(|&i| i < len)
+}
+
+/// The number of constraints of every type. Spine 4.3 keeps one constraint
+/// list, and constraint timelines and skins index into it.
+fn constraint_count(data: &SkeletonData) -> usize {
+    data.ik_constraints.len()
+        + data.path_constraints.len()
+        + data.transform_constraints.len()
+        + data.physics_constraints.len()
+        + data.sliders.len()
+}
+
 /// Map a Spine inherit-mode ordinal to [`Inherit`].
 fn inherit_from(ordinal: usize) -> Inherit {
     match ordinal {
@@ -114,15 +153,27 @@ fn inherit_from(ordinal: usize) -> Inherit {
 ///
 /// The full section sequence is read: header, bones, slots, the IK / transform
 /// / path / physics / slider constraints, skins (including sequence
-/// attachments), events, and animations. Every timeline group is decoded: bone
+/// attachments), events, and animations. The timeline groups decoded are bone
 /// (rotate / translate / scale / shear), slot (attachment, color, two-color,
 /// alpha), deform, draw order, event, the IK / transform / path / physics
-/// constraint timelines, and the slider and sequence timelines.
+/// constraint timelines, and the slider and sequence timelines. Bone inherit
+/// timelines are not decoded and report
+/// [`BinaryError::UnknownTimelineType`], and draw order folder timelines are
+/// read past without being kept.
+///
+/// Every index the file stores (bone parents, slot bones, constraint bones and
+/// targets, timeline targets, skin slots, weighted vertex bones, mesh
+/// triangles, string table references, draw order moves, event and animation
+/// references) is checked against the table it points into, so the loaded
+/// data never indexes out of range.
 ///
 /// # Errors
 /// Returns [`BinaryError::UnsupportedVersion`] if the header declares an
-/// export from a Spine release other than 4.3, and
-/// [`BinaryError::Truncated`] if the data ends mid-skeleton.
+/// export from a Spine release other than 4.3,
+/// [`BinaryError::Truncated`] if the data ends mid-skeleton,
+/// [`BinaryError::CorruptLength`] if a length exceeds the remaining data or
+/// an index is out of range, and [`BinaryError::UnknownConstraintType`] or
+/// [`BinaryError::UnknownTimelineType`] for an unrecognized type tag.
 pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
     let mut r = BinaryReader::new(bytes);
     let mut data = SkeletonData::default();
@@ -156,7 +207,7 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
     }
 
     // String table: names (attachments, events, ...) the later sections refer to
-    // by index. Consumed here; used once those sections are read.
+    // by index. Consumed here and used once those sections are read.
     let string_count = r.count();
     let strings: Vec<String> = (0..string_count)
         .map(|_| r.string().unwrap_or_default())
@@ -184,7 +235,7 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
         if nonessential {
             let _color = r.u32();
             let _icon = r.string();
-            // Spine 4.3 added two editor-only bone floats here; consume them.
+            // Spine 4.3 added two editor-only bone floats here. Consume them.
             let _f0 = r.float();
             let _f1 = r.float();
             let _visible = r.bool();
@@ -201,6 +252,17 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
             inherit,
         });
     }
+    // Spine writes every parent before its children, so a parent at or after
+    // its child is corrupt. This also rules out parent cycles.
+    if !data
+        .bones
+        .iter()
+        .enumerate()
+        .all(|(i, b)| !matches!(b.parent, Some(p) if p >= i))
+    {
+        corrupt(&mut r);
+    }
+    status(&r)?;
 
     // Slots: draw order, each with a setup color, an optional dark (two-color)
     // tint, and the setup attachment (referenced into the string table).
@@ -226,9 +288,14 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
             blend,
         });
     }
+    let bone_count = data.bones.len();
+    if !data.slots.iter().all(|s| s.bone < bone_count) {
+        corrupt(&mut r);
+    }
+    status(&r)?;
 
     // Constraints are one typed list. Each begins with a name and a one-byte
-    // type (Spine 4.3: IK=0, path=1, transform=2, physics=3, slider=4); there
+    // type (Spine 4.3: IK=0, path=1, transform=2, physics=3, slider=4). There
     // is no explicit order (it is the read order across all types). IK packs
     // its flags into one byte and stores only non-default mix/softness.
     let constraint_count = r.count();
@@ -253,16 +320,20 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
             }
         }
     }
+    if !constraint_indices_valid(&data) {
+        corrupt(&mut r);
+    }
+    status(&r)?;
 
     // Skins: the default skin, then named skins. Attachments resolve their
     // names and paths through the string table.
-    let slot_names: Vec<String> = data.slots.iter().map(|s| s.name.clone()).collect();
-    data.default_skin = read_skin(&mut r, &strings, &slot_names, true, nonessential);
+    data.default_skin = read_skin(&mut r, &strings, &data, true, nonessential);
     let skin_count = r.count();
     for _ in 0..skin_count {
-        let skin = read_skin(&mut r, &strings, &slot_names, false, nonessential);
+        let skin = read_skin(&mut r, &strings, &data, false, nonessential);
         data.skins.push(skin);
     }
+    status(&r)?;
 
     // Resolve linked meshes before animations so deform timelines bind to the
     // resolved (parent-shared) geometry rather than unresolved links.
@@ -298,21 +369,44 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
         let aname = r.string().unwrap_or_default();
         let anim = read_animation(&mut r, aname, &data, &strings, nonessential);
         data.animations.push(Arc::new(anim));
+        status(&r)?;
     }
 
     // After the animations, each slider constraint records the index of the
     // animation it scrubs (read in constraint order, which is slider order).
+    let animation_count = data.animations.len();
     for slider in &mut data.sliders {
-        slider.animation_index = Some(r.var_usize());
+        let index = r.var_usize();
+        if index >= animation_count {
+            corrupt(&mut r);
+        }
+        slider.animation_index = Some(index);
     }
 
-    if let Some(error) = r.error() {
-        return Err(error.clone());
-    }
-    if r.overran() {
-        return Err(BinaryError::Truncated);
-    }
+    status(&r)?;
     Ok(data)
+}
+
+/// Whether every constraint's bone, target, and slot index is in range.
+fn constraint_indices_valid(data: &SkeletonData) -> bool {
+    let bones = data.bones.len();
+    let slots = data.slots.len();
+    data.ik_constraints
+        .iter()
+        .all(|c| c.target < bones && all_below(&c.bones, bones))
+        && data
+            .transform_constraints
+            .iter()
+            .all(|c| c.source < bones && all_below(&c.bones, bones))
+        && data
+            .path_constraints
+            .iter()
+            .all(|c| c.slot < slots && all_below(&c.bones, bones))
+        && data.physics_constraints.iter().all(|c| c.bone < bones)
+        && data
+            .sliders
+            .iter()
+            .all(|c| !matches!(c.bone, Some(b) if b >= bones))
 }
 
 /// Map a scale-Y-mode ordinal to [`ScaleYMode`].
@@ -378,7 +472,7 @@ fn parse_slider(
     data.additive = flags & 4 != 0;
     if flags & 8 != 0 {
         let value = r.float();
-        // When nonessential, this float is the editor maximum; otherwise it is
+        // When nonessential, this float is the editor maximum. Otherwise it is
         // the setup-pose slider time.
         if nonessential && flags & 64 != 0 {
             data.max = value;
@@ -400,9 +494,12 @@ fn parse_slider(
             3 => data.property = Some(SliderProperty::ScaleX),
             4 => data.property = Some(SliderProperty::ScaleY),
             5 => data.property = Some(SliderProperty::ShearY),
-            // An unknown property ordinal stops this constraint's property
-            // block (matching the reference's `continue`).
-            _ => return data,
+            // An unknown property ordinal is corrupt (Spine's reader cannot
+            // load it), and the fields after it are left unread.
+            _ => {
+                corrupt(r);
+                return data;
+            }
         }
         data.property_offset = property_offset;
         data.offset = r.float();
@@ -454,7 +551,7 @@ fn parse_path(r: &mut BinaryReader, name: String, order: usize) -> PathConstrain
 }
 
 /// Parse one physics constraint (Spine 4.3 bit-packed layout). A negative packed
-/// scale-X encodes the Y-scale mode; chine loads at scale 1.
+/// scale-X encodes the Y-scale mode. chine loads at scale 1.
 fn parse_physics(r: &mut BinaryReader, name: String, order: usize) -> PhysicsConstraintData {
     let bone = r.var_usize();
     let flags = r.byte();
@@ -540,7 +637,7 @@ fn to_prop_byte(b: u8) -> Option<ToProp> {
 }
 
 /// Parse one transform constraint (Spine 4.3 property-mapping layout). The flags
-/// byte's high bits hold the source-property count; offsets default to 0 and
+/// byte's high bits hold the source-property count. Offsets default to 0 and
 /// mixes to 1 when their flag is clear. chine loads at scale 1.
 fn parse_transform(r: &mut BinaryReader, name: String, order: usize) -> TransformConstraintData {
     let bone_count = r.count();
@@ -554,7 +651,10 @@ fn parse_transform(r: &mut BinaryReader, name: String, order: usize) -> Transfor
     let property_count = (flags >> 5) as usize;
     let mut properties = Vec::with_capacity(property_count);
     for _ in 0..property_count {
+        // An unknown property ordinal is corrupt (Spine's reader cannot load
+        // it), and the mapping is skipped.
         let Some(property) = from_prop_byte(r.byte()) else {
+            corrupt(r);
             continue;
         };
         let offset = r.float();
@@ -562,6 +662,7 @@ fn parse_transform(r: &mut BinaryReader, name: String, order: usize) -> Transfor
         let mut to = Vec::with_capacity(to_count);
         for _ in 0..to_count {
             let Some(to_property) = to_prop_byte(r.byte()) else {
+                corrupt(r);
                 continue;
             };
             to.push(ToMapping {
@@ -636,260 +737,26 @@ fn blend_from(ordinal: usize) -> BlendMode {
 }
 
 /// Read a string-table reference: a `var_uint` index where `0` is `None` and `i`
-/// is `strings[i - 1]`.
+/// is `strings[i - 1]`. An index past the table is corrupt.
 fn string_ref(r: &mut BinaryReader, strings: &[String]) -> Option<String> {
-    match r.var_usize() {
-        0 => None,
-        i => strings.get(i - 1).cloned(),
+    let index = r.var_usize().checked_sub(1)?;
+    let s = strings.get(index).cloned();
+    if s.is_none() {
+        corrupt(r);
     }
-}
-
-/// Read a skin: the default skin (`is_default`, a slot count then attachments)
-/// or a named skin (name, bone/constraint index lists, then attachments).
-fn read_skin(
-    r: &mut BinaryReader,
-    strings: &[String],
-    slot_names: &[String],
-    is_default: bool,
-    nonessential: bool,
-) -> Skin {
-    let mut skin;
-    let slot_count;
-    if is_default {
-        slot_count = r.count();
-        skin = Skin::new("default");
-        if slot_count == 0 {
-            return skin;
-        }
-    } else {
-        skin = Skin::new(r.string().unwrap_or_default());
-        if nonessential {
-            let _ = r.u32();
-        }
-        let bone_count = r.count();
-        for _ in 0..bone_count {
-            r.var_usize();
-        }
-        let constraint_count = r.count();
-        for _ in 0..constraint_count {
-            r.var_usize();
-        }
-        slot_count = r.count();
-    }
-    for _ in 0..slot_count {
-        let slot = r.var_usize();
-        let att_count = r.count();
-        for _ in 0..att_count {
-            let placeholder = string_ref(r, strings).unwrap_or_default();
-            if let Some(att) = read_attachment(r, strings, slot_names, &placeholder, nonessential) {
-                skin.set(slot, placeholder, att);
-            }
-        }
-    }
-    skin
-}
-
-/// Read one attachment (Spine 4.3): a flags byte selects the type (low 3 bits)
-/// and which optional fields follow.
-fn read_attachment(
-    r: &mut BinaryReader,
-    strings: &[String],
-    slot_names: &[String],
-    placeholder: &str,
-    nonessential: bool,
-) -> Option<Attachment> {
-    let flags = r.byte();
-    let name = if flags & 8 != 0 {
-        string_ref(r, strings).unwrap_or_default()
-    } else {
-        placeholder.to_string()
-    };
-    match flags & 0b111 {
-        0 => {
-            let path = if flags & 16 != 0 {
-                string_ref(r, strings).unwrap_or_else(|| name.clone())
-            } else {
-                name.clone()
-            };
-            let color = read_att_color(r, flags & 32 != 0);
-            let sequence = read_sequence(r, flags & 64 != 0);
-            let rotation = if flags & 128 != 0 { r.float() } else { 0.0 };
-            let mut reg = RegionAttachment::new(name, path);
-            reg.x = r.float();
-            reg.y = r.float();
-            reg.scale_x = r.float();
-            reg.scale_y = r.float();
-            reg.width = r.float();
-            reg.height = r.float();
-            reg.rotation = rotation;
-            reg.color = color;
-            reg.sequence = sequence;
-            Some(Attachment::Region(reg))
-        }
-        1 => {
-            let (vertices, count) = read_vertices(r, flags & 16 != 0);
-            skip_nonessential_color(r, nonessential);
-            Some(Attachment::BoundingBox(BoundingBoxAttachment::new(
-                name, vertices, count,
-            )))
-        }
-        2 => {
-            let path = if flags & 16 != 0 {
-                string_ref(r, strings).unwrap_or_else(|| name.clone())
-            } else {
-                name.clone()
-            };
-            let color = read_att_color(r, flags & 32 != 0);
-            let sequence = read_sequence(r, flags & 64 != 0);
-            let hull = r.var_usize();
-            let (vertices, count) = read_vertices(r, flags & 128 != 0);
-            let uvs = read_float_array(r, count * 2);
-            let tri_count = (count * 2).saturating_sub(hull + 2) * 3;
-            let triangles = read_short_array(r, tri_count);
-            let timeline_slots = r.count();
-            for _ in 0..timeline_slots {
-                r.var_usize();
-            }
-            if nonessential {
-                let edges = r.count();
-                for _ in 0..edges {
-                    r.var_usize();
-                }
-                let _ = r.float();
-                let _ = r.float();
-            }
-            let mut m = MeshAttachment::new(name, path, vertices, uvs, triangles);
-            m.hull_length = hull;
-            m.color = color;
-            m.sequence = sequence;
-            Some(Attachment::Mesh(m))
-        }
-        3 => {
-            let path = if flags & 16 != 0 {
-                string_ref(r, strings).unwrap_or_else(|| name.clone())
-            } else {
-                name.clone()
-            };
-            let color = read_att_color(r, flags & 32 != 0);
-            let _ = read_sequence(r, flags & 64 != 0);
-            let inherit = flags & 128 != 0;
-            let _source_index = r.var_usize();
-            let _skin_index = r.var_usize();
-            let parent = string_ref(r, strings).unwrap_or_default();
-            if nonessential {
-                let _ = r.float();
-                let _ = r.float();
-            }
-            Some(Attachment::LinkedMesh(LinkedMeshAttachment::new(
-                name, path, None, parent, color, inherit,
-            )))
-        }
-        4 => {
-            let closed = flags & 16 != 0;
-            let constant_speed = flags & 32 != 0;
-            let (vertices, count) = read_vertices(r, flags & 64 != 0);
-            let lengths = read_float_array(r, count / 3);
-            skip_nonessential_color(r, nonessential);
-            Some(Attachment::Path(PathAttachment::new(
-                name,
-                vertices,
-                count,
-                lengths,
-                closed,
-                constant_speed,
-            )))
-        }
-        5 => {
-            let rotation = r.float();
-            let x = r.float();
-            let y = r.float();
-            skip_nonessential_color(r, nonessential);
-            Some(Attachment::Point(PointAttachment::new(
-                name, x, y, rotation,
-            )))
-        }
-        6 => {
-            let end = r.var_usize();
-            let (vertices, count) = read_vertices(r, flags & 16 != 0);
-            skip_nonessential_color(r, nonessential);
-            let end_slot = slot_names.get(end).cloned().unwrap_or_default();
-            Some(Attachment::Clipping(ClippingAttachment::new(
-                name, end_slot, vertices, count,
-            )))
-        }
-        _ => None,
-    }
-}
-
-/// Read an attachment color (RGBA8888) when present, else opaque white.
-fn read_att_color(r: &mut BinaryReader, present: bool) -> Color {
-    if present {
-        color_rgba(r.u32())
-    } else {
-        Color::WHITE
-    }
-}
-
-/// Consume the trailing editor-only color int present on some attachments.
-fn skip_nonessential_color(r: &mut BinaryReader, nonessential: bool) {
-    if nonessential {
-        let _ = r.u32();
-    }
-}
-
-/// Consume an animation `Sequence` (4 varints) when the attachment has one.
-fn read_sequence(r: &mut BinaryReader, present: bool) -> Option<Sequence> {
-    if !present {
-        return None;
-    }
-    let count = r.count();
-    let start = r.var_usize();
-    let digits = r.var_usize();
-    let setup_index = r.var_usize();
-    Some(Sequence::new(count, start, digits, setup_index))
-}
-
-/// Read mesh/polygon vertices: unweighted (`2 * vertexCount` floats) or weighted
-/// (per-vertex bone influences). Returns the vertices and the vertex count.
-fn read_vertices(r: &mut BinaryReader, weighted: bool) -> (MeshVertices, usize) {
-    let count = r.count();
-    if !weighted {
-        return (
-            MeshVertices::Unweighted(read_float_array(r, count * 2)),
-            count,
-        );
-    }
-    let total = r.count();
-    let mut bones = Vec::new();
-    let mut vertices = Vec::new();
-    while bones.len() < total {
-        let influences = r.count();
-        bones.push(influences);
-        for _ in 0..influences {
-            bones.push(r.var_usize());
-            vertices.push(r.float());
-            vertices.push(r.float());
-            vertices.push(r.float());
-        }
-    }
-    (MeshVertices::Weighted { bones, vertices }, count)
-}
-
-/// Read `n` big-endian floats.
-fn read_float_array(r: &mut BinaryReader, n: usize) -> Vec<f32> {
-    (0..n).map(|_| r.float()).collect()
-}
-
-/// Read `n` var-uint shorts (triangle / edge indices).
-fn read_short_array(r: &mut BinaryReader, n: usize) -> Vec<u16> {
-    (0..n).map(|_| r.var_usize() as u16).collect()
+    s
 }
 
 mod reader;
 pub use reader::BinaryReader;
 
+mod skins;
+use skins::read_skin;
+
 mod timelines;
 use timelines::read_animation;
 
+#[cfg(test)]
+mod robustness;
 #[cfg(test)]
 mod tests;

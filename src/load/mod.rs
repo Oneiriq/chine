@@ -5,10 +5,11 @@
 //! attachments, animations, and IK / transform / path / physics / slider
 //! constraints. (The binary `.skel` loader lives in the `binary` module.)
 //!
-//! Region attachments are parsed with their transform but without UVs; those
+//! Region attachments are parsed with their transform but without UVs. Those
 //! are filled in once an [`crate::atlas::Atlas`] is bound (the UV/offset layout
 //! depends on the packed region).
 
+use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
@@ -16,10 +17,7 @@ use std::sync::Arc;
 use glam::Vec2;
 use serde_json::Value;
 
-use crate::attach::{
-    Attachment, BoundingBoxAttachment, ClippingAttachment, LinkedMeshAttachment, MeshAttachment,
-    MeshVertices, PathAttachment, PointAttachment, RegionAttachment, Sequence,
-};
+use crate::attach::Attachment;
 use crate::constraint::ik::IkConstraintData;
 use crate::constraint::path::{PathConstraintData, PositionMode, RotateMode, SpacingMode};
 use crate::constraint::physics::PhysicsConstraintData;
@@ -31,14 +29,109 @@ use crate::data::{BlendMode, BoneData, Color, Inherit, SkeletonData, SlotData};
 use crate::event::EventData;
 use crate::skin::Skin;
 
+mod attachments;
+mod timelines;
+
+use attachments::{attachment_cost, mesh_copy_cost, read_attachment};
+use timelines::parse_animation;
+
+/// Bytes of derived data any load may expand to, whatever the input size.
+const BUDGET_BASE: usize = 64 << 20;
+/// Further bytes of derived data allowed per byte of JSON text.
+const BUDGET_PER_BYTE: usize = 256;
+/// The largest physics `fps` a Spine export can hold.
+const MAX_PHYSICS_FPS: f64 = 255.0;
+
+/// A cap on the data the loader derives from compact records. Some records
+/// are cheap to write but expand to a copy of other data: a deform key to a
+/// full vertex array, a draw order key to a full slot list, an event key to
+/// its setup string, a linked mesh to its parent's geometry, and a sequence
+/// to per-frame UVs once an atlas is bound. The cap grows with the input
+/// size, so it bounds memory without limiting real exports.
+struct Budget {
+    remaining: usize,
+}
+
+impl Budget {
+    fn new(input_len: usize) -> Self {
+        Self {
+            remaining: BUDGET_BASE.saturating_add(input_len.saturating_mul(BUDGET_PER_BYTE)),
+        }
+    }
+
+    /// Spend `bytes` on `what`, or fail if the cap is reached.
+    fn charge(&mut self, bytes: usize, what: &str) -> Result<(), LoadError> {
+        self.remaining = self
+            .remaining
+            .checked_sub(bytes)
+            .ok_or_else(|| LoadError::Schema(format!("{what} expands past the load limit")))?;
+        Ok(())
+    }
+}
+
+/// Name-to-index maps for the bones, slots, constraints, skins, and events
+/// that records refer to by name. Almost every record resolves a name, so
+/// hash maps keep loading linear in the input where a linear search per
+/// record would make it quadratic. Each map keeps the first entry with a
+/// name, as the linear `SkeletonData::find_*` searches do.
+#[derive(Default)]
+struct Names<'a> {
+    bones: HashMap<&'a str, usize>,
+    slots: HashMap<&'a str, usize>,
+    ik: HashMap<&'a str, usize>,
+    transform: HashMap<&'a str, usize>,
+    path: HashMap<&'a str, usize>,
+    physics: HashMap<&'a str, usize>,
+    /// Indices into `SkeletonData::skins`, which excludes the default skin.
+    skins: HashMap<&'a str, usize>,
+    events: HashMap<&'a str, usize>,
+}
+
+impl Names<'_> {
+    /// The index of the bone `name`, or a [`LoadError::BadReference`].
+    fn bone(&self, name: &str) -> Result<usize, LoadError> {
+        lookup(&self.bones, name)
+    }
+
+    /// The index of the slot `name`, or a [`LoadError::BadReference`].
+    fn slot(&self, name: &str) -> Result<usize, LoadError> {
+        lookup(&self.slots, name)
+    }
+
+    /// The named (non-default) skin `name` in `data`.
+    fn skin<'d>(&self, data: &'d SkeletonData, name: &str) -> Option<&'d Skin> {
+        self.skins.get(name).and_then(|&i| data.skins.get(i))
+    }
+}
+
+fn lookup(map: &HashMap<&str, usize>, name: &str) -> Result<usize, LoadError> {
+    map.get(name)
+        .copied()
+        .ok_or_else(|| LoadError::BadReference(name.to_string()))
+}
+
+/// Record `name` at `index` unless an earlier entry has the same name.
+fn add_name<'a>(map: &mut HashMap<&'a str, usize>, name: &'a str, index: usize) {
+    map.entry(name).or_insert(index);
+}
+
+/// Record the `name` field of `v` at `index`, if it has one.
+fn add_named<'a>(map: &mut HashMap<&'a str, usize>, v: &'a Value, index: usize) {
+    if let Some(name) = v.get("name").and_then(Value::as_str) {
+        add_name(map, name, index);
+    }
+}
+
 /// An error parsing a Spine export.
 #[derive(Debug)]
 pub enum LoadError {
     /// The JSON text was malformed.
     Json(serde_json::Error),
-    /// A referenced bone or slot name was not found.
+    /// A referenced bone, slot, or constraint name (or a weighted vertex's
+    /// bone index) was not found.
     BadReference(String),
-    /// A required field was missing or had the wrong type.
+    /// A required field was missing or had the wrong type, the data was
+    /// inconsistent, or it expanded past the load limit.
     Schema(String),
 }
 
@@ -65,10 +158,14 @@ impl Error for LoadError {
 ///
 /// # Errors
 /// Returns [`LoadError`] if the JSON is malformed, a required field is missing,
-/// or a bone/slot reference can't be resolved.
+/// a bone/slot reference can't be resolved, attachment geometry or draw order
+/// data is inconsistent, or the export expands to far more data than its size
+/// accounts for.
 pub fn from_json(text: &str) -> Result<SkeletonData, LoadError> {
     let root: Value = serde_json::from_str(text).map_err(LoadError::Json)?;
     let mut data = SkeletonData::default();
+    let mut names = Names::default();
+    let mut budget = Budget::new(text.len());
 
     if let Some(skel) = root.get("skeleton") {
         data.spine_version = skel.get("spine").and_then(Value::as_str).map(String::from);
@@ -79,17 +176,18 @@ pub fn from_json(text: &str) -> Result<SkeletonData, LoadError> {
 
     if let Some(bones) = root.get("bones").and_then(Value::as_array) {
         for (index, b) in bones.iter().enumerate() {
-            let name = str_field(b, "name")?;
-            let parent = match b.get("parent").and_then(Value::as_str) {
-                Some(p) => Some(
-                    data.find_bone(p)
-                        .ok_or_else(|| LoadError::BadReference(p.to_string()))?,
-                ),
-                None => None,
-            };
+            let name = str_ref(b, "name")?;
+            // Only bones already read are named, so a parent always precedes
+            // its children.
+            let parent = b
+                .get("parent")
+                .and_then(Value::as_str)
+                .map(|p| names.bone(p))
+                .transpose()?;
+            add_name(&mut names.bones, name, index);
             data.bones.push(BoneData {
                 index,
-                name,
+                name: name.to_string(),
                 parent,
                 length: f(b, "length"),
                 position: Vec2::new(f(b, "x"), f(b, "y")),
@@ -103,14 +201,12 @@ pub fn from_json(text: &str) -> Result<SkeletonData, LoadError> {
 
     if let Some(slots) = root.get("slots").and_then(Value::as_array) {
         for (index, s) in slots.iter().enumerate() {
-            let name = str_field(s, "name")?;
-            let bone_name = str_field(s, "bone")?;
-            let bone = data
-                .find_bone(&bone_name)
-                .ok_or(LoadError::BadReference(bone_name))?;
+            let name = str_ref(s, "name")?;
+            let bone = names.bone(str_ref(s, "bone")?)?;
+            add_name(&mut names.slots, name, index);
             data.slots.push(SlotData {
                 index,
-                name,
+                name: name.to_string(),
                 bone,
                 color: parse_color(s.get("color").and_then(Value::as_str), Color::WHITE),
                 dark_color: s
@@ -128,27 +224,26 @@ pub fn from_json(text: &str) -> Result<SkeletonData, LoadError> {
 
     if let Some(skins) = root.get("skins").and_then(Value::as_array) {
         for sk in skins {
-            let skin_name = sk
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or("default")
-                .to_string();
-            let mut skin = Skin::new(skin_name.clone());
+            let skin_name = sk.get("name").and_then(Value::as_str).unwrap_or("default");
+            let mut skin = Skin::new(skin_name);
             if let Some(slot_map) = sk.get("attachments").and_then(Value::as_object) {
                 for (slot_name, atts) in slot_map {
-                    let slot = data
-                        .find_slot(slot_name)
-                        .ok_or_else(|| LoadError::BadReference(slot_name.clone()))?;
+                    let slot = names.slot(slot_name)?;
                     if let Some(atts) = atts.as_object() {
                         for (att_name, att) in atts {
-                            if let Some(mut attachment) = parse_attachment(att_name, att) {
-                                if let Attachment::Mesh(m) = &mut attachment {
-                                    if skin_name != "default" {
-                                        m.deform_skin = Some(skin_name.clone());
-                                    }
+                            let Some(mut attachment) =
+                                read_attachment(att_name, att, data.bones.len())?
+                            else {
+                                continue;
+                            };
+                            budget
+                                .charge(attachment_cost(&attachment), "an attachment sequence")?;
+                            if let Attachment::Mesh(m) = &mut attachment {
+                                if skin_name != "default" {
+                                    m.deform_skin = Some(skin_name.to_string());
                                 }
-                                skin.set(slot, att_name.clone(), attachment);
                             }
+                            skin.set(slot, att_name.clone(), attachment);
                         }
                     }
                 }
@@ -156,6 +251,7 @@ pub fn from_json(text: &str) -> Result<SkeletonData, LoadError> {
             if skin_name == "default" {
                 data.default_skin = skin;
             } else {
+                add_name(&mut names.skins, skin_name, data.skins.len());
                 data.skins.push(skin);
             }
         }
@@ -165,19 +261,23 @@ pub fn from_json(text: &str) -> Result<SkeletonData, LoadError> {
         for (order, cm) in constraints.iter().enumerate() {
             match cm.get("type").and_then(Value::as_str) {
                 Some("ik") => {
-                    let c = parse_ik(cm, order, &data)?;
+                    let c = parse_ik(cm, order, &names)?;
+                    add_named(&mut names.ik, cm, data.ik_constraints.len());
                     data.ik_constraints.push(c);
                 }
                 Some("transform") => {
-                    let c = parse_transform(cm, order, &data)?;
+                    let c = parse_transform(cm, order, &names)?;
+                    add_named(&mut names.transform, cm, data.transform_constraints.len());
                     data.transform_constraints.push(c);
                 }
                 Some("path") => {
-                    let c = parse_path(cm, order, &data)?;
+                    let c = parse_path(cm, order, &names)?;
+                    add_named(&mut names.path, cm, data.path_constraints.len());
                     data.path_constraints.push(c);
                 }
                 Some("physics") => {
-                    let c = parse_physics(cm, order, &data)?;
+                    let c = parse_physics(cm, order, &names)?;
+                    add_named(&mut names.physics, cm, data.physics_constraints.len());
                     data.physics_constraints.push(c);
                 }
                 _ => {}
@@ -187,6 +287,7 @@ pub fn from_json(text: &str) -> Result<SkeletonData, LoadError> {
 
     if let Some(events) = root.get("events").and_then(Value::as_object) {
         for (name, e) in events {
+            add_name(&mut names.events, name, data.events.len());
             data.events.push(EventData {
                 name: name.clone(),
                 int_value: e.get("int").and_then(Value::as_i64).unwrap_or(0) as i32,
@@ -205,179 +306,64 @@ pub fn from_json(text: &str) -> Result<SkeletonData, LoadError> {
 
     // Resolve linked meshes before animations so deform timelines bind to the
     // resolved (parent-shared) geometry rather than unresolved links.
+    charge_linked_meshes(&data, &mut budget)?;
     crate::link::resolve_linked_meshes(&mut data);
 
     if let Some(anims) = root.get("animations").and_then(Value::as_object) {
         for (name, anim) in anims {
-            let animation = parse_animation(name, anim, &data)?;
+            let animation = parse_animation(name, anim, &data, &names, &mut budget)?;
             data.animations.push(Arc::new(animation));
         }
     }
     Ok(data)
 }
 
-/// Parse the optional `sequence` (flipbook) object on a region or mesh
-/// attachment: `count` regions starting at `start`, zero-padded to `digits`,
-/// showing `setup` at rest.
-fn parse_sequence(v: &Value) -> Option<Sequence> {
-    let s = v.get("sequence")?.as_object()?;
-    let u =
-        |key: &str, default: u64| s.get(key).and_then(Value::as_u64).unwrap_or(default) as usize;
-    Some(Sequence::new(
-        u("count", 0),
-        u("start", 1),
-        u("digits", 0),
-        u("setup", 0),
-    ))
-}
-
-fn parse_attachment(name: &str, v: &Value) -> Option<Attachment> {
-    let path = v
-        .get("path")
-        .and_then(Value::as_str)
-        .unwrap_or(name)
-        .to_string();
-    match v.get("type").and_then(Value::as_str).unwrap_or("region") {
-        "region" => {
-            let mut r = RegionAttachment::new(name, path);
-            r.x = f(v, "x");
-            r.y = f(v, "y");
-            r.scale_x = f_or(v, "scaleX", 1.0);
-            r.scale_y = f_or(v, "scaleY", 1.0);
-            r.rotation = f(v, "rotation");
-            r.width = f(v, "width");
-            r.height = f(v, "height");
-            r.color = parse_color(v.get("color").and_then(Value::as_str), Color::WHITE);
-            r.sequence = parse_sequence(v);
-            Some(Attachment::Region(r))
-        }
-        "mesh" => {
-            let uvs = f_array(v, "uvs");
-            let triangles = u16_array(v, "triangles");
-            let raw = f_array(v, "vertices");
-            let vertices = if raw.len() == uvs.len() {
-                MeshVertices::Unweighted(raw)
-            } else {
-                parse_weighted(&raw)
-            };
-            let mut m = MeshAttachment::new(name, path, vertices, uvs, triangles);
-            m.color = parse_color(v.get("color").and_then(Value::as_str), Color::WHITE);
-            m.hull_length = v.get("hull").and_then(Value::as_u64).unwrap_or(0) as usize;
-            m.sequence = parse_sequence(v);
-            Some(Attachment::Mesh(m))
-        }
-        "path" => {
-            let count = v.get("vertexCount").and_then(Value::as_u64).unwrap_or(0) as usize;
-            let raw = f_array(v, "vertices");
-            let vertices = if raw.len() == count * 2 {
-                MeshVertices::Unweighted(raw)
-            } else {
-                parse_weighted(&raw)
-            };
-            Some(Attachment::Path(PathAttachment::new(
-                name,
-                vertices,
-                count,
-                f_array(v, "lengths"),
-                bool_or(v, "closed", false),
-                bool_or(v, "constantSpeed", true),
-            )))
-        }
-        "boundingbox" => {
-            let count = v.get("vertexCount").and_then(Value::as_u64).unwrap_or(0) as usize;
-            let raw = f_array(v, "vertices");
-            let vertices = if raw.len() == count * 2 {
-                MeshVertices::Unweighted(raw)
-            } else {
-                parse_weighted(&raw)
-            };
-            Some(Attachment::BoundingBox(BoundingBoxAttachment::new(
-                name, vertices, count,
-            )))
-        }
-        "point" => Some(Attachment::Point(PointAttachment::new(
-            name,
-            f(v, "x"),
-            f(v, "y"),
-            f(v, "rotation"),
-        ))),
-        "linkedmesh" => Some(Attachment::LinkedMesh(LinkedMeshAttachment::new(
-            name,
-            path,
-            v.get("skin").and_then(Value::as_str).map(str::to_string),
-            v.get("parent").and_then(Value::as_str).unwrap_or(name),
-            parse_color(v.get("color").and_then(Value::as_str), Color::WHITE),
-            v.get("deform").and_then(Value::as_bool).unwrap_or(true),
-        ))),
-        "clipping" => {
-            let count = v.get("vertexCount").and_then(Value::as_u64).unwrap_or(0) as usize;
-            let raw = f_array(v, "vertices");
-            let vertices = if raw.len() == count * 2 {
-                MeshVertices::Unweighted(raw)
-            } else {
-                parse_weighted(&raw)
-            };
-            let end = v
-                .get("end")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            Some(Attachment::Clipping(ClippingAttachment::new(
-                name, end, vertices, count,
-            )))
-        }
-        _ => None,
-    }
-}
-
-/// Decode Spine's weighted-vertex array: `[count, boneIdx, x, y, weight, ...]`.
-fn parse_weighted(raw: &[f32]) -> MeshVertices {
-    let mut bones = Vec::new();
-    let mut vertices = Vec::new();
-    let mut i = 0;
-    while i < raw.len() {
-        let count = raw[i] as usize;
-        i += 1;
-        bones.push(count);
-        for _ in 0..count {
-            if i + 4 > raw.len() {
-                break;
+/// Charge the copies linked-mesh resolution makes: each linked mesh becomes a
+/// full copy of its parent mesh. The charge is the largest mesh with the
+/// link's slot and parent name in any skin, which covers whichever one the
+/// link resolves to.
+fn charge_linked_meshes(data: &SkeletonData, budget: &mut Budget) -> Result<(), LoadError> {
+    let skins = || std::iter::once(&data.default_skin).chain(&data.skins);
+    let mut sizes: HashMap<(usize, &str), usize> = HashMap::new();
+    for skin in skins() {
+        for (slot, name, attachment) in skin.iter() {
+            if let Attachment::Mesh(m) = attachment {
+                let size = sizes.entry((slot, name)).or_default();
+                *size = (*size).max(mesh_copy_cost(m));
             }
-            bones.push(raw[i] as usize); // bone index
-            vertices.push(raw[i + 1]); // x
-            vertices.push(raw[i + 2]); // y
-            vertices.push(raw[i + 3]); // weight
-            i += 4;
         }
     }
-    MeshVertices::Weighted { bones, vertices }
+    for skin in skins() {
+        for (slot, _, attachment) in skin.iter() {
+            if let Attachment::LinkedMesh(link) = attachment {
+                if let Some(&size) = sizes.get(&(slot, link.parent.as_str())) {
+                    budget.charge(size, "a linked mesh")?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Resolve a constraint's named constrained bones to indices.
-fn constraint_bones(cm: &Value, kind: &str, data: &SkeletonData) -> Result<Vec<usize>, LoadError> {
+fn constraint_bones(cm: &Value, kind: &str, names: &Names) -> Result<Vec<usize>, LoadError> {
     let mut bones = Vec::new();
     if let Some(bs) = cm.get("bones").and_then(Value::as_array) {
         for bn in bs {
             let bn = bn
                 .as_str()
                 .ok_or_else(|| LoadError::Schema(format!("{kind} bone name")))?;
-            bones.push(
-                data.find_bone(bn)
-                    .ok_or_else(|| LoadError::BadReference(bn.to_string()))?,
-            );
+            bones.push(names.bone(bn)?);
         }
     }
     Ok(bones)
 }
 
 /// Parse an `ik` constraint entry.
-fn parse_ik(cm: &Value, order: usize, data: &SkeletonData) -> Result<IkConstraintData, LoadError> {
+fn parse_ik(cm: &Value, order: usize, names: &Names) -> Result<IkConstraintData, LoadError> {
     let name = str_field(cm, "name")?;
-    let bones = constraint_bones(cm, "ik", data)?;
-    let target_name = str_field(cm, "target")?;
-    let target = data
-        .find_bone(&target_name)
-        .ok_or(LoadError::BadReference(target_name))?;
+    let bones = constraint_bones(cm, "ik", names)?;
+    let target = names.bone(str_ref(cm, "target")?)?;
     let scale_y_mode = match cm.get("scaleY").and_then(Value::as_str) {
         Some("uniform") => ScaleYMode::Uniform,
         Some("volume") => ScaleYMode::Volume,
@@ -406,14 +392,11 @@ fn parse_ik(cm: &Value, order: usize, data: &SkeletonData) -> Result<IkConstrain
 fn parse_transform(
     cm: &Value,
     order: usize,
-    data: &SkeletonData,
+    names: &Names,
 ) -> Result<TransformConstraintData, LoadError> {
     let name = str_field(cm, "name")?;
-    let bones = constraint_bones(cm, "transform", data)?;
-    let source_name = str_field(cm, "source")?;
-    let source = data
-        .find_bone(&source_name)
-        .ok_or(LoadError::BadReference(source_name))?;
+    let bones = constraint_bones(cm, "transform", names)?;
+    let source = names.bone(str_ref(cm, "source")?)?;
     let offsets = [
         f(cm, "rotation"),
         f(cm, "x"),
@@ -473,17 +456,10 @@ fn parse_transform(
 }
 
 /// Parse a `path` constraint entry.
-fn parse_path(
-    cm: &Value,
-    order: usize,
-    data: &SkeletonData,
-) -> Result<PathConstraintData, LoadError> {
+fn parse_path(cm: &Value, order: usize, names: &Names) -> Result<PathConstraintData, LoadError> {
     let name = str_field(cm, "name")?;
-    let bones = constraint_bones(cm, "path", data)?;
-    let slot_name = str_field(cm, "slot")?;
-    let slot = data
-        .find_slot(&slot_name)
-        .ok_or(LoadError::BadReference(slot_name))?;
+    let bones = constraint_bones(cm, "path", names)?;
+    let slot = names.slot(str_ref(cm, "slot")?)?;
     let position_mode = match cm.get("positionMode").and_then(Value::as_str) {
         Some("fixed") => PositionMode::Fixed,
         _ => PositionMode::Percent,
@@ -518,24 +494,27 @@ fn parse_path(
 }
 
 /// Parse a `physics` constraint entry. `fps` becomes a fixed `step` of `1/fps`
-/// and `mass` is stored inverted; the per-property "global" flags (used only by
-/// physics timelines) are not read yet.
+/// and `mass` is stored inverted.
 fn parse_physics(
     cm: &Value,
     order: usize,
-    data: &SkeletonData,
+    names: &Names,
 ) -> Result<PhysicsConstraintData, LoadError> {
     let name = str_field(cm, "name")?;
-    let bone_name = str_field(cm, "bone")?;
-    let bone = data
-        .find_bone(&bone_name)
-        .ok_or(LoadError::BadReference(bone_name))?;
+    let bone = names.bone(str_ref(cm, "bone")?)?;
     let scale_y_mode = match cm.get("scaleY").and_then(Value::as_str) {
         Some("uniform") => ScaleYMode::Uniform,
         Some("volume") => ScaleYMode::Volume,
         _ => ScaleYMode::None,
     };
-    let fps = cm.get("fps").and_then(Value::as_f64).unwrap_or(60.0);
+    // Spine's binary format stores `fps` in one byte, so exports stay within
+    // 1 to 255. The cap also bounds the physics substeps per second, which a
+    // huge `fps` (a step near zero) would make endless.
+    let fps = cm
+        .get("fps")
+        .and_then(Value::as_f64)
+        .unwrap_or(60.0)
+        .clamp(1.0, MAX_PHYSICS_FPS);
     let mass = f_or(cm, "mass", 1.0);
     Ok(PhysicsConstraintData {
         name,
@@ -547,7 +526,7 @@ fn parse_physics(
         scale_x: f(cm, "scaleX"),
         shear_x: f(cm, "shearX"),
         limit: f_or(cm, "limit", 5000.0),
-        step: 1.0 / (fps.max(1.0) as f32),
+        step: 1.0 / (fps as f32),
         scale_y_mode,
         inertia: f_or(cm, "inertia", 0.5),
         strength: f_or(cm, "strength", 100.0),
@@ -604,11 +583,14 @@ fn f_or(v: &Value, key: &str, default: f32) -> f32 {
         .map_or(default, |x| x as f32)
 }
 
-fn str_field(v: &Value, key: &str) -> Result<String, LoadError> {
+fn str_ref<'v>(v: &'v Value, key: &str) -> Result<&'v str, LoadError> {
     v.get(key)
         .and_then(Value::as_str)
-        .map(String::from)
         .ok_or_else(|| LoadError::Schema(format!("missing string field '{key}'")))
+}
+
+fn str_field(v: &Value, key: &str) -> Result<String, LoadError> {
+    str_ref(v, key).map(String::from)
 }
 
 fn f_array(v: &Value, key: &str) -> Vec<f32> {
@@ -618,18 +600,6 @@ fn f_array(v: &Value, key: &str) -> Vec<f32> {
             a.iter()
                 .filter_map(Value::as_f64)
                 .map(|x| x as f32)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn u16_array(v: &Value, key: &str) -> Vec<u16> {
-    v.get(key)
-        .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(Value::as_u64)
-                .map(|x| x as u16)
                 .collect()
         })
         .unwrap_or_default()
@@ -673,8 +643,14 @@ fn parse_color(s: Option<&str>, default: Color) -> Color {
     )
 }
 
-mod timelines;
-use timelines::parse_animation;
+/// Parse one attachment as [`from_json`] does, for tests that check a single
+/// attachment. No bones exist, and an error reads as `None`.
+#[cfg(test)]
+fn parse_attachment(name: &str, v: &Value) -> Option<Attachment> {
+    read_attachment(name, v, 0).ok().flatten()
+}
 
+#[cfg(test)]
+mod robustness;
 #[cfg(test)]
 mod tests;

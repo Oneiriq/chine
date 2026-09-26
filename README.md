@@ -16,11 +16,11 @@ Spine skeleton data requires a valid
 ## Why
 
 The established Rust runtime, `rusty_spine`, is transpiled from `spine-c` and
-tops out at Spine 4.2; Esoteric discontinued `spine-c` at 4.3. `chine` is a
+tops out at Spine 4.2. Esoteric discontinued `spine-c` at 4.3. `chine` is a
 from-scratch, dependency-light (`glam` plus optional `serde`) implementation of
 the 4.3 runtime, so projects can target current Spine in pure Rust (native and
-WebAssembly). chine is a re-implementation of the Spine 4.3 runtime: it is based
-on the official runtime's behavior, not a port or copy of its code.
+WebAssembly). It reproduces the official runtime's behavior. It does not port
+or copy the official code.
 
 (The name is the *chine*, the backbone.)
 
@@ -71,8 +71,8 @@ let commands = render(&skeleton); // upload positions / uvs / triangles to your 
 
 Each `RenderCommand` carries world-space vertex positions, page-normalized UVs,
 triangle indices, a tint color, an optional dark (two-color) tint, an atlas page
-index, and a blend mode. `chine` does no rendering itself; in a render loop,
-prefer `render_into(&skeleton, &mut buffer)` to reuse one allocation per frame.
+index, and a blend mode. `chine` does no rendering itself. In a render loop,
+use `render_into(&skeleton, &mut buffer)` to reuse one allocation per frame.
 
 To sanity-check a real export end to end (load, pose, render), headlessly:
 
@@ -85,10 +85,10 @@ cargo run --example inspect -- skeleton.json atlas.atlas
 `chine` implements the Spine 4.3 runtime feature set for loading, posing,
 animating, and emitting draw data:
 
-- **Loaders**: JSON (`.json`) and binary (`.skel`) skeleton exports; texture
-  atlas (`.atlas`) parsing (the 4.1+ format plus common legacy keys).
-- **Skeleton**: bones, slots, and skins; region, mesh (including weighted),
-  path, bounding-box, point, clipping, and linked-mesh attachments; animated
+- **Loaders**: JSON (`.json`) and binary (`.skel`) skeleton exports, and
+  texture atlas (`.atlas`) parsing (the 4.1+ format plus common legacy keys).
+- **Skeleton**: bones, slots, and skins. Region, mesh (including weighted),
+  path, bounding-box, point, clipping, and linked-mesh attachments. Animated
   (flipbook) sequences.
 - **Forward kinematics** with all five inherit modes.
 - **Constraints**, ordered by a topological update cache:
@@ -98,11 +98,11 @@ animating, and emitting draw data:
   - **Physics**: the 4.3 spring-damper simulation, with skeleton wind / gravity.
   - **Slider**: the 4.3 slider constraint.
 - **Animation**: every timeline kind, with stepped / linear / Bezier curves:
-  - bone rotate / translate / scale / shear, plus single-axis variants;
-  - IK / transform / path / physics / slider mix timelines;
-  - slot color / alpha / two-color / attachment-swap / draw-order;
-  - deform, events, and sequences;
-  - a multi-track `AnimationState` with crossfade mixing and an animation queue.
+  - bone rotate / translate / scale / shear, plus single-axis variants
+  - IK / transform / path / physics / slider mix timelines
+  - slot color / alpha / two-color / attachment-swap / draw-order
+  - deform, events, and sequences
+  - a multi-track `AnimationState` with crossfade mixing and an animation queue
 - **Rendering**: a renderer-agnostic `RenderCommand` stream, including two-color
   (tint-black) tinting and polygon clipping.
 
@@ -112,7 +112,7 @@ exercises sequences and clipping.
 
 ## Cargo features
 
-Both loaders are on by default; disable either to trim dependencies or binary
+Both loaders are on by default. Disable either to trim dependencies or binary
 size.
 
 - `json` *(default)*: the `.json` skeleton loader (pulls `serde` / `serde_json`).
@@ -135,30 +135,36 @@ wasm-pack build chine-web --target web --release
 
 See [`chine-web/README.md`](chine-web/README.md) for usage.
 
+## Untrusted input
+
+A malformed `.skel`, JSON export, or atlas returns an error or loads as
+harmless data. It does not panic, hang, or allocate without bound. The same
+holds for the times, speeds, and scales a host passes in. [`fuzz/`](fuzz/)
+has the cargo-fuzz targets that check this.
+
 ## Roadmap
 
-`chine` covers the full Spine 4.3 runtime feature set; remaining work is
-hardening and ergonomics:
+`chine` covers the full Spine 4.3 runtime feature set. The remaining work:
 
-- broader validation against more production exports;
-- performance passes on the per-frame pose and draw paths;
-- publishing to crates.io once the API has settled.
+- broader validation against more production exports
+- performance passes on the per-frame pose and draw paths
+- publishing to crates.io once the API has settled
 
 ## Attribution
 
 [Spine](https://esotericsoftware.com/) is a 2D skeletal animation tool and
 runtime created by [Esoteric Software](https://esotericsoftware.com/). `chine`
-is an independent, from-scratch reimplementation of the Spine 4.3 runtime: its
+is an independent, from-scratch reimplementation of the Spine 4.3 runtime. Its
 file formats, posing math, and constraint behavior are based on Esoteric
 Software's official
 [spine-runtimes](https://github.com/EsotericSoftware/spine-runtimes), which were
 referenced throughout development. All credit for the Spine format and runtime
-design belongs to Esoteric Software. Spine is a trademark of Esoteric Software;
+design belongs to Esoteric Software. Spine is a trademark of Esoteric Software.
 `chine` is an unaffiliated project and is not endorsed by them.
 
 ## License
 
-`chine`'s own source code is licensed under the MIT license; see
+`chine`'s own source code is licensed under the MIT license. See
 [`LICENSE`](LICENSE).
 
 `chine` is a from-scratch reimplementation of the Spine Runtimes and is not

@@ -1,18 +1,21 @@
 //! Animation: keyframed timelines, curves, and playback.
 //!
 //! An [`Animation`] is a set of timelines that pose a [`Skeleton`] over time.
-//! Each timeline interpolates one bone property with stepped / linear / Bezier
-//! curves (see the `curve` module); [`AnimationState`] plays an animation on a
+//! Most timelines interpolate one property with stepped / linear / Bezier
+//! curves (see the `curve` module). [`AnimationState`] plays an animation on a
 //! track.
 //! Interpolation and blending re-implement Spine 4.3's behavior.
 //!
-//! Covered: every Spine 4.3 timeline (bone rotate / translate / scale / shear
-//! and single-axis variants; IK / transform / path / physics / slider mixes;
-//! slot color / alpha / two-color / attachment / draw-order; deform; events;
-//! sequences) plus multi-track playback with crossfade mixing and a queue.
+//! Covered: every Spine 4.3 timeline plus multi-track playback with crossfade
+//! mixing and a queue. The timelines are bone rotate / translate / scale / shear
+//! and single-axis variants, IK / transform / path / physics / slider mixes,
+//! slot color / alpha / two-color / attachment / draw-order, deform, events, and
+//! sequences.
 
 mod channels;
 mod curve;
+#[cfg(test)]
+mod robustness;
 mod state;
 mod timeline;
 
@@ -70,7 +73,8 @@ impl Animation {
 
     /// Apply every timeline to `skeleton` over the window `(last_time, time]`
     /// (seconds), mixing with weight `alpha` from `from`. `add` selects additive
-    /// blending. `last_time` is used only by the physics reset timeline.
+    /// blending. `last_time` is used only by the physics reset and event
+    /// timelines. Timeline indices out of range for `skeleton` are skipped.
     pub fn apply(
         &self,
         skeleton: &mut Skeleton,

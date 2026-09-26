@@ -3,7 +3,7 @@
 //!
 //! This crate compiles to WebAssembly and renders a chine-posed skeleton to an
 //! HTML `<canvas>` through WebGL2, driven by a drop-in custom element (see
-//! `js/chine-spine.js`). chine itself stays renderer-agnostic; all the web and
+//! `js/chine-spine.js`). chine itself stays renderer-agnostic. All the web and
 //! GPU code lives here.
 //!
 //! The [`WebSpine`] type is the JS-facing API: construct it from a skeleton

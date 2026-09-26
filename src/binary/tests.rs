@@ -75,7 +75,7 @@ fn parses_header_and_bones() {
 }
 
 // Validates the parser against a real Spine 4.3 `.skel` when the local
-// fixture is present (it is not committed); skips cleanly otherwise.
+// fixture is present (it is not committed), and skips cleanly otherwise.
 #[cfg_attr(
     not(skel_fixtures),
     ignore = "requires the gitignored Spine fixtures in data/"
@@ -151,7 +151,7 @@ fn parses_real_skel_header_and_bones() {
 }
 
 // Validates the binary loader against a complete Spine 4.3 project (the
-// diamond rig) when the local fixture is present; skips otherwise. Its
+// diamond rig) when the local fixture is present, and skips otherwise. Its
 // non-bone animation timelines are still being added, so this asserts the
 // structural pieces that are wired up: bones, slots, the new 4.3 slider
 // constraint, and the first (bone-only) animation parsing in full.
@@ -179,8 +179,8 @@ fn parses_diamond_rig() {
     let scrubbed = slider.animation_index.expect("slider animation index");
     assert_eq!(data.animations[scrubbed].name(), "rotation");
 
-    // All eight animations parse end to end; a misaligned parse would
-    // surface as a garbage or truncated name. "appear" is bone-only;
+    // All eight animations parse end to end. A misaligned parse would
+    // surface as a garbage or truncated name. "appear" is bone-only.
     // "disappear" exercises slot color, attachment, slider, deform, and
     // sequence timelines.
     let names: Vec<&str> = data.animations.iter().map(|a| a.name()).collect();
@@ -201,7 +201,7 @@ fn parses_diamond_rig() {
     assert!(data.animations[1].duration() > 0.0);
 }
 
-// The "disappear" animation deforms the diamond mesh; loading it from binary
+// The "disappear" animation deforms the diamond mesh. Loading it from binary
 // must build a real deform timeline (not silently fall back to consuming the
 // bytes). Playing it populates a slot's deform buffer.
 #[cfg_attr(
@@ -336,7 +336,7 @@ fn reads_a_draw_order_timeline() {
             blend: BlendMode::Normal,
         }
     }
-    // Three slots; one keyframe at 0.5 moves slot 0 back by 2 (to the end).
+    // Three slots. One keyframe at 0.5 moves slot 0 back by 2 (to the end).
     let data = SkeletonData {
         bones: vec![BoneData {
             index: 0,
@@ -405,7 +405,7 @@ fn reads_a_slot_alpha_timeline() {
     state.update(0.5);
     sk.set_slots_to_setup_pose();
     state.apply(&mut sk);
-    // Half-way the alpha is ~0.5; red stays at the setup white.
+    // Halfway the alpha is ~0.5, and red stays at the setup white.
     let c = sk.slot(0).unwrap().color;
     assert!((c.a - 0.5).abs() < 0.05, "alpha={}", c.a);
     assert!((c.r - 1.0).abs() < 1e-3, "r={}", c.r);
@@ -428,7 +428,7 @@ fn reads_an_ik_constraint_timeline() {
     assert!((dur - 1.0).abs() < 1e-6);
     assert!(!r.overran());
 
-    // A one-bone IK aiming at a target above it; the timeline drives its mix.
+    // A one-bone IK aiming at a target above it. The timeline drives its mix.
     let data = SkeletonData {
         bones: vec![
             BoneData {
@@ -554,7 +554,7 @@ fn parses_a_transform_constraint() {
 
 #[test]
 fn parses_a_transform_constraint_with_a_property() {
-    // flags 32 -> one source property; rotation -> rotation, scale 2.
+    // flags 32 -> one source property: rotation -> rotation, scale 2.
     let mut b = vec![1_u8, 0, 0, 32];
     b.push(0); // from property: Rotate
     b.extend_from_slice(&0.5_f32.to_be_bytes()); // from offset
@@ -759,7 +759,7 @@ fn rejects_an_export_from_another_spine_version() {
     }
 }
 
-// Any 4.3 patch release uses the 4.3 layout, so all of them load; a missing
+// Any 4.3 patch release uses the 4.3 layout, so all of them load. A missing
 // or empty version string (hand-built data, as in the tests above) is also
 // accepted as-is.
 #[test]
@@ -774,7 +774,7 @@ fn accepts_any_4_3_patch_release() {
 // A header that declares 100 bones but provides no bone data: each bone
 // needs many bytes, so the count exceeds the remaining data and must be
 // rejected as corrupt rather than driving the read loop. (A real attack
-// uses a multi-byte varint for billions; 100 with no data is the same bug.)
+// uses a multi-byte varint for billions, and 100 with no data is the same bug.)
 #[test]
 fn corrupt_length_is_rejected_not_looped() {
     let mut b = Vec::new();

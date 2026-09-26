@@ -135,37 +135,50 @@ fn read_bone_property(bone: &Bone, property: SliderProperty, local: bool) -> f32
 /// Apply the slider at index `c`: read its bone's local property, map it to a
 /// scrub time (`offset + (value - property offset) * scale`, looped or clamped
 /// against the driven animation's duration), and apply that animation at the
-/// scrub time. Sliders with no bone, property, or driven animation do nothing.
+/// scrub time. Sliders with no bone, property, or driven animation do nothing,
+/// and so do sliders whose slider, bone, or animation index is out of range.
 pub(crate) fn solve(skel: &mut Skeleton, c: usize) {
+    let data = skel.data_arc();
+    let Some(slider) = data.sliders.get(c) else {
+        return;
+    };
+    // The skeleton sizes its slider poses from the same data, so `c` is in
+    // range for `slider_pose` once it is in range for `data.sliders`.
     let pose = skel.slider_pose(c);
     if pose.mix == 0.0 {
         return;
     }
-    let data = skel.data().sliders[c].clone();
-    let Some(animation_index) = data.animation_index else {
+    let Some(animation_index) = slider.animation_index else {
         return;
     };
-    let Some(animation) = skel.data().animations.get(animation_index).cloned() else {
+    let Some(animation) = data.animations.get(animation_index) else {
         return;
     };
     let duration = animation.duration();
-    // A driving bone computes the scrub time from its property; otherwise the
+    // A driving bone computes the scrub time from its property. Otherwise the
     // (possibly animated) pose time is used directly.
-    let mut time = if let (Some(bone_index), Some(property)) = (data.bone, data.property) {
+    let mut time = if let (Some(bone_index), Some(property)) = (slider.bone, slider.property) {
         let value = match skel.bone(bone_index) {
-            Some(bone) => read_bone_property(bone, property, data.local),
+            Some(bone) => read_bone_property(bone, property, slider.local),
             None => return,
         };
-        data.offset + (value - data.property_offset) * data.scale
+        slider.offset + (value - slider.property_offset) * slider.scale
     } else {
         pose.time
     };
-    if data.looping && duration > 0.0 {
+    if slider.looping && duration > 0.0 {
         time = duration + (time % duration);
     } else {
         time = time.max(0.0);
     }
-    animation.apply(skel, time, time, pose.mix, MixFrom::Current, data.additive);
+    animation.apply(
+        skel,
+        time,
+        time,
+        pose.mix,
+        MixFrom::Current,
+        slider.additive,
+    );
 }
 
 #[cfg(test)]
@@ -233,7 +246,7 @@ mod tests {
         rot.set_frame1(1, 1.0, 90.0);
         let scrub = Animation::new("scrub", 1.0, vec![Timeline::Rotate(rot)]);
 
-        // A bone-less slider scrubbing that animation; its time comes from a
+        // A bone-less slider scrubbing that animation. Its time comes from a
         // SLIDER_TIME timeline rather than a bone.
         let slider = SliderData {
             name: "s".into(),
@@ -275,5 +288,31 @@ mod tests {
         // Scrub time 0.5 rotated bone 1 to ~45 degrees.
         let target = sk.bone(1).unwrap().rotation;
         assert!((target - 45.0).abs() < 1.0, "target rotation = {target}");
+    }
+
+    #[test]
+    fn out_of_range_slider_or_animation_index_is_ignored() {
+        let slider = SliderData {
+            name: "s".into(),
+            bone: Some(0),
+            property: Some(SliderProperty::Rotate),
+            animation_index: Some(5),
+            ..Default::default()
+        };
+        let data = SkeletonData {
+            bones: vec![BoneData {
+                index: 0,
+                name: "root".into(),
+                ..Default::default()
+            }],
+            sliders: vec![slider],
+            ..Default::default()
+        };
+        let mut sk = Skeleton::new(Arc::new(data));
+        // The slider's animation index is past the (empty) animation list.
+        sk.update_world_transform();
+        // A slider index past the slider list does nothing.
+        solve(&mut sk, 1);
+        assert_eq!(sk.bone(0).unwrap().rotation, 0.0);
     }
 }

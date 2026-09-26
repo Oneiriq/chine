@@ -4,18 +4,20 @@
 //! [`render`] walks a skeleton's slots in draw order and emits a
 //! [`RenderCommand`] per visible attachment: world-space positions, page UVs,
 //! triangles, tint, blend mode, and atlas page. The host uploads these to the
-//! GPU; chine does no rendering itself. Call [`bind_atlas`] once after loading
+//! GPU. chine does no rendering itself. Call [`bind_atlas`] once after loading
 //! so attachment UVs and page indices are resolved against the atlas.
 //!
 //! A render loop should hold a [`RenderScratch`] and call [`render_with`]
 //! every frame: the commands and the clipper's internal buffers are then
 //! reused, so steady-state rendering performs no heap allocation.
 
+use std::collections::HashMap;
+
 use glam::Vec2;
 
-use crate::atlas::Atlas;
+use crate::atlas::{Atlas, AtlasPage, AtlasRegion};
 use crate::attach::{Attachment, MeshAttachment, RegionAttachment, Sequence};
-use crate::clip::{clip_into, replace_clip};
+use crate::clip::{clip_into, replace_clip_within, spend, CLIP_WORK_BUDGET};
 use crate::data::{BlendMode, Color, SkeletonData, SlotData};
 use crate::skel::{Skeleton, Slot};
 use crate::skin::Skin;
@@ -44,96 +46,223 @@ pub struct RenderCommand {
 /// Bind every region / mesh attachment to its atlas region: compute region
 /// corner offsets and UVs, remap mesh UVs into page space, and record the page
 /// index. Call once after loading and before [`render`].
+///
+/// Sequence binding draws on a fixed work budget, far above what real rigs
+/// use: many sequences over a large atlas, or long sequences of large meshes,
+/// could otherwise take unbounded time and memory. Once the budget is spent,
+/// the remaining sequence frames are left unbound and show their last bound
+/// frame, or the attachment's static UVs when none was bound.
 pub fn bind_atlas(data: &mut SkeletonData, atlas: &Atlas) {
-    bind_skin(&mut data.default_skin, atlas);
+    let mut binder = Binder::new(atlas);
+    binder.bind_skin(&mut data.default_skin);
     for skin in &mut data.skins {
-        bind_skin(skin, atlas);
+        binder.bind_skin(skin);
     }
 }
 
-fn bind_skin(skin: &mut Skin, atlas: &Atlas) {
-    for att in skin.attachments_mut() {
-        match att {
-            Attachment::Region(r) => {
-                if r.sequence.is_some() {
-                    bind_region_sequence(r, atlas);
-                } else if let Some(region) = atlas.find_region(&r.path) {
-                    let page = &atlas.pages[region.page];
-                    let (pw, ph) = (page.width, page.height);
-                    r.page = region.page;
-                    r.update(region, pw, ph);
-                }
-            }
-            Attachment::Mesh(m) => {
-                if m.sequence.is_some() {
-                    bind_mesh_sequence(m, atlas);
-                } else if let Some(region) = atlas.find_region(&m.path) {
-                    let page = &atlas.pages[region.page];
-                    let (pw, ph) = (page.width, page.height);
-                    m.page = region.page;
-                    m.remap_uvs(region, pw, ph);
-                }
-            }
-            Attachment::Path(_)
-            | Attachment::BoundingBox(_)
-            | Attachment::Point(_)
-            | Attachment::LinkedMesh(_)
-            | Attachment::Clipping(_) => {}
+/// The work one [`bind_atlas`] call may spend on sequences, counted in name
+/// bytes built or scanned while matching frames to regions, plus UV values
+/// stored.
+const SEQUENCE_BIND_BUDGET: usize = 1 << 26;
+
+/// An atlas indexed by region name, and the sequence binding budget left.
+struct Binder<'a> {
+    atlas: &'a Atlas,
+    /// The first region declared under each name, which is the one
+    /// [`Atlas::find_region`] returns.
+    by_name: HashMap<&'a str, &'a AtlasRegion>,
+    /// The cost of scanning every region name once.
+    scan_cost: usize,
+    budget: usize,
+}
+
+impl<'a> Binder<'a> {
+    fn new(atlas: &'a Atlas) -> Self {
+        let mut by_name = HashMap::with_capacity(atlas.regions.len());
+        let mut scan_cost = 0_usize;
+        for region in &atlas.regions {
+            by_name.entry(region.name.as_str()).or_insert(region);
+            scan_cost = scan_cost.saturating_add(region.name.len().saturating_add(1));
+        }
+        Self {
+            atlas,
+            by_name,
+            scan_cost,
+            budget: SEQUENCE_BIND_BUDGET,
         }
     }
-}
 
-/// Resolve a region attachment's sequence: bind each frame's UVs and page, then
-/// bake the static corner offsets / UVs / page to the setup frame.
-fn bind_region_sequence(r: &mut RegionAttachment, atlas: &Atlas) {
-    let Some(mut seq) = r.sequence.take() else {
-        return;
-    };
-    for i in 0..seq.count {
-        if let Some(region) = atlas.find_region(&seq.region_name(&r.path, i)) {
-            let page = &atlas.pages[region.page];
+    fn bind_skin(&mut self, skin: &mut Skin) {
+        for att in skin.attachments_mut() {
+            match att {
+                Attachment::Region(r) => {
+                    if r.sequence.is_some() {
+                        self.bind_region_sequence(r);
+                    } else if let Some((region, page)) = self.find(&r.path) {
+                        r.page = region.page;
+                        r.update(region, page.width, page.height);
+                    }
+                }
+                Attachment::Mesh(m) => {
+                    if m.sequence.is_some() {
+                        self.bind_mesh_sequence(m);
+                    } else if let Some((region, page)) = self.find(&m.path) {
+                        m.page = region.page;
+                        m.remap_uvs(region, page.width, page.height);
+                    }
+                }
+                Attachment::Path(_)
+                | Attachment::BoundingBox(_)
+                | Attachment::Point(_)
+                | Attachment::LinkedMesh(_)
+                | Attachment::Clipping(_) => {}
+            }
+        }
+    }
+
+    /// The atlas region named `name` and its page. A region whose page index
+    /// is outside the atlas (possible only in a hand-built `Atlas`) counts as
+    /// missing.
+    fn find(&self, name: &str) -> Option<(&'a AtlasRegion, &'a AtlasPage)> {
+        let region: &'a AtlasRegion = self.by_name.get(name)?;
+        let page = self.atlas.pages.get(region.page)?;
+        Some((region, page))
+    }
+
+    /// Every sequence frame below `seq.count` whose region exists in the atlas,
+    /// in frame order, with its region and page.
+    ///
+    /// This either looks each frame's name up or scans the atlas once for names
+    /// that parse as the sequence's frames, whichever costs less, so the work
+    /// is bounded by the atlas even when `count` is huge. Both give the same
+    /// frames. The work is paid from the budget. Unpaid, no frame is found.
+    fn sequence_regions(
+        &mut self,
+        seq: &Sequence,
+        base: &str,
+    ) -> Vec<(usize, &'a AtlasRegion, &'a AtlasPage)> {
+        let atlas = self.atlas;
+        let regions = &atlas.regions;
+        let lookup_cost = seq
+            .count
+            .saturating_mul(seq.max_name_len(base).saturating_add(1));
+        let lookup = lookup_cost <= self.scan_cost;
+        if !spend(&mut self.budget, lookup_cost.min(self.scan_cost)) {
+            return Vec::new();
+        }
+        if lookup {
+            return (0..seq.count)
+                .filter_map(|i| {
+                    let (region, page) = self.find(&seq.region_name(base, i))?;
+                    Some((i, region, page))
+                })
+                .collect();
+        }
+        let mut found: Vec<(usize, &str)> = regions
+            .iter()
+            .filter_map(|region| Some((seq.frame_index(base, &region.name)?, region.name.as_str())))
+            .filter(|&(index, _)| index < seq.count)
+            .collect();
+        // Regions sharing a name share a frame index. Keep one entry per frame.
+        found.sort_by_key(|&(index, _)| index);
+        found.dedup_by_key(|&mut (index, _)| index);
+        found
+            .into_iter()
+            .filter_map(|(index, name)| {
+                let (region, page) = self.find(name)?;
+                Some((index, region, page))
+            })
+            .collect()
+    }
+
+    /// Store `uvs` and `page` for the sequence frames from `first` on, paying
+    /// one unit of budget per UV value. `false`, storing nothing, when the
+    /// budget cannot pay.
+    fn push_frames(&mut self, seq: &mut Sequence, first: usize, uvs: &[f32], page: usize) -> bool {
+        if !spend(&mut self.budget, uvs.len()) {
+            return false;
+        }
+        seq.push_frame(first, uvs.to_vec(), page);
+        true
+    }
+
+    /// Resolve a region attachment's sequence: bind each frame's UVs and page,
+    /// then bake the static corner offsets / UVs / page to the setup frame.
+    fn bind_region_sequence(&mut self, r: &mut RegionAttachment) {
+        let Some(mut seq) = r.sequence.take() else {
+            return;
+        };
+        self.bind_region_frames(&mut seq, r);
+        if let Some((region, page)) = self.find(&seq.region_name(&r.path, seq.setup_index)) {
+            r.page = region.page;
             r.update(region, page.width, page.height);
-            seq.push_frame(r.uvs.to_vec(), region.page);
-        } else {
-            seq.push_frame(r.uvs.to_vec(), r.page);
         }
+        r.sequence = Some(seq);
     }
-    if let Some(region) = atlas.find_region(&seq.region_name(&r.path, seq.setup_index)) {
-        let page = &atlas.pages[region.page];
-        r.page = region.page;
-        r.update(region, page.width, page.height);
-    }
-    r.sequence = Some(seq);
-}
 
-/// Resolve a mesh attachment's sequence: remap the original UVs into each
-/// frame's region, then leave the static UVs at the setup frame.
-fn bind_mesh_sequence(m: &mut MeshAttachment, atlas: &Atlas) {
-    let Some(mut seq) = m.sequence.take() else {
-        return;
-    };
-    let original = m.uvs.clone();
-    for i in 0..seq.count {
-        if let Some(region) = atlas.find_region(&seq.region_name(&m.path, i)) {
-            let page = &atlas.pages[region.page];
-            m.uvs.clone_from(&original);
-            m.remap_uvs(region, page.width, page.height);
-            seq.push_frame(m.uvs.clone(), region.page);
-        } else {
-            seq.push_frame(original.clone(), m.page);
+    /// Bind a region sequence's frames. A frame with no atlas region reuses the
+    /// UVs of the latest frame before it that has one (the attachment's own
+    /// UVs if none) with the attachment's page. Such frames are stored as one
+    /// run per gap.
+    fn bind_region_frames(&mut self, seq: &mut Sequence, r: &mut RegionAttachment) {
+        let fallback_page = r.page;
+        let mut next = 0;
+        for (index, region, page) in self.sequence_regions(seq, &r.path) {
+            if index > next && !self.push_frames(seq, next, &r.uvs, fallback_page) {
+                return;
+            }
+            r.update(region, page.width, page.height);
+            if !self.push_frames(seq, index, &r.uvs, region.page) {
+                return;
+            }
+            next = index + 1;
+        }
+        if next < seq.count {
+            self.push_frames(seq, next, &r.uvs, fallback_page);
         }
     }
-    m.uvs.clone_from(&original);
-    if let Some(region) = atlas.find_region(&seq.region_name(&m.path, seq.setup_index)) {
-        let page = &atlas.pages[region.page];
-        m.page = region.page;
-        m.remap_uvs(region, page.width, page.height);
+
+    /// Resolve a mesh attachment's sequence: remap the original UVs into each
+    /// frame's region, then leave the static UVs at the setup frame.
+    fn bind_mesh_sequence(&mut self, m: &mut MeshAttachment) {
+        let Some(mut seq) = m.sequence.take() else {
+            return;
+        };
+        let original = m.uvs.clone();
+        self.bind_mesh_frames(&mut seq, m, &original);
+        m.uvs.clone_from(&original);
+        if let Some((region, page)) = self.find(&seq.region_name(&m.path, seq.setup_index)) {
+            m.page = region.page;
+            m.remap_uvs(region, page.width, page.height);
+        }
+        m.sequence = Some(seq);
     }
-    m.sequence = Some(seq);
+
+    /// Bind a mesh sequence's frames from the `original` UVs. A frame with no
+    /// atlas region keeps the original UVs and the attachment's page. Such
+    /// frames are stored as one run per gap.
+    fn bind_mesh_frames(&mut self, seq: &mut Sequence, m: &mut MeshAttachment, original: &[f32]) {
+        let mut next = 0;
+        for (index, region, page) in self.sequence_regions(seq, &m.path) {
+            if index > next && !self.push_frames(seq, next, original, m.page) {
+                return;
+            }
+            m.uvs.clear();
+            m.uvs.extend_from_slice(original);
+            m.remap_uvs(region, page.width, page.height);
+            if !self.push_frames(seq, index, &m.uvs, region.page) {
+                return;
+            }
+            next = index + 1;
+        }
+        if next < seq.count {
+            self.push_frames(seq, next, original, m.page);
+        }
+    }
 }
 
 /// The bound UVs and page of a sequenced attachment at the slot's frame index
-/// (`-1` uses the attachment's setup index); `None` for a non-sequenced
+/// (`-1` uses the attachment's setup index), or `None` for a non-sequenced
 /// attachment (so the caller falls back to the static UVs).
 fn sequence_frame(seq: Option<&Sequence>, slot_index: i32) -> Option<(&[f32], usize)> {
     let seq = seq?;
@@ -150,7 +279,7 @@ fn sequence_frame(seq: Option<&Sequence>, slot_index: i32) -> Option<(&[f32], us
 /// Call [`Skeleton::update_world_transform`] first (to pose the bones) and
 /// [`bind_atlas`] once at load time (to resolve UVs). Walks the skeleton's
 /// runtime draw order, reading each slot's current attachment and tint (driven
-/// by slot timelines); the blend mode comes from the setup data.
+/// by slot timelines). The blend mode comes from the setup data.
 #[must_use]
 pub fn render(skeleton: &Skeleton) -> Vec<RenderCommand> {
     let mut out = Vec::new();
@@ -161,7 +290,7 @@ pub fn render(skeleton: &Skeleton) -> Vec<RenderCommand> {
 /// Build the skeleton's draw-order render commands into `out`, which is cleared
 /// first. A render loop should keep one buffer and call this every frame to
 /// reuse its capacity, rather than calling [`render`] and allocating a fresh
-/// `Vec` each frame; to also reuse the commands' own buffers and the clipper's
+/// `Vec` each frame. To also reuse the commands' own buffers and the clipper's
 /// internals, hold a [`RenderScratch`] and call [`render_with`] instead.
 pub fn render_into(skeleton: &Skeleton, out: &mut Vec<RenderCommand>) {
     out.clear();
@@ -175,7 +304,11 @@ pub fn render_into(skeleton: &Skeleton, out: &mut Vec<RenderCommand>) {
 /// (the commands themselves and the clipper's intermediates) lives in
 /// `scratch` and is rebuilt in place: keep one scratch per render loop and,
 /// once its buffers have grown to the skeleton's working sizes, steady-state
-/// rendering — clipped or not — performs no heap allocation.
+/// rendering, clipped or not, performs no heap allocation.
+///
+/// Clipping draws on a fixed work budget per frame, far above what real rigs
+/// use, so a hostile rig cannot make a frame arbitrarily slow. Once the budget
+/// is spent, the frame's remaining clipped slots draw nothing.
 #[must_use]
 pub fn render_with<'a>(skeleton: &Skeleton, scratch: &'a mut RenderScratch) -> &'a [RenderCommand] {
     let RenderScratch {
@@ -191,6 +324,7 @@ pub fn render_with<'a>(skeleton: &Skeleton, scratch: &'a mut RenderScratch) -> &
     poly_points.clear();
     poly_ranges.clear();
     let mut emitted = 0;
+    let mut budget = CLIP_WORK_BUDGET;
     // The active clip's end slot: clipping stops once that slot is drawn.
     let mut clip_end: Option<usize> = None;
     for &slot_index in skeleton.draw_order() {
@@ -200,8 +334,15 @@ pub fn render_with<'a>(skeleton: &Skeleton, scratch: &'a mut RenderScratch) -> &
                 // pieces. A degenerate polygon leaves any active clip running.
                 clip_world.clear();
                 c.compute_world_vertices_into(skeleton, setup.bone, clip_world);
-                if replace_clip(clip_world, ear, poly_points, poly_ranges) {
-                    let end = skeleton.data().find_slot(&c.end_slot);
+                if replace_clip_within(clip_world, ear, poly_points, poly_ranges, &mut budget) {
+                    // The end slot lookup scans the slot list, so it is paid
+                    // from the budget too. Unpaid, it counts as not found.
+                    let slots = &skeleton.data().slots;
+                    let end = if spend(&mut budget, slots.len()) {
+                        skeleton.data().find_slot(&c.end_slot)
+                    } else {
+                        None
+                    };
                     clip_end = Some(end.unwrap_or(usize::MAX));
                 }
             } else {
@@ -215,7 +356,15 @@ pub fn render_with<'a>(skeleton: &Skeleton, scratch: &'a mut RenderScratch) -> &
                 if fill_command(skeleton, setup, slot, att, dst) {
                     if clip_end.is_some() {
                         let dst = command_slot(commands, emitted);
-                        if clip_into(staging, poly_points, poly_ranges, subject, clipped, dst) {
+                        if clip_into(
+                            staging,
+                            poly_points,
+                            poly_ranges,
+                            subject,
+                            clipped,
+                            dst,
+                            &mut budget,
+                        ) {
                             emitted += 1;
                         }
                     } else {
@@ -305,8 +454,19 @@ fn fill_command(
                     dst.page = m.page;
                 }
             }
+            // Malformed mesh data can leave the positions, UVs, and triangles
+            // out of step. Keep the vertices that have both a position and a
+            // UV pair, and the triangles whose corners are all among them, so
+            // every command is self-consistent. Valid meshes pass unchanged.
+            let vertices = dst.positions.len().min(dst.uvs.len() / 2);
+            dst.positions.truncate(vertices);
+            dst.uvs.truncate(vertices * 2);
             dst.triangles.clear();
-            dst.triangles.extend_from_slice(&m.triangles);
+            for tri in m.triangles.chunks(3) {
+                if tri.len() == 3 && tri.iter().all(|&t| usize::from(t) < vertices) {
+                    dst.triangles.extend_from_slice(tri);
+                }
+            }
             dst.color = mul(slot.color, m.color);
             dst.dark_color = slot.dark_color;
             dst.blend = setup.blend;
@@ -324,6 +484,9 @@ fn fill_command(
 fn mul(a: Color, b: Color) -> Color {
     Color::new(a.r * b.r, a.g * b.g, a.b * b.b, a.a * b.a)
 }
+
+#[cfg(test)]
+mod robustness;
 
 #[cfg(test)]
 mod tests {
@@ -468,7 +631,7 @@ mod tests {
         assert_eq!(buf[0].triangles, fresh[0].triangles);
     }
 
-    /// Slot 0: a clipping square `[0,10]^2`; slot 1: a mesh triangle that
+    /// Slot 0: a clipping square `[0,10]^2`. Slot 1: a mesh triangle that
     /// spills past it. The clip ends on slot 1 ("m"), so the mesh is masked.
     fn clipped_skeleton() -> Skeleton {
         let mut skin = Skin::new("default");
@@ -531,7 +694,7 @@ mod tests {
     fn clipping_masks_a_following_slot() {
         let sk = clipped_skeleton();
         let cmds = render(&sk);
-        // The clip attachment emits nothing; only the masked mesh remains.
+        // The clip attachment emits nothing. Only the masked mesh remains.
         assert_eq!(cmds.len(), 1);
         let c = &cmds[0];
         // The mesh overflowed the square, so clipping bounded it and introduced

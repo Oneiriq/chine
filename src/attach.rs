@@ -2,10 +2,10 @@
 //!
 //! [`RegionAttachment`] (a textured quad on one bone) and [`MeshAttachment`] (a
 //! textured mesh whose vertices may be weighted across several bones) are the
-//! renderable types; [`PathAttachment`] holds the Bezier control points that
+//! renderable types. [`PathAttachment`] holds the Bezier control points that
 //! path constraints follow. Bounding-box and point attachments are exposed as
-//! geometry/transform data; linked meshes resolve to their parent's geometry at
-//! load time; clipping attachments mask the slots they cover with a polygon.
+//! geometry/transform data. Linked meshes resolve to their parent's geometry at
+//! load time. Clipping attachments mask the slots they cover with a polygon.
 
 use glam::Vec2;
 
@@ -45,6 +45,11 @@ pub enum Attachment {
     Clipping(ClippingAttachment),
 }
 
+/// The most zero-padding digits [`Sequence::region_name`] honors. Real exports
+/// use a handful. The cap keeps a hostile `digits` value from allocating a
+/// huge name.
+const MAX_SEQUENCE_DIGITS: usize = 1024;
+
 /// An animated (flipbook) attachment: a run of atlas regions shown over time.
 /// Each region's UVs and atlas page are resolved at bind time and selected per
 /// frame by the slot's sequence index.
@@ -58,19 +63,24 @@ pub struct Sequence {
     pub digits: usize,
     /// Region index shown in the setup pose.
     pub setup_index: usize,
+    /// The bound frames as runs, sorted by first frame index. A run covers
+    /// every frame from its `first` up to the next run's `first`, so frames
+    /// that share UVs and a page (such as a long tail of frames with no atlas
+    /// region) take one entry.
     frames: Vec<SequenceFrame>,
 }
 
-/// One resolved sequence frame: its bound UVs (8 for a region, `2 * vertices`
-/// for a mesh) and atlas page.
+/// One run of bound sequence frames: the first frame index it covers, the
+/// frames' UVs (8 for a region, `2 * vertices` for a mesh), and atlas page.
 #[derive(Debug, Clone)]
 struct SequenceFrame {
+    first: usize,
     uvs: Vec<f32>,
     page: usize,
 }
 
 impl Sequence {
-    /// A sequence with the given counts and setup frame; its per-frame UVs are
+    /// A sequence with the given counts and setup frame. Its per-frame UVs are
     /// resolved at bind time.
     #[must_use]
     pub fn new(count: usize, start: usize, digits: usize, setup_index: usize) -> Self {
@@ -84,27 +94,63 @@ impl Sequence {
     }
 
     /// The atlas region name for frame `index`: the base path plus the
-    /// zero-padded `start + index`.
+    /// zero-padded `start + index`. Padding stops at 1024 digits.
     #[must_use]
     pub fn region_name(&self, base: &str, index: usize) -> String {
-        let frame = (self.start + index).to_string();
-        let pad = self.digits.saturating_sub(frame.len());
+        // Summed in u128 so a large `start` cannot overflow.
+        let frame = (self.start as u128 + index as u128).to_string();
+        let pad = self.pad_digits().saturating_sub(frame.len());
         format!("{base}{}{frame}", "0".repeat(pad))
     }
 
-    /// Record a frame's bound UVs and atlas page (called at bind time).
-    pub(crate) fn push_frame(&mut self, uvs: Vec<f32>, page: usize) {
-        self.frames.push(SequenceFrame { uvs, page });
+    /// The zero-padding width [`Self::region_name`] uses.
+    fn pad_digits(&self) -> usize {
+        self.digits.min(MAX_SEQUENCE_DIGITS)
     }
 
-    /// The bound UVs and page for frame `index` (clamped to the resolved range).
-    #[must_use]
-    pub(crate) fn frame(&self, index: usize) -> Option<(&[f32], usize)> {
-        if self.frames.is_empty() {
+    /// The longest name [`Self::region_name`] can return for `base`. A frame
+    /// number (`start + index`) has at most 20 digits.
+    pub(crate) fn max_name_len(&self, base: &str) -> usize {
+        base.len().saturating_add(self.pad_digits().max(20))
+    }
+
+    /// The frame index whose [`Self::region_name`] is `name`, if any. This is
+    /// the inverse of `region_name`, so a bind can match atlas regions to
+    /// frames without generating the name of every frame. The index may be at
+    /// or past `count`.
+    pub(crate) fn frame_index(&self, base: &str, name: &str) -> Option<usize> {
+        let suffix = name.strip_prefix(base)?;
+        if suffix.is_empty() || !suffix.bytes().all(|b| b.is_ascii_digit()) {
             return None;
         }
-        let i = index.min(self.frames.len() - 1);
-        self.frames.get(i).map(|f| (f.uvs.as_slice(), f.page))
+        // `region_name` writes the number without leading zeros ("0" for
+        // zero), then left-pads it with zeros to the padding width.
+        let digits = suffix.trim_start_matches('0');
+        if suffix.len() != self.pad_digits().max(digits.len().max(1)) {
+            return None;
+        }
+        let number: u128 = if digits.is_empty() {
+            0
+        } else {
+            digits.parse().ok()?
+        };
+        let index = number.checked_sub(self.start as u128)?;
+        usize::try_from(index).ok()
+    }
+
+    /// Record the bound UVs and atlas page for the frames from `first` up to
+    /// the next recorded run (called at bind time, with `first` increasing).
+    pub(crate) fn push_frame(&mut self, first: usize, uvs: Vec<f32>, page: usize) {
+        self.frames.push(SequenceFrame { first, uvs, page });
+    }
+
+    /// The bound UVs and page for frame `index`. An index past the last bound
+    /// frame reads the last one.
+    #[must_use]
+    pub(crate) fn frame(&self, index: usize) -> Option<(&[f32], usize)> {
+        let runs_at_or_before = self.frames.partition_point(|f| f.first <= index);
+        let run = self.frames.get(runs_at_or_before.checked_sub(1)?)?;
+        Some((run.uvs.as_slice(), run.page))
     }
 }
 
@@ -214,9 +260,11 @@ impl RegionAttachment {
 
         let pw = page_w.max(1) as f32;
         let ph = page_h.max(1) as f32;
+        // Region edges are summed in u64: atlas values near `u32::MAX` must
+        // not overflow.
         let u = region.x as f32 / pw;
-        let v = (region.y + region.height) as f32 / ph;
-        let u2 = (region.x + region.width) as f32 / pw;
+        let v = (u64::from(region.y) + u64::from(region.height)) as f32 / ph;
+        let u2 = (u64::from(region.x) + u64::from(region.width)) as f32 / pw;
         let v2 = region.y as f32 / ph;
         if region.degrees == 90 {
             self.uvs = [u, v2, u2, v2, u2, v, u, v];
@@ -245,7 +293,7 @@ impl RegionAttachment {
 pub enum MeshVertices {
     /// Each vertex is `[x, y]` in the slot bone's local space.
     Unweighted(Vec<f32>),
-    /// Weighted skinning. `bones` is, per vertex, `[count, boneIndex...]`;
+    /// Weighted skinning. `bones` is, per vertex, `[count, boneIndex...]`.
     /// `vertices` is, per influence, `[vx, vy, weight]`.
     Weighted {
         /// Per-vertex bone-influence layout: `[count, boneIndex...]`.
@@ -312,7 +360,7 @@ impl MeshAttachment {
     }
 
     /// Compute world-space positions for every vertex. `slot_bone` is the index
-    /// of the bone the slot follows (used for unweighted meshes); `deform`
+    /// of the bone the slot follows (used for unweighted meshes). `deform`
     /// overrides the local vertices when non-empty (unweighted only).
     #[must_use]
     pub fn compute_world_vertices(
@@ -355,6 +403,21 @@ impl MeshAttachment {
         }
     }
 
+    /// The number of values in this mesh's geometry arrays (UVs, triangles, and
+    /// vertex data): a measure of what a copy of the mesh costs.
+    pub(crate) fn geometry_len(&self) -> usize {
+        let vertices = match &self.vertices {
+            MeshVertices::Unweighted(v) => v.len(),
+            MeshVertices::Weighted { bones, vertices } => {
+                bones.len().saturating_add(vertices.len())
+            }
+        };
+        self.uvs
+            .len()
+            .saturating_add(self.triangles.len())
+            .saturating_add(vertices)
+    }
+
     /// The length of a deform vertex array for this mesh: `2 * vertex_count` for
     /// an unweighted mesh, or `2 *` the total influence count for a weighted one.
     #[must_use]
@@ -388,7 +451,7 @@ impl MeshAttachment {
 
 /// Transform a vertex attachment's bind-pose vertices into world space. Shared
 /// by [`MeshAttachment`] and [`PathAttachment`]: unweighted vertices follow the
-/// slot bone; weighted vertices are a blend across their influence bones.
+/// slot bone, and weighted vertices are a blend across their influence bones.
 fn compute_vertices(
     vertices: &MeshVertices,
     count: usize,
@@ -396,12 +459,16 @@ fn compute_vertices(
     slot_bone: usize,
     deform: &[f32],
 ) -> Vec<Vec2> {
-    let mut out = Vec::with_capacity(count);
+    let mut out = Vec::new();
     compute_vertices_into(vertices, count, skeleton, slot_bone, deform, &mut out);
     out
 }
 
 /// [`compute_vertices`] into a reused buffer, which is cleared first.
+///
+/// Emits at most `count` vertices, and fewer when the vertex data runs out
+/// first (malformed data): then the buffer holds the vertices that were fully
+/// described.
 fn compute_vertices_into(
     vertices: &MeshVertices,
     count: usize,
@@ -417,36 +484,57 @@ fn compute_vertices_into(
                 return;
             };
             // A deform timeline overrides the local vertices for unweighted
-            // meshes.
-            let local = if deform.len() >= count * 2 { deform } else { v };
+            // meshes when it covers every vertex.
+            let local = if deform.len() / 2 >= count { deform } else { v };
             let (a, b, c, d) = (bone.a(), bone.b(), bone.c(), bone.d());
             let (wx, wy) = (bone.world_x(), bone.world_y());
-            for i in 0..count {
-                let vx = local[i * 2];
-                let vy = local[i * 2 + 1];
+            out.reserve(count.min(local.len() / 2));
+            for pair in local.chunks(2).take(count) {
+                let Ok(&[vx, vy]) = <&[f32; 2]>::try_from(pair) else {
+                    break;
+                };
                 out.push(Vec2::new(vx * a + vy * b + wx, vx * c + vy * d + wy));
             }
         }
         MeshVertices::Weighted { bones, vertices } => {
+            // Each vertex takes at least one entry of `bones`, which bounds
+            // the reservation.
+            out.reserve(count.min(bones.len()));
             // A deform timeline adds a per-influence offset to each bind vertex.
-            let mut bi = 0;
-            let mut vi = 0;
+            let mut bi: usize = 0;
+            let mut vi: usize = 0;
             let mut fi = 0;
             for _ in 0..count {
-                let influences = bones[bi];
-                bi += 1;
+                // The vertex's influence count, then that many bone indices,
+                // then three bind values per influence. Stop at the first
+                // vertex the data does not fully describe.
+                let Some(&influences) = bones.get(bi) else {
+                    break;
+                };
+                let bone_ids = bi
+                    .checked_add(1)
+                    .and_then(|from| Some(from..from.checked_add(influences)?))
+                    .and_then(|ids| bones.get(ids));
+                let binds = influences
+                    .checked_mul(3)
+                    .and_then(|len| vi.checked_add(len))
+                    .and_then(|end| vertices.get(vi..end));
+                let (Some(bone_ids), Some(binds)) = (bone_ids, binds) else {
+                    break;
+                };
+                bi += 1 + influences;
+                vi += binds.len();
                 let mut wx = 0.0;
                 let mut wy = 0.0;
-                for _ in 0..influences {
-                    let bone_index = bones[bi];
-                    bi += 1;
+                for (&bone_index, bind) in bone_ids.iter().zip(binds.chunks(3)) {
+                    let Ok(&[bx, by, weight]) = <&[f32; 3]>::try_from(bind) else {
+                        break;
+                    };
                     let dx = deform.get(fi).copied().unwrap_or(0.0);
                     let dy = deform.get(fi + 1).copied().unwrap_or(0.0);
                     fi += 2;
-                    let vx = vertices[vi] + dx;
-                    let vy = vertices[vi + 1] + dy;
-                    let weight = vertices[vi + 2];
-                    vi += 3;
+                    let vx = bx + dx;
+                    let vy = by + dy;
                     if let Some(bone) = skeleton.bone(bone_index) {
                         wx += (vx * bone.a() + vy * bone.b() + bone.world_x()) * weight;
                         wy += (vx * bone.c() + vy * bone.d() + bone.world_y()) * weight;
@@ -460,7 +548,7 @@ fn compute_vertices_into(
 
 /// A path attachment: a composite cubic-Bezier curve whose control points are a
 /// vertex set (weighted or not, like a mesh). A path constraint samples
-/// positions and tangents along it; this type provides the control-point
+/// positions and tangents along it. This type provides the control-point
 /// geometry.
 #[derive(Debug, Clone)]
 pub struct PathAttachment {
@@ -513,7 +601,7 @@ impl PathAttachment {
 }
 
 /// A bounding-box attachment: a (weighted or unweighted) polygon used for
-/// collision/hit queries. Not rendered; the host transforms it to world space.
+/// collision/hit queries. It is not rendered. The host transforms it to world space.
 #[derive(Debug, Clone)]
 pub struct BoundingBoxAttachment {
     /// Attachment name (the key within a skin).
@@ -648,8 +736,8 @@ impl LinkedMeshAttachment {
 }
 
 /// A clipping attachment: a polygon that masks the slots from its own slot up to
-/// and including `end_slot` (in draw order). Convex polygons clip exactly;
-/// concave polygons clip against their convex span (a known simplification).
+/// and including `end_slot` (in draw order). Convex polygons clip exactly.
+/// Concave polygons clip against their convex span (a known simplification).
 #[derive(Debug, Clone)]
 pub struct ClippingAttachment {
     /// Attachment name (the key within a skin).
@@ -711,214 +799,7 @@ impl ClippingAttachment {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::data::{BoneData, SkeletonData};
-    use std::sync::Arc;
+mod robustness;
 
-    const EPS: f32 = 1e-3;
-
-    fn close(p: Vec2, x: f32, y: f32) -> bool {
-        (p.x - x).abs() < EPS && (p.y - y).abs() < EPS
-    }
-
-    fn one_bone_at(x: f32, y: f32) -> Skeleton {
-        let data = SkeletonData {
-            bones: vec![BoneData {
-                index: 0,
-                name: "root".into(),
-                position: Vec2::new(x, y),
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        let mut sk = Skeleton::new(Arc::new(data));
-        sk.update_world_transform();
-        sk
-    }
-
-    #[test]
-    fn region_quad_corners_center_on_the_bone() {
-        let sk = one_bone_at(100.0, 50.0);
-        let region = AtlasRegion {
-            name: "r".into(),
-            page: 0,
-            x: 0,
-            y: 0,
-            width: 20,
-            height: 10,
-            degrees: 0,
-            offset_x: 0.0,
-            offset_y: 0.0,
-            original_width: 20,
-            original_height: 10,
-            index: -1,
-        };
-        let mut att = RegionAttachment::new("r", "r");
-        att.width = 20.0;
-        att.height = 10.0;
-        att.update(&region, 64, 64);
-        let v = att.compute_world_vertices(sk.bone(0).unwrap());
-        // 20x10 quad centered on (100,50): BL(90,45) UL(90,55) UR(110,55) BR(110,45).
-        assert!(close(v[0], 90.0, 45.0), "BL {:?}", v[0]);
-        assert!(close(v[1], 90.0, 55.0), "UL {:?}", v[1]);
-        assert!(close(v[2], 110.0, 55.0), "UR {:?}", v[2]);
-        assert!(close(v[3], 110.0, 45.0), "BR {:?}", v[3]);
-    }
-
-    #[test]
-    fn unweighted_mesh_follows_its_bone() {
-        let sk = one_bone_at(10.0, 20.0);
-        let mesh = MeshAttachment::new(
-            "m",
-            "m",
-            MeshVertices::Unweighted(vec![0.0, 0.0, 5.0, 0.0, 0.0, 5.0]),
-            vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
-            vec![0, 1, 2],
-        );
-        let w = mesh.compute_world_vertices(&sk, 0, &[]);
-        // identity bone at (10,20): each local vertex offset by (10,20).
-        assert!(close(w[0], 10.0, 20.0));
-        assert!(close(w[1], 15.0, 20.0));
-        assert!(close(w[2], 10.0, 25.0));
-    }
-
-    #[test]
-    fn weighted_mesh_blends_two_bones() {
-        // Two roots at (0,0) and (100,0); a vertex weighted 50/50 lands at the
-        // midpoint of where each bone places its local origin.
-        let data = SkeletonData {
-            bones: vec![
-                BoneData {
-                    index: 0,
-                    name: "a".into(),
-                    ..Default::default()
-                },
-                BoneData {
-                    index: 1,
-                    name: "b".into(),
-                    position: Vec2::new(100.0, 0.0),
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        };
-        let mut sk = Skeleton::new(Arc::new(data));
-        sk.update_world_transform();
-        let mesh = MeshAttachment::new(
-            "m",
-            "m",
-            MeshVertices::Weighted {
-                bones: vec![2, 0, 1], // 1 vertex, influenced by bones 0 and 1
-                vertices: vec![0.0, 0.0, 0.5, 0.0, 0.0, 0.5], // (0,0)w.5 via bone0; (0,0)w.5 via bone1
-            },
-            vec![0.0, 0.0],
-            vec![],
-        );
-        let w = mesh.compute_world_vertices(&sk, 0, &[]);
-        assert_eq!(w.len(), 1);
-        assert!(close(w[0], 50.0, 0.0), "midpoint {:?}", w[0]);
-    }
-
-    #[test]
-    fn path_control_points_follow_their_bone() {
-        let sk = one_bone_at(10.0, 0.0);
-        // 4 control points (one cubic Bezier), unweighted.
-        let path = PathAttachment::new(
-            "p",
-            MeshVertices::Unweighted(vec![0.0, 0.0, 10.0, 0.0, 20.0, 0.0, 30.0, 0.0]),
-            4,
-            vec![30.0],
-            false,
-            true,
-        );
-        assert_eq!(path.vertex_count(), 4);
-        let w = path.compute_world_vertices(&sk, 0);
-        assert_eq!(w.len(), 4);
-        // bone at (10,0): control points offset by +10 in x.
-        assert!(close(w[0], 10.0, 0.0));
-        assert!(close(w[3], 40.0, 0.0));
-    }
-
-    #[test]
-    fn rotated_region_remaps_mesh_uvs() {
-        let region = AtlasRegion {
-            name: "r".into(),
-            page: 0,
-            x: 10,
-            y: 20,
-            width: 30,
-            height: 40,
-            degrees: 90,
-            offset_x: 0.0,
-            offset_y: 0.0,
-            original_width: 40,
-            original_height: 30,
-            index: -1,
-        };
-        let mut m = MeshAttachment::new(
-            "m",
-            "m",
-            MeshVertices::Unweighted(vec![0.0, 0.0, 5.0, 5.0]),
-            vec![0.0, 0.0, 1.0, 1.0], // mesh UVs (0,0) and (1,1)
-            vec![],
-        );
-        m.remap_uvs(&region, 100, 100);
-        // degrees 90: u = (rx + (1 - mv) * rw) / pw, v = (ry + mu * rh) / ph.
-        // (0,0) -> u=(10+30)/100=0.4, v=(20+0)/100=0.2.
-        assert!((m.uvs[0] - 0.4).abs() < 1e-4, "u0={}", m.uvs[0]);
-        assert!((m.uvs[1] - 0.2).abs() < 1e-4, "v0={}", m.uvs[1]);
-        // (1,1) -> u=(10+0)/100=0.1, v=(20+40)/100=0.6.
-        assert!((m.uvs[2] - 0.1).abs() < 1e-4, "u1={}", m.uvs[2]);
-        assert!((m.uvs[3] - 0.6).abs() < 1e-4, "v1={}", m.uvs[3]);
-    }
-
-    #[test]
-    fn bounding_box_polygon_follows_its_bone() {
-        let sk = one_bone_at(10.0, 0.0);
-        let bb = BoundingBoxAttachment::new(
-            "bb",
-            MeshVertices::Unweighted(vec![0.0, 0.0, 10.0, 0.0, 10.0, 10.0]),
-            3,
-        );
-        assert_eq!(bb.vertex_count(), 3);
-        let w = bb.compute_world_vertices(&sk, 0);
-        assert_eq!(w.len(), 3);
-        // bone at (10,0): each polygon vertex offset by +10 in x.
-        assert!(close(w[0], 10.0, 0.0), "{:?}", w[0]);
-        assert!(close(w[1], 20.0, 0.0), "{:?}", w[1]);
-        assert!(close(w[2], 20.0, 10.0), "{:?}", w[2]);
-    }
-
-    #[test]
-    fn point_attachment_transforms_with_its_bone() {
-        let sk = one_bone_at(10.0, 20.0);
-        let bone = sk.bone(0).unwrap();
-        let p = PointAttachment::new("p", 5.0, 0.0, 90.0);
-        let pos = p.compute_world_position(bone);
-        assert!(close(pos, 15.0, 20.0), "pos {:?}", pos);
-        // identity bone: world rotation equals the point's local rotation.
-        assert!((p.compute_world_rotation(bone) - 90.0).abs() < 1e-3);
-    }
-
-    #[test]
-    fn linked_mesh_borrows_parent_geometry() {
-        let mut parent = MeshAttachment::new(
-            "wing",
-            "wing",
-            MeshVertices::Unweighted(vec![0.0, 0.0, 10.0, 0.0, 0.0, 10.0]),
-            vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
-            vec![0, 1, 2],
-        );
-        parent.hull_length = 3;
-        let link =
-            LinkedMeshAttachment::new("wing-blue", "wing-blue", None, "wing", Color::WHITE, true);
-        let m = link.resolve(&parent);
-        // Identity stays the link's own; geometry is borrowed from the parent.
-        assert_eq!(m.name, "wing-blue");
-        assert_eq!(m.path, "wing-blue");
-        assert_eq!(m.triangles, parent.triangles);
-        assert_eq!(m.hull_length, 3);
-        assert_eq!(m.vertex_count(), 3);
-    }
-}
+#[cfg(test)]
+mod tests;

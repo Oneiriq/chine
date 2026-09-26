@@ -131,7 +131,7 @@ fn parses_and_plays_a_slot_alpha_timeline() {
     state.set_animation(anim, false);
     state.update(0.5);
     state.apply(&mut sk);
-    // setup alpha 1 fading to 0; ~0.5 at the halfway point.
+    // setup alpha 1 fading to 0 is ~0.5 at the halfway point.
     assert!((sk.slot(0).unwrap().color.a - 0.5).abs() < 1e-4);
 }
 
@@ -306,7 +306,7 @@ fn global_physics_timeline_drives_flagged_constraints() {
     state.update(0.5);
     state.apply(&mut sk);
     // The global strength timeline (value 40) drives only "pa"
-    // (strengthGlobal); "pb" keeps its setup strength (100).
+    // (strengthGlobal), and "pb" keeps its setup strength (100).
     assert!((sk.physics_constraint(0).unwrap().strength - 40.0).abs() < 1e-3);
     assert!((sk.physics_constraint(1).unwrap().strength - 100.0).abs() < 1e-3);
 }
@@ -401,7 +401,7 @@ fn slot_rgb_timeline_preserves_alpha() {
     sk.set_slots_to_setup_pose();
     state.apply(&mut sk);
     let c = sk.slot(0).unwrap().color;
-    // rgb interpolates white -> red (g 0.5); alpha stays the setup 0x80 (~0.502).
+    // rgb interpolates white -> red (g 0.5), and alpha stays the setup 0x80 (~0.502).
     assert!((c.g - 0.5).abs() < 1e-2, "g={}", c.g);
     assert!((c.a - 0.502).abs() < 1e-2, "a={}", c.a);
 }
@@ -462,7 +462,7 @@ fn single_axis_bone_timelines() {
     sk.set_bones_to_setup_pose();
     state.apply(&mut sk);
     let b = sk.bone(0).unwrap();
-    // translatex 0->10 at half = 5; scaley 1->3 = 2; shearx 0->20 = 10.
+    // translatex 0->10 at half = 5, scaley 1->3 = 2, shearx 0->20 = 10.
     assert!((b.x - 5.0).abs() < 1e-3, "x={}", b.x);
     assert!((b.scale_y - 2.0).abs() < 1e-3, "scale_y={}", b.scale_y);
     assert!((b.shear_x - 10.0).abs() < 1e-3, "shear_x={}", b.shear_x);
@@ -519,7 +519,7 @@ fn deform_timeline_moves_mesh_vertices() {
     sk.set_slots_to_setup_pose();
     state.apply(&mut sk);
     let d = &sk.slot(0).unwrap().deform;
-    // vertex 1's x (index 2) gets +5: setup 10 -> 15; others unchanged.
+    // vertex 1's x (index 2) gets +5: setup 10 -> 15. Others are unchanged.
     assert_eq!(d.len(), 6);
     assert!((d[2] - 15.0).abs() < 1e-3, "d[2]={}", d[2]);
     assert!((d[0] - 0.0).abs() < 1e-3, "d[0]={}", d[0]);
@@ -624,7 +624,7 @@ fn two_color_timeline_animates_light_and_dark() {
     sk.set_slots_to_setup_pose();
     state.apply(&mut sk);
     let slot = sk.slot(0).unwrap();
-    // light white -> red (g 1->0.5); dark black -> green (g 0->0.5).
+    // light white -> red (g 1->0.5), and dark black -> green (g 0->0.5).
     assert!(
         (slot.color.g - 0.5).abs() < 1e-2,
         "light g={}",
@@ -810,9 +810,9 @@ fn resolves_linked_mesh_to_parent_geometry() {
 #[test]
 fn linked_mesh_inherits_parent_deform_under_active_skin() {
     // The slot's "m" placeholder is a mesh in the default skin and a linked
-    // mesh (own red tint) in "alt"; a deform animation targets "m". With the
+    // mesh (own red tint) in "alt". A deform animation targets "m". With the
     // alt skin active, render shows the link and the parent's deform drives
-    // it - purely through name matching, no deform-source indirection.
+    // it through name matching alone, with no deform-source indirection.
     let json = r#"{
         "bones": [ { "name": "root" } ],
         "slots": [ { "name": "s", "bone": "root", "attachment": "m" } ],
@@ -923,7 +923,7 @@ fn deform_is_skin_aware() {
 #[test]
 fn non_inheriting_link_uses_its_own_deform() {
     // alt's "m" is a link with "deform": false, so it does NOT inherit the
-    // parent's deform; the alt-authored deform drives it (its own load no
+    // parent's deform. The alt-authored deform drives it (its own load no
     // longer skipped, since resolution runs before animation parsing).
     let json = r#"{
         "bones": [ { "name": "root" } ],

@@ -1,6 +1,6 @@
 //! Multi-track animation playback with crossfade mixing.
 //!
-//! [`AnimationState`] holds a stack of tracks; each [`TrackEntry`] plays one
+//! [`AnimationState`] holds a stack of tracks. Each [`TrackEntry`] plays one
 //! animation, and higher tracks layer over lower ones. Setting a new animation
 //! on a track while [`AnimationState::default_mix`] is non-zero crossfades from
 //! the previous animation over that duration.
@@ -64,6 +64,17 @@ impl TrackEntry {
             self.track_time % duration
         } else {
             self.track_time
+        }
+    }
+
+    /// The last entry in this entry's queue, or this entry when none is queued.
+    fn last_queued_mut(&mut self) -> &mut TrackEntry {
+        let mut node = self;
+        loop {
+            match node.next {
+                Some(ref mut next) => node = next,
+                None => return node,
+            }
         }
     }
 
@@ -134,6 +145,17 @@ impl TrackEntry {
     }
 }
 
+impl Drop for TrackEntry {
+    /// Unlink the queue one entry at a time. The default drop recurses once
+    /// per queued entry and can overflow the stack on a long queue.
+    fn drop(&mut self) {
+        let mut next = self.next.take();
+        while let Some(mut entry) = next {
+            next = entry.next.take();
+        }
+    }
+}
+
 /// A multi-track animation player with crossfade mixing.
 #[derive(Default)]
 pub struct AnimationState {
@@ -168,21 +190,22 @@ impl AnimationState {
         while self.tracks.len() <= track {
             self.tracks.push(None);
         }
+        // The loop above makes `track` a valid index.
+        let slot = &mut self.tracks[track];
         let mut entry = TrackEntry::new(animation, looping);
         if self.default_mix > 0.0 {
-            if let Some(mut current) = self.tracks[track].take() {
+            if let Some(mut current) = slot.take() {
                 current.mixing_from = None; // collapse any in-progress crossfade
                 current.next = None; // interrupt the queue
                 entry.mix_duration = self.default_mix;
                 entry.mixing_from = Some(Box::new(current));
             }
         }
-        self.tracks[track] = Some(entry);
-        self.tracks[track].as_mut().expect("just set")
+        slot.insert(entry)
     }
 
     /// Queue `animation` on track 0 after the current animation and any already
-    /// queued; it crossfades in over [`Self::default_mix`] as the previous one
+    /// queued. It crossfades in over [`Self::default_mix`] as the previous one
     /// ends.
     pub fn add_animation(&mut self, animation: Arc<Animation>, looping: bool) {
         self.add_animation_on(0, animation, looping);
@@ -196,15 +219,14 @@ impl AnimationState {
             self.tracks.push(None);
         }
         let entry = TrackEntry::new(animation, looping);
-        if let Some(current) = self.tracks[track].as_mut() {
-            let mut node = current;
-            while node.next.is_some() {
-                node = node.next.as_deref_mut().expect("checked some");
+        // The loop above makes `track` a valid index.
+        match &mut self.tracks[track] {
+            Some(current) => {
+                let node = current.last_queued_mut();
+                node.delay = (node.animation.duration() - default_mix).max(0.0);
+                node.next = Some(Box::new(entry));
             }
-            node.delay = (node.animation.duration() - default_mix).max(0.0);
-            node.next = Some(Box::new(entry));
-        } else {
-            self.tracks[track] = Some(entry);
+            slot @ None => *slot = Some(entry),
         }
     }
 
@@ -253,21 +275,27 @@ impl AnimationState {
 /// Promote a track's queued entry to current once the current entry reaches its
 /// delay, crossfading the previous current out over `default_mix`.
 fn promote(slot: &mut Option<TrackEntry>, default_mix: f32) {
-    let ready = slot
-        .as_ref()
-        .is_some_and(|c| c.next.is_some() && c.track_time >= c.delay);
+    let Some(current) = slot.as_mut() else {
+        return;
+    };
+    // A NaN track time or delay never reaches the delay.
+    let ready = current.track_time >= current.delay;
     if !ready {
         return;
     }
-    let mut current = slot.take().expect("checked some");
-    let mut next = current.next.take().expect("checked some");
-    current.mixing_from = None;
-    if default_mix > 0.0 {
-        next.mix_duration = default_mix;
-        next.mix_time = 0.0;
-        next.mixing_from = Some(Box::new(current));
+    let Some(next) = current.next.take() else {
+        return;
+    };
+    let mut next = *next;
+    if let Some(mut previous) = slot.take() {
+        previous.mixing_from = None;
+        if default_mix > 0.0 {
+            next.mix_duration = default_mix;
+            next.mix_time = 0.0;
+            next.mixing_from = Some(Box::new(previous));
+        }
     }
-    *slot = Some(*next);
+    *slot = Some(next);
 }
 
 #[cfg(test)]
@@ -349,7 +377,7 @@ mod tests {
         state.apply(&mut sk);
         assert!((sk.bone(0).unwrap().rotation - 0.0).abs() < 1e-4);
 
-        // Switch to rotation 90 with a crossfade; halfway is ~45.
+        // Switch to rotation 90 with a crossfade. Halfway is ~45.
         state.set_animation(hold(90.0), true);
         state.update(0.5);
         sk.set_bones_to_setup_pose();
@@ -375,7 +403,7 @@ mod tests {
     fn higher_tracks_layer_over_lower() {
         let mut sk = one_bone();
         let mut state = AnimationState::new();
-        // Track 0 holds 100; track 1 layers 20 at half weight over it.
+        // Track 0 holds 100. Track 1 layers 20 at half weight over it.
         state.set_animation_on(0, hold(100.0), true);
         state.set_animation_on(1, hold(20.0), true).alpha = 0.5;
         sk.set_bones_to_setup_pose();
@@ -417,5 +445,29 @@ mod tests {
         state.apply(&mut sk);
         let r = sk.bone(0).unwrap().rotation;
         assert!((r - 90.0).abs() < 1e-3, "expected B (90), got {r}");
+    }
+
+    #[test]
+    fn a_long_queue_drops_without_overflowing_the_stack() {
+        let anim = hold(0.0);
+        let mut head = TrackEntry::new(Arc::clone(&anim), false);
+        for _ in 0..200_000 {
+            let mut entry = TrackEntry::new(Arc::clone(&anim), false);
+            entry.next = Some(Box::new(head));
+            head = entry;
+        }
+        let mut state = AnimationState::new();
+        state.tracks.push(Some(head));
+        state.clear();
+    }
+
+    #[test]
+    fn a_nan_track_time_never_promotes_the_queue() {
+        let mut state = AnimationState::new();
+        state.set_animation(hold(0.0), false).track_time = f32::NAN;
+        state.add_animation(hold(90.0), false);
+        state.update(1.0);
+        let entry = state.track(0).unwrap();
+        assert!(entry.next.is_some());
     }
 }

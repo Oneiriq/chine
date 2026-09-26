@@ -4,11 +4,12 @@
 //! constrained bones via a configurable property map: each source property
 //! (rotate / x / y / scaleX / scaleY / shearY) drives one or more target
 //! properties, scaled and offset. World-target constraints modify the
-//! constrained bones' world matrices directly; local-target ones modify their
+//! constrained bones' world matrices directly. Local-target ones modify their
 //! local pose. It re-implements Spine 4.3's `TransformConstraintData`.
 
 use core::f32::consts::{PI, TAU};
 
+use super::clamp;
 use crate::data::SkeletonData;
 use crate::skel::Bone;
 
@@ -167,8 +168,9 @@ struct SourcePose {
 
 /// Apply transform constraint `c`, copying the source bone's mapped properties
 /// onto the constrained bones. World-target writes modify the bones' world
-/// matrices; local-target writes modify their local pose (recomputed by the
-/// update cache).
+/// matrices. Local-target writes modify their local pose (recomputed by the
+/// update cache). An out-of-range constraint or source index skips the
+/// constraint, and an out-of-range constrained bone is skipped.
 pub(crate) fn solve(
     bones: &mut [Bone],
     data: &SkeletonData,
@@ -177,7 +179,9 @@ pub(crate) fn solve(
     sx: f32,
     sy: f32,
 ) {
-    let tc = &data.transform_constraints[c];
+    let Some(tc) = data.transform_constraints.get(c) else {
+        return;
+    };
     if pose.mix_rotate == 0.0
         && pose.mix_x == 0.0
         && pose.mix_y == 0.0
@@ -187,24 +191,27 @@ pub(crate) fn solve(
     {
         return;
     }
-    let src = {
-        let s = &bones[tc.source];
-        SourcePose {
-            a: s.a(),
-            b: s.b(),
-            c: s.c(),
-            d: s.d(),
-            world_x: s.world_x(),
-            world_y: s.world_y(),
-            rotation: s.rotation,
-            x: s.x,
-            y: s.y,
-            scale_x: s.scale_x,
-            scale_y: s.scale_y,
-            shear_y: s.shear_y,
-        }
+    let Some(s) = bones.get(tc.source) else {
+        return;
+    };
+    let src = SourcePose {
+        a: s.a(),
+        b: s.b(),
+        c: s.c(),
+        d: s.d(),
+        world_x: s.world_x(),
+        world_y: s.world_y(),
+        rotation: s.rotation,
+        x: s.x,
+        y: s.y,
+        scale_x: s.scale_x,
+        scale_y: s.scale_y,
+        shear_y: s.shear_y,
     };
     for &bone_idx in &tc.bones {
+        let Some(bone) = bones.get_mut(bone_idx) else {
+            continue;
+        };
         for from in &tc.properties {
             let value =
                 from_value(from.property, &src, tc.local_source, &tc.offsets, sx, sy) - from.offset;
@@ -214,15 +221,17 @@ pub(crate) fn solve(
                 }
                 let mut clamped = to.offset + value * to.scale;
                 if tc.clamp {
+                    // A NaN offset or max makes `f32::clamp` panic, so use the
+                    // total `clamp` helper.
                     clamped = if to.offset < to.max {
-                        clamped.clamp(to.offset, to.max)
+                        clamp(clamped, to.offset, to.max)
                     } else {
-                        clamped.clamp(to.max, to.offset)
+                        clamp(clamped, to.max, to.offset)
                     };
                 }
                 to_apply(
                     to.property,
-                    &mut bones[bone_idx],
+                    bone,
                     pose,
                     clamped,
                     tc.local_target,
@@ -568,5 +577,68 @@ mod tests {
         let f = sk.bone(2).unwrap();
         assert!((f.a() - 0.707).abs() < 1e-2, "a={}", f.a());
         assert!((f.c() - 0.707).abs() < 1e-2, "c={}", f.c());
+    }
+
+    #[test]
+    fn out_of_range_source_or_bone_is_skipped() {
+        let data = SkeletonData {
+            bones: vec![
+                bone(0, "root", None, 0.0),
+                bone(1, "source", Some(0), 90.0),
+                bone(2, "follower", Some(0), 0.0),
+            ],
+            ..Default::default()
+        };
+        let mut sk = Skeleton::new(Arc::new(data.clone()));
+        sk.update_world_transform();
+        let before = sk.bones().to_vec();
+        let bad = SkeletonData {
+            transform_constraints: vec![
+                follow_rotation(vec![2], 99, 1.0),
+                follow_rotation(vec![99, 2], 1, 1.0),
+            ],
+            ..data
+        };
+        let pose = TransformConstraint::from_data(&bad.transform_constraints[0]);
+        let world = |bones: &[Bone]| -> Vec<[f32; 4]> {
+            bones.iter().map(|b| [b.a(), b.b(), b.c(), b.d()]).collect()
+        };
+
+        // A source past the bone list, or a constraint past the constraint
+        // list, changes nothing.
+        let mut bones = before.clone();
+        solve(&mut bones, &bad, 0, &pose, 1.0, 1.0);
+        solve(&mut bones, &bad, 2, &pose, 1.0, 1.0);
+        assert_eq!(world(&bones), world(&before));
+
+        // A constrained bone past the bone list is skipped. The valid one
+        // still follows the source.
+        solve(&mut bones, &bad, 1, &pose, 1.0, 1.0);
+        assert!(bones[2].a().abs() < 1e-3, "a={}", bones[2].a());
+        assert!((bones[2].c() - 1.0).abs() < 1e-3, "c={}", bones[2].c());
+    }
+
+    #[test]
+    fn clamp_with_nan_bounds_does_not_panic() {
+        for (offset, max) in [(f32::NAN, 1.0), (0.0, f32::NAN), (f32::NAN, f32::NAN)] {
+            for local_target in [false, true] {
+                let mut tc = follow_rotation(vec![2], 1, 1.0);
+                tc.clamp = true;
+                tc.local_target = local_target;
+                tc.properties[0].to[0].offset = offset;
+                tc.properties[0].to[0].max = max;
+                let data = SkeletonData {
+                    bones: vec![
+                        bone(0, "root", None, 0.0),
+                        bone(1, "source", Some(0), 90.0),
+                        bone(2, "follower", Some(0), 0.0),
+                    ],
+                    transform_constraints: vec![tc],
+                    ..Default::default()
+                };
+                let mut sk = Skeleton::new(Arc::new(data));
+                sk.update_world_transform();
+            }
+        }
     }
 }

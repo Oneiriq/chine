@@ -1,8 +1,8 @@
 //! A minimal WebGL2 renderer for chine's [`RenderCommand`] stream.
 //!
-//! Each command is a textured, tinted triangle list referencing one atlas page;
-//! the renderer uploads its geometry, binds the page texture, selects the blend
-//! mode, and draws. chine stays renderer-agnostic; this is the web GPU backend.
+//! Each command is a textured, tinted triangle list referencing one atlas page.
+//! The renderer uploads its geometry, binds the page texture, selects the blend
+//! mode, and draws. chine stays renderer-agnostic. This is the web GPU backend.
 
 use chine::data::BlendMode;
 use chine::render::RenderCommand;
@@ -62,7 +62,7 @@ pub struct GlRenderer {
     verts: Vec<f32>,
     indices: Vec<u32>,
     /// One entry per draw call: (page, blend, index start, index count).
-    runs: Vec<(usize, BlendMode, i32, i32)>,
+    runs: Vec<(usize, BlendMode, usize, usize)>,
 }
 
 impl GlRenderer {
@@ -128,7 +128,7 @@ impl GlRenderer {
     }
 
     /// Upload one atlas-page image as a texture. Pages must be added in chine
-    /// page order; `pma` is the page's premultiplied-alpha flag.
+    /// page order. `pma` is the page's premultiplied-alpha flag.
     ///
     /// # Errors
     /// Returns a message if the texture cannot be created or uploaded.
@@ -171,40 +171,22 @@ impl GlRenderer {
     ///
     /// The whole frame is uploaded as one vertex and index stream, then drawn
     /// with one call per contiguous run of commands sharing a page and blend
-    /// mode (Spine draws in order, so only adjacent runs can merge).
+    /// mode (Spine draws in order, so only adjacent runs can merge). A command
+    /// whose page has no texture is skipped. Only vertices with a UV pair are
+    /// uploaded, and only triangles whose corners are all uploaded are drawn.
     pub fn draw(&mut self, view: &[f32], commands: &[RenderCommand]) {
         self.verts.clear();
         self.indices.clear();
         self.runs.clear();
         for cmd in commands {
-            if cmd.page >= self.pages.len() {
+            let Some(&(_, pma)) = self.pages.get(cmd.page) else {
                 continue;
-            }
-            let pma = self.pages[cmd.page].1;
-            // The dark tint for two-color (tint-black); zero means single-color.
-            let (dr, dg, db, da) = match cmd.dark_color {
-                Some(d) => (d.r, d.g, d.b, d.a),
-                None => (0.0, 0.0, 0.0, 0.0),
             };
-            let base = (self.verts.len() / FLOATS_PER_VERTEX) as u32;
-            for (i, pos) in cmd.positions.iter().enumerate() {
-                let (u, v) = (cmd.uvs[i * 2], cmd.uvs[i * 2 + 1]);
-                let c = cmd.color;
-                // Premultiply the light tint for premultiplied-alpha pages so it
-                // matches the texture and the blend equation.
-                let (r, g, b) = if pma {
-                    (c.r * c.a, c.g * c.a, c.b * c.a)
-                } else {
-                    (c.r, c.g, c.b)
-                };
-                self.verts
-                    .extend_from_slice(&[pos.x, pos.y, u, v, r, g, b, c.a, dr, dg, db, da]);
+            let start = self.indices.len();
+            if !append_geometry(&mut self.verts, &mut self.indices, cmd, pma) {
+                break;
             }
-            let start = self.indices.len() as i32;
-            for &t in &cmd.triangles {
-                self.indices.push(base + u32::from(t));
-            }
-            let count = self.indices.len() as i32 - start;
+            let count = self.indices.len() - start;
             // Merge with the previous run when the page and blend match.
             match self.runs.last_mut() {
                 Some(run) if run.0 == cmd.page && run.1 == cmd.blend => run.3 += count,
@@ -225,8 +207,12 @@ impl GlRenderer {
         gl.bind_buffer(Gl::ELEMENT_ARRAY_BUFFER, Some(&self.ibo));
 
         // Upload the whole frame's geometry once.
-        // SAFETY: the typed-array views borrow the scratch buffers and are
-        // dropped before any reallocation; buffer_data copies immediately.
+        // SAFETY: each view aliases the wasm linear memory that backs
+        // `self.verts` or `self.indices`, and stays valid until that memory
+        // grows, which only an allocation can cause. Nothing in this block
+        // allocates, and neither vector is touched while the views exist. Each
+        // view is read only by the `buffer_data` call right after it, which
+        // copies the data into the GL buffer before returning.
         unsafe {
             let vview = js_sys::Float32Array::view(&self.verts);
             gl.buffer_data_with_array_buffer_view(Gl::ARRAY_BUFFER, &vview, Gl::DYNAMIC_DRAW);
@@ -238,14 +224,63 @@ impl GlRenderer {
             );
         }
 
-        // One draw call per run.
+        // One draw call per run. GL takes the count and byte offset as i32, so
+        // a run past that range is not drawn.
         for &(page, blend, start, count) in &self.runs {
-            gl.bind_texture(Gl::TEXTURE_2D, Some(&self.pages[page].0));
-            set_blend(gl, blend, self.pages[page].1);
-            gl.draw_elements_with_i32(Gl::TRIANGLES, count, Gl::UNSIGNED_INT, start * 4);
+            let Some(&(ref texture, pma)) = self.pages.get(page) else {
+                continue;
+            };
+            let offset = start.checked_mul(4).and_then(|b| i32::try_from(b).ok());
+            let (Ok(count), Some(offset)) = (i32::try_from(count), offset) else {
+                continue;
+            };
+            gl.bind_texture(Gl::TEXTURE_2D, Some(texture));
+            set_blend(gl, blend, pma);
+            gl.draw_elements_with_i32(Gl::TRIANGLES, count, Gl::UNSIGNED_INT, offset);
         }
         gl.bind_vertex_array(None);
     }
+}
+
+/// Append one command's vertices to `verts` and its triangle indices to
+/// `indices`. Only vertices with a UV pair are appended, and only triangles
+/// whose corners are all appended. Returns `false`, appending nothing, when
+/// the frame already holds more vertices than u32 indices can address.
+fn append_geometry(
+    verts: &mut Vec<f32>,
+    indices: &mut Vec<u32>,
+    cmd: &RenderCommand,
+    pma: bool,
+) -> bool {
+    let Ok(base) = u32::try_from(verts.len() / FLOATS_PER_VERTEX) else {
+        return false;
+    };
+    // The dark tint for two-color (tint-black). Zero means single-color.
+    let (dr, dg, db, da) = match cmd.dark_color {
+        Some(d) => (d.r, d.g, d.b, d.a),
+        None => (0.0, 0.0, 0.0, 0.0),
+    };
+    let c = cmd.color;
+    // Premultiply the light tint for premultiplied-alpha pages so it matches
+    // the texture and the blend equation.
+    let (r, g, b) = if pma {
+        (c.r * c.a, c.g * c.a, c.b * c.a)
+    } else {
+        (c.r, c.g, c.b)
+    };
+    let vertex_count = cmd.positions.len().min(cmd.uvs.len() / 2);
+    for (pos, uv) in cmd.positions.iter().zip(cmd.uvs.chunks(2)) {
+        let Ok(&[u, v]) = <&[f32; 2]>::try_from(uv) else {
+            break;
+        };
+        verts.extend_from_slice(&[pos.x, pos.y, u, v, r, g, b, c.a, dr, dg, db, da]);
+    }
+    for tri in cmd.triangles.chunks(3) {
+        if tri.len() == 3 && tri.iter().all(|&t| usize::from(t) < vertex_count) {
+            indices.extend(tri.iter().map(|&t| base.saturating_add(u32::from(t))));
+        }
+    }
+    true
 }
 
 /// The (source, destination) blend factors for a chine blend mode, accounting
@@ -316,12 +351,36 @@ fn compile_shader(gl: &Gl, kind: u32, source: &str) -> Result<web_sys::WebGlShad
 
 #[cfg(test)]
 mod tests {
-    use super::{blend_factors, Gl};
-    use chine::data::BlendMode;
+    use super::{append_geometry, blend_factors, Gl, FLOATS_PER_VERTEX};
+    use chine::data::{BlendMode, Color};
+    use chine::render::RenderCommand;
+    use glam::Vec2;
+
+    // A command whose UVs are shorter than its positions, or whose triangles
+    // index past its vertices, used to index out of bounds while packing the
+    // frame. Only the complete vertices and triangles are packed now.
+    #[test]
+    fn malformed_commands_pack_only_complete_geometry() {
+        let cmd = RenderCommand {
+            positions: vec![Vec2::ZERO, Vec2::X, Vec2::Y],
+            uvs: vec![0.0, 0.0, 1.0, 0.0, 0.5],
+            triangles: vec![0, 1, 0, 0, 1, 2, 1, 1],
+            color: Color::WHITE,
+            dark_color: None,
+            page: 0,
+            blend: BlendMode::Normal,
+        };
+        let (mut verts, mut indices) = (Vec::new(), Vec::new());
+        assert!(append_geometry(&mut verts, &mut indices, &cmd, false));
+        assert!(append_geometry(&mut verts, &mut indices, &cmd, true));
+        assert_eq!(verts.len(), 4 * FLOATS_PER_VERTEX);
+        // The second command's indices are offset past the first's vertices.
+        assert_eq!(indices, vec![0, 1, 0, 2, 3, 2]);
+    }
 
     #[test]
     fn blend_factors_follow_spines_table() {
-        // Premultiplied normal/additive use ONE for the source factor; straight
+        // Premultiplied normal/additive use ONE for the source factor. Straight
         // alpha uses SRC_ALPHA.
         assert_eq!(
             blend_factors(BlendMode::Normal, true),

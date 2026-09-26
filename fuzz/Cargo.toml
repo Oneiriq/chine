@@ -1,0 +1,49 @@
+[package]
+name = "chine-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "cargo-fuzz targets for chine. Not published."
+
+[package.metadata]
+cargo-fuzz = true
+
+# Kept out of the main workspace so `cargo build` and `cargo test` at the
+# repo root never need nightly or libFuzzer.
+[workspace]
+members = ["."]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+chine = { path = "..", features = ["json", "binary"] }
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "binary"
+path = "fuzz_targets/binary.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "json"
+path = "fuzz_targets/json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "atlas"
+path = "fuzz_targets/atlas.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pose"
+path = "fuzz_targets/pose.rs"
+test = false
+doc = false
+bench = false
