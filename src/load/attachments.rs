@@ -15,25 +15,49 @@ use crate::attach::{
 };
 use crate::data::Color;
 
-/// Parse one skin attachment. Returns `Ok(None)` for an unknown attachment
-/// type, which the loader skips. `bone_count` bounds the bone indices of
-/// weighted vertices.
+/// Parse one skin attachment stored under `placeholder`, its key in the
+/// skin. Returns `Ok(None)` for an unknown attachment type, which the loader
+/// skips. `bone_count` bounds the bone indices of weighted vertices. A linked
+/// mesh's source slot is a slot name, which the caller resolves.
 ///
 /// # Errors
 /// Returns [`LoadError::Schema`] when the vertex, UV, triangle, hull, or
 /// sequence data is inconsistent, and [`LoadError::BadReference`] when a
 /// weighted vertex names a bone that does not exist.
 pub(super) fn read_attachment(
-    name: &str,
+    placeholder: &str,
     v: &Value,
     bone_count: usize,
 ) -> Result<Option<Attachment>, LoadError> {
+    let name = placeholder;
     let path = v
         .get("path")
         .and_then(Value::as_str)
         .unwrap_or(name)
         .to_string();
-    let attachment = match v.get("type").and_then(Value::as_str).unwrap_or("region") {
+    let kind = v.get("type").and_then(Value::as_str).unwrap_or("region");
+    // Spine 4.3 marks a linked mesh by naming its source, on a "mesh" or a
+    // "linkedmesh". Earlier exports name the source "parent".
+    let source = v
+        .get("source")
+        .or_else(|| v.get("parent"))
+        .and_then(Value::as_str);
+    if kind == "linkedmesh" || (kind == "mesh" && source.is_some()) {
+        let mut link = LinkedMeshAttachment::new(
+            name,
+            path,
+            v.get("skin").and_then(Value::as_str).map(str::to_string),
+            source.unwrap_or(placeholder),
+            parse_color(v.get("color").and_then(Value::as_str), Color::WHITE),
+            v.get("timelines")
+                .or_else(|| v.get("deform"))
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
+        );
+        link.sequence = parse_sequence(name, v)?;
+        return Ok(Some(Attachment::LinkedMesh(link)));
+    }
+    let attachment = match kind {
         "region" => {
             let mut r = RegionAttachment::new(name, path);
             r.x = f(v, "x");
@@ -85,14 +109,6 @@ pub(super) fn read_attachment(
             f(v, "x"),
             f(v, "y"),
             f(v, "rotation"),
-        )),
-        "linkedmesh" => Attachment::LinkedMesh(LinkedMeshAttachment::new(
-            name,
-            path,
-            v.get("skin").and_then(Value::as_str).map(str::to_string),
-            v.get("parent").and_then(Value::as_str).unwrap_or(name),
-            parse_color(v.get("color").and_then(Value::as_str), Color::WHITE),
-            v.get("deform").and_then(Value::as_bool).unwrap_or(true),
         )),
         "clipping" => {
             let (vertices, count) = read_polygon(name, v, bone_count)?;
@@ -274,18 +290,19 @@ pub(super) fn attachment_cost(attachment: &Attachment) -> usize {
     }
 }
 
-/// Bytes a copy of mesh `m` takes: its UVs, triangles, and vertices (sized
-/// from the deform length, which counts two floats per weighted influence),
-/// plus its sequence frames. A resolved linked mesh is such a copy.
-pub(super) fn mesh_copy_cost(m: &MeshAttachment) -> usize {
-    m.uvs
+/// Bytes a resolved linked mesh takes: a copy of its source's UVs,
+/// triangles, and vertices (sized from the deform length, which counts two
+/// floats per weighted influence), plus the frames of its own sequence.
+pub(super) fn linked_copy_cost(link: &LinkedMeshAttachment, source: &MeshAttachment) -> usize {
+    source
+        .uvs
         .len()
         .saturating_mul(size_of::<f32>())
-        .saturating_add(m.triangles.len().saturating_mul(size_of::<u16>()))
-        .saturating_add(m.deform_len().saturating_mul(size_of::<usize>()))
+        .saturating_add(source.triangles.len().saturating_mul(size_of::<u16>()))
+        .saturating_add(source.deform_len().saturating_mul(size_of::<usize>()))
         .saturating_add(
-            m.sequence
+            link.sequence
                 .as_ref()
-                .map_or(0, |s| sequence_cost(s, m.uvs.len(), &m.path)),
+                .map_or(0, |s| sequence_cost(s, source.uvs.len(), &link.path)),
         )
 }

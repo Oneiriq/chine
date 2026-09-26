@@ -1,11 +1,12 @@
 use super::*;
 
 use crate::anim::{
-    compute_draw_order, Animation, AttachmentTimeline, BoneAxis, BoneTimeline, ConstraintTimeline,
-    DeformTimeline, DrawOrderTimeline, EventTimeline, Fallback, InheritTimeline, PhysicsProperty,
-    PhysicsResetTimeline, SequenceTimeline, Timeline, GLOBAL_PHYSICS, PATH_MIX, PATH_POSITION,
-    PATH_SPACING, TRANSFORM_MIX,
+    compute_draw_order, Animation, AttachmentTarget, AttachmentTimeline, BoneAxis, BoneTimeline,
+    ConstraintTimeline, DeformTimeline, DrawOrderTimeline, EventTimeline, Fallback,
+    InheritTimeline, PhysicsProperty, PhysicsResetTimeline, SequenceTimeline, Timeline,
+    GLOBAL_PHYSICS, PATH_MIX, PATH_POSITION, PATH_SPACING, TRANSFORM_MIX,
 };
+use crate::attach::AttachmentKey;
 use crate::event::Event;
 
 mod attachments;

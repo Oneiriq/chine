@@ -24,9 +24,9 @@ pub(crate) use channels::Fallback;
 pub(crate) use channels::{PATH_MIX, PATH_POSITION, PATH_SPACING, TRANSFORM_MIX};
 pub use state::{AnimationState, TrackEntry};
 pub(crate) use timeline::{
-    compute_draw_order, AttachmentTimeline, BoneAxis, BoneTimeline, ConstraintTimeline,
-    DeformTimeline, DrawOrderTimeline, EventTimeline, InheritTimeline, PhysicsProperty,
-    PhysicsResetTimeline, SequenceTimeline, Timeline, GLOBAL_PHYSICS,
+    compute_draw_order, AttachmentTarget, AttachmentTimeline, BoneAxis, BoneTimeline,
+    ConstraintTimeline, DeformTimeline, DrawOrderTimeline, EventTimeline, InheritTimeline,
+    PhysicsProperty, PhysicsResetTimeline, SequenceTimeline, Timeline, GLOBAL_PHYSICS,
 };
 
 use crate::skel::Skeleton;

@@ -8,23 +8,95 @@
 
 use super::*;
 
+/// A linked mesh whose source skin is known only by its index in Spine's
+/// skin list until every skin is read.
+pub(super) struct PendingLink {
+    /// The skin holding the link: `None` for the default skin, else its index
+    /// in `data.skins`.
+    pub(super) owner: Option<usize>,
+    /// The link's slot.
+    pub(super) slot: usize,
+    /// The link's name in its slot.
+    pub(super) name: String,
+    /// The source skin's index in Spine's skin list.
+    pub(super) skin_index: usize,
+}
+
+/// Spine's skin list, which binary data indexes skins by: the default skin
+/// first when the export has one, then the named skins.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct SkinList {
+    /// Whether the export has a default skin (one that lists slots).
+    pub(super) has_default: bool,
+    /// The number of named skins.
+    pub(super) named: usize,
+}
+
+impl SkinList {
+    /// The skin at `index` in Spine's list: `Some(None)` for the default
+    /// skin, `Some(Some(i))` for `data.skins[i]`, and `None` past the list.
+    pub(super) fn get(self, index: usize) -> Option<Option<usize>> {
+        let named = if self.has_default {
+            match index.checked_sub(1) {
+                None => return Some(None),
+                Some(named) => named,
+            }
+        } else {
+            index
+        };
+        (named < self.named).then_some(Some(named))
+    }
+}
+
+/// Name the source skin of each linked mesh in `links`, now that every skin
+/// is read. A skin index past Spine's skin list is corrupt.
+pub(super) fn name_link_skins(
+    r: &mut BinaryReader,
+    data: &mut SkeletonData,
+    skins: SkinList,
+    links: Vec<PendingLink>,
+) {
+    for link in links {
+        let Some(source) = skins.get(link.skin_index) else {
+            corrupt(r);
+            continue;
+        };
+        let name = source
+            .and_then(|i| data.skins.get(i))
+            .map(|skin| skin.name.clone());
+        let owner = match link.owner {
+            None => Some(&mut data.default_skin),
+            Some(i) => data.skins.get_mut(i),
+        };
+        if let Some(Attachment::LinkedMesh(mesh)) =
+            owner.and_then(|skin| skin.attachment_mut(link.slot, &link.name))
+        {
+            mesh.skin = name;
+        }
+    }
+}
+
 /// Read a skin: the default skin (`is_default`, a slot count then attachments)
 /// or a named skin (name, bone/constraint index lists, then attachments).
-/// `data` holds the bones, slots, and constraints read so far.
+/// `data` holds the bones, slots, constraints, and skins read so far. The
+/// default skin reads as `None` when it lists no slots, and Spine's skin list
+/// then leaves it out. Each linked mesh read is added to `links`.
 pub(super) fn read_skin(
     r: &mut BinaryReader,
     strings: &[String],
     data: &SkeletonData,
     is_default: bool,
     nonessential: bool,
-) -> Skin {
+    links: &mut Vec<PendingLink>,
+) -> Option<Skin> {
     let mut skin;
     let slot_count;
+    let owner = (!is_default).then_some(data.skins.len());
     if is_default {
         slot_count = r.count();
         skin = Skin::new("default");
         if slot_count == 0 {
-            return skin;
+            return None;
         }
     } else {
         skin = Skin::new(r.string().unwrap_or_default());
@@ -56,23 +128,53 @@ pub(super) fn read_skin(
         let att_count = r.count();
         for _ in 0..att_count {
             let placeholder = string_ref(r, strings).unwrap_or_default();
-            if let Some(att) = read_attachment(r, strings, data, &placeholder, nonessential) {
-                skin.set(slot, placeholder, att);
+            let Some((att, link_skin)) =
+                read_attachment(r, strings, data, &placeholder, nonessential)
+            else {
+                continue;
+            };
+            if let Some(skin_index) = link_skin {
+                links.push(PendingLink {
+                    owner,
+                    slot,
+                    name: placeholder.clone(),
+                    skin_index,
+                });
             }
+            skin.set(slot, placeholder, att);
         }
     }
-    skin
+    Some(skin)
+}
+
+/// Read a list of slot indices, each checked against the slot table.
+fn read_slot_list(r: &mut BinaryReader, slot_count: usize) -> Vec<usize> {
+    let n = r.count();
+    let mut slots: Vec<usize> = (0..n)
+        .map(|_| {
+            let slot = r.var_usize();
+            if slot >= slot_count {
+                corrupt(r);
+            }
+            slot
+        })
+        .collect();
+    slots.sort_unstable();
+    slots.dedup();
+    slots
 }
 
 /// Read one attachment (Spine 4.3): a flags byte selects the type (low 3 bits)
-/// and which optional fields follow.
+/// and which optional fields follow. A linked mesh also returns its source
+/// skin's index in Spine's skin list, which is resolved once every skin is
+/// read.
 fn read_attachment(
     r: &mut BinaryReader,
     strings: &[String],
     data: &SkeletonData,
     placeholder: &str,
     nonessential: bool,
-) -> Option<Attachment> {
+) -> Option<(Attachment, Option<usize>)> {
     let bones = data.bones.len();
     let flags = r.byte();
     let name = if flags & 8 != 0 {
@@ -80,7 +182,8 @@ fn read_attachment(
     } else {
         placeholder.to_string()
     };
-    match flags & 0b111 {
+    let mut link_skin = None;
+    let attachment = match flags & 0b111 {
         0 => {
             let path = if flags & 16 != 0 {
                 string_ref(r, strings).unwrap_or_else(|| name.clone())
@@ -100,14 +203,12 @@ fn read_attachment(
             reg.rotation = rotation;
             reg.color = color;
             reg.sequence = sequence;
-            Some(Attachment::Region(reg))
+            Attachment::Region(reg)
         }
         1 => {
             let (vertices, count) = read_vertices(r, flags & 16 != 0, bones);
             skip_nonessential_color(r, nonessential);
-            Some(Attachment::BoundingBox(BoundingBoxAttachment::new(
-                name, vertices, count,
-            )))
+            Attachment::BoundingBox(BoundingBoxAttachment::new(name, vertices, count))
         }
         2 => {
             let path = if flags & 16 != 0 {
@@ -125,10 +226,9 @@ fn read_attachment(
                 .saturating_sub(hull.saturating_add(2))
                 .saturating_mul(3);
             let triangles = read_triangles(r, tri_count, count);
-            let timeline_slots = r.count();
-            for _ in 0..timeline_slots {
-                r.var_usize();
-            }
+            // The other slots that show linked meshes inheriting this mesh's
+            // timelines.
+            let timeline_slots = read_slot_list(r, data.slots.len());
             if nonessential {
                 let edges = r.count();
                 for _ in 0..edges {
@@ -141,7 +241,8 @@ fn read_attachment(
             m.hull_length = hull;
             m.color = color;
             m.sequence = sequence;
-            Some(Attachment::Mesh(m))
+            m.timeline_slots = timeline_slots.into();
+            Attachment::Mesh(m)
         }
         3 => {
             let path = if flags & 16 != 0 {
@@ -150,18 +251,23 @@ fn read_attachment(
                 name.clone()
             };
             let color = read_att_color(r, flags & 32 != 0);
-            let _ = read_sequence(r, flags & 64 != 0);
+            let sequence = read_sequence(r, flags & 64 != 0);
             let inherit = flags & 128 != 0;
-            let _source_index = r.var_usize();
-            let _skin_index = r.var_usize();
-            let parent = string_ref(r, strings).unwrap_or_default();
+            let source_slot = r.var_usize();
+            if source_slot >= data.slots.len() {
+                corrupt(r);
+            }
+            link_skin = Some(r.var_usize());
+            let source = string_ref(r, strings).unwrap_or_default();
             if nonessential {
                 let _ = r.float();
                 let _ = r.float();
             }
-            Some(Attachment::LinkedMesh(LinkedMeshAttachment::new(
-                name, path, None, parent, color, inherit,
-            )))
+            // The source skin is named once every skin is read.
+            let mut link = LinkedMeshAttachment::new(name, path, None, source, color, inherit);
+            link.source_slot = Some(source_slot);
+            link.sequence = sequence;
+            Attachment::LinkedMesh(link)
         }
         4 => {
             let closed = flags & 16 != 0;
@@ -169,23 +275,21 @@ fn read_attachment(
             let (vertices, count) = read_vertices(r, flags & 64 != 0, bones);
             let lengths = read_float_array(r, count / 3);
             skip_nonessential_color(r, nonessential);
-            Some(Attachment::Path(PathAttachment::new(
+            Attachment::Path(PathAttachment::new(
                 name,
                 vertices,
                 count,
                 lengths,
                 closed,
                 constant_speed,
-            )))
+            ))
         }
         5 => {
             let rotation = r.float();
             let x = r.float();
             let y = r.float();
             skip_nonessential_color(r, nonessential);
-            Some(Attachment::Point(PointAttachment::new(
-                name, x, y, rotation,
-            )))
+            Attachment::Point(PointAttachment::new(name, x, y, rotation))
         }
         6 => {
             let end = r.var_usize();
@@ -198,16 +302,15 @@ fn read_attachment(
                     String::new()
                 }
             };
-            Some(Attachment::Clipping(ClippingAttachment::new(
-                name, end_slot, vertices, count,
-            )))
+            Attachment::Clipping(ClippingAttachment::new(name, end_slot, vertices, count))
         }
         // Type 7 is not an attachment type, and its fields cannot be skipped.
         _ => {
             corrupt(r);
-            None
+            return None;
         }
-    }
+    };
+    Some((attachment, link_skin))
 }
 
 /// Read an attachment color (RGBA8888) when present, else opaque white.

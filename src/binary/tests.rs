@@ -977,6 +977,10 @@ fn applies_a_sequence_timeline() {
     // A slot showing a four-region sequence "seq". One looping keyframe at
     // time 0 (mode loop = 2, index 0) with a 0.1s delay: at 0.25s the index
     // advances by floor(0.25 / 0.1) = 2.
+    let mut region = RegionAttachment::new("seq", "seq");
+    region.sequence = Some(Sequence::new(4, 0, 0, 0));
+    let mut skin = Skin::new("default");
+    skin.set(0, "seq", Attachment::Region(region));
     let data = SkeletonData {
         bones: vec![BoneData {
             index: 0,
@@ -992,9 +996,16 @@ fn applies_a_sequence_timeline() {
             attachment: Some("seq".into()),
             blend: BlendMode::Normal,
         }],
+        default_skin: skin,
         ..Default::default()
     };
-    let tl = SequenceTimeline::new(0, "seq".into(), 4, vec![0.0], vec![2_u32], vec![0.1]);
+    let key = AttachmentKey {
+        skin: None,
+        slot: 0,
+        name: "seq".into(),
+    };
+    let target = AttachmentTarget::new(key, Vec::new().into());
+    let tl = SequenceTimeline::new(target, vec![0.0], vec![2_u32], vec![0.1]);
     let anim = Animation::new("flip", 1.0, vec![Timeline::Sequence(tl)]);
     let mut sk = crate::skel::Skeleton::new(std::sync::Arc::new(data));
     let mut state = crate::anim::AnimationState::new();

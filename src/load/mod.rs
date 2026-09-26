@@ -33,7 +33,7 @@ use crate::skin::Skin;
 mod attachments;
 mod timelines;
 
-use attachments::{attachment_cost, mesh_copy_cost, read_attachment};
+use attachments::{attachment_cost, linked_copy_cost, read_attachment};
 use timelines::parse_animation;
 
 /// Bytes of derived data any load may expand to, whatever the input size.
@@ -46,7 +46,7 @@ const MAX_PHYSICS_FPS: f64 = 255.0;
 /// A cap on the data the loader derives from compact records. Some records
 /// are cheap to write but expand to a copy of other data: a deform key to a
 /// full vertex array, a draw order key to a full slot list, an event key to
-/// its setup string, a linked mesh to its parent's geometry, and a sequence
+/// its setup string, a linked mesh to its source's geometry, and a sequence
 /// to per-frame UVs once an atlas is bound. The cap grows with the input
 /// size, so it bounds memory without limiting real exports.
 struct Budget {
@@ -240,9 +240,11 @@ pub fn from_json(text: &str) -> Result<SkeletonData, LoadError> {
                             };
                             budget
                                 .charge(attachment_cost(&attachment), "an attachment sequence")?;
-                            if let Attachment::Mesh(m) = &mut attachment {
-                                if skin_name != "default" {
-                                    m.deform_skin = Some(skin_name.to_string());
+                            // A linked mesh names its source's slot, if it is
+                            // not the link's own.
+                            if let Attachment::LinkedMesh(link) = &mut attachment {
+                                if let Some(source) = att.get("slot").and_then(Value::as_str) {
+                                    link.source_slot = Some(names.slot(source)?);
                                 }
                             }
                             skin.set(slot, att_name.clone(), attachment);
@@ -312,7 +314,7 @@ pub fn from_json(text: &str) -> Result<SkeletonData, LoadError> {
     }
 
     // Resolve linked meshes before animations so deform timelines bind to the
-    // resolved (parent-shared) geometry rather than unresolved links.
+    // resolved (source-shared) geometry rather than unresolved links.
     charge_linked_meshes(&data, &mut budget)?;
     crate::link::resolve_linked_meshes(&mut data);
 
@@ -347,30 +349,15 @@ fn resolve_slider_animations(root: &Value, data: &mut SkeletonData) -> Result<()
 }
 
 /// Charge the copies linked-mesh resolution makes: each linked mesh becomes a
-/// full copy of its parent mesh. The charge is the largest mesh with the
-/// link's slot and parent name in any skin, which covers whichever one the
-/// link resolves to.
+/// full copy of its source mesh, with its own sequence.
 fn charge_linked_meshes(data: &SkeletonData, budget: &mut Budget) -> Result<(), LoadError> {
-    let skins = || std::iter::once(&data.default_skin).chain(&data.skins);
-    let mut sizes: HashMap<(usize, &str), usize> = HashMap::new();
-    for skin in skins() {
-        for (slot, name, attachment) in skin.iter() {
-            if let Attachment::Mesh(m) = attachment {
-                let size = sizes.entry((slot, name)).or_default();
-                *size = (*size).max(mesh_copy_cost(m));
-            }
+    let mut charged = Ok(());
+    crate::link::for_each_link_source(data, |link, source| {
+        if charged.is_ok() {
+            charged = budget.charge(linked_copy_cost(link, source), "a linked mesh");
         }
-    }
-    for skin in skins() {
-        for (slot, _, attachment) in skin.iter() {
-            if let Attachment::LinkedMesh(link) = attachment {
-                if let Some(&size) = sizes.get(&(slot, link.parent.as_str())) {
-                    budget.charge(size, "a linked mesh")?;
-                }
-            }
-        }
-    }
-    Ok(())
+    });
+    charged
 }
 
 /// Resolve a constraint's named constrained bones to indices.

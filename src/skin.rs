@@ -42,6 +42,12 @@ impl Skin {
         self.attachments.get(&slot)?.get(name)
     }
 
+    /// Mutable access to the attachment for `(slot, name)`, for loaders that
+    /// finish an attachment once every skin is read.
+    pub(crate) fn attachment_mut(&mut self, slot: usize, name: &str) -> Option<&mut Attachment> {
+        self.attachments.get_mut(&slot)?.get_mut(name)
+    }
+
     /// `true` if the skin defines no attachments.
     #[must_use]
     pub fn is_empty(&self) -> bool {

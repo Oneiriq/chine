@@ -4,9 +4,13 @@
 //! loads must agree. The exports are not committed. build.rs sets the
 //! `spine_examples` cfg when they are present under `data/examples/`.
 
+use std::sync::Arc;
+
 use super::from_binary;
 use crate::data::SkeletonData;
 use crate::load::from_json;
+use crate::render::render;
+use crate::skel::Skeleton;
 
 /// The official example rigs, each exported as `.json` and `.skel`.
 const EXAMPLES: [&str; 8] = [
@@ -54,5 +58,39 @@ fn bone_lengths_and_inherit_modes_match_json() {
             );
             assert_eq!(j.inherit, b.inherit, "{name} {}", j.name);
         }
+    }
+}
+
+// The binary loader dropped a linked mesh's source skin and slot, so a
+// mix-and-match skin drew fewer meshes from its .skel export. With every
+// skin, the setup pose now draws the same commands from both exports.
+#[cfg_attr(
+    not(spine_examples),
+    ignore = "requires the official Spine examples in data/examples/"
+)]
+#[test]
+fn every_skin_renders_the_same_from_both_exports() {
+    for name in EXAMPLES {
+        let (json, skel) = load(name);
+        let skin_names: Vec<String> = json.skins.iter().map(|s| s.name.clone()).collect();
+        let (json, skel) = (Arc::new(json), Arc::new(skel));
+        let mut commands = 0;
+        for skin in std::iter::once(None).chain(skin_names.iter().map(Some)) {
+            let draw = |data: &Arc<SkeletonData>| {
+                let mut sk = Skeleton::new(Arc::clone(data));
+                if let Some(skin) = skin {
+                    sk.set_skin(skin);
+                }
+                sk.update_world_transform();
+                render(&sk)
+                    .iter()
+                    .map(|c| (c.positions.len(), c.triangles.len()))
+                    .collect::<Vec<_>>()
+            };
+            let drawn = draw(&json);
+            commands += drawn.len();
+            assert_eq!(drawn, draw(&skel), "{name} {skin:?}");
+        }
+        assert!(commands > 0, "{name} draws nothing");
     }
 }

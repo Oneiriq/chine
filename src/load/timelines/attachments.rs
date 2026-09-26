@@ -47,18 +47,31 @@ pub(super) fn attachment_entries<'a>(map: &'a Value, names: &Names) -> Vec<Attac
     entries
 }
 
-/// The named skin an attachment timeline looks its attachment up in, or
-/// `None` for the default skin.
-fn entry_skin<'d>(
+/// The attachment an attachment timeline drives: the entry's attachment in
+/// the skin the entry names. Spine looks only in that skin. `None` when the
+/// skin or the attachment is missing. A mesh's timeline slots join the
+/// target.
+fn entry_target<'d>(
     entry: &AttachmentEntry,
     data: &'d SkeletonData,
     names: &Names,
-) -> Option<&'d Skin> {
-    if entry.skin == "default" {
-        None
+) -> Option<(AttachmentTarget, &'d Attachment)> {
+    let (skin_name, skin) = if entry.skin == "default" {
+        (None, &data.default_skin)
     } else {
-        names.skin(data, entry.skin)
-    }
+        (Some(entry.skin.to_string()), names.skin(data, entry.skin)?)
+    };
+    let attachment = skin.attachment(entry.slot, entry.name)?;
+    let timeline_slots = match attachment {
+        Attachment::Mesh(mesh) => Arc::clone(&mesh.timeline_slots),
+        _ => Vec::new().into(),
+    };
+    let key = AttachmentKey {
+        skin: skin_name,
+        slot: entry.slot,
+        name: entry.name.to_string(),
+    };
+    Some((AttachmentTarget::new(key, timeline_slots), attachment))
 }
 
 /// Read one mesh's deform timeline from its key list. `None` when there are no
@@ -73,8 +86,7 @@ pub(super) fn read_deform(
     let Some(keys) = keys.as_array().filter(|keys| !keys.is_empty()) else {
         return Ok(None);
     };
-    let skin = entry_skin(entry, data, names);
-    let Some(Attachment::Mesh(mesh)) = data.attachment(entry.slot, entry.name, skin) else {
+    let Some((target, Attachment::Mesh(mesh))) = entry_target(entry, data, names) else {
         return Ok(None);
     };
     let frame_len = mesh.deform_len();
@@ -100,16 +112,7 @@ pub(super) fn read_deform(
         frames.push(read_deform_frame(k, frame_len));
     }
     let duration = times.last().copied().unwrap_or(0.0);
-    let tl_skin = (entry.skin != "default").then(|| entry.skin.to_string());
-    let mut tl = DeformTimeline::new(
-        entry.slot,
-        entry.name.to_string(),
-        tl_skin,
-        setup,
-        times,
-        frames,
-        n,
-    );
+    let mut tl = DeformTimeline::new(target, setup, times, frames, n);
     let mut bezier = 0;
     for (frame, pair) in keys.windows(2).enumerate() {
         if let [key, next] = pair {
@@ -139,7 +142,8 @@ fn read_deform_frame(k: &Value, len: usize) -> Vec<f32> {
 }
 
 /// Read one attachment's sequence (flipbook) timeline: per key a packed
-/// mode and index, plus a hold delay. `None` when there are no keys.
+/// mode and index, plus a hold delay. `None` when there are no keys or the
+/// entry names no attachment.
 pub(super) fn read_sequence(
     entry: &AttachmentEntry,
     keys: &Value,
@@ -147,12 +151,7 @@ pub(super) fn read_sequence(
     names: &Names,
 ) -> Option<(Timeline, f32)> {
     let keys = keys.as_array().filter(|keys| !keys.is_empty())?;
-    let skin = entry_skin(entry, data, names);
-    let count = match data.attachment(entry.slot, entry.name, skin) {
-        Some(Attachment::Region(r)) => r.sequence.as_ref().map_or(0, |s| s.count),
-        Some(Attachment::Mesh(m)) => m.sequence.as_ref().map_or(0, |s| s.count),
-        _ => 0,
-    };
+    let (target, _) = entry_target(entry, data, names)?;
     let n = keys.len();
     let mut times = Vec::with_capacity(n);
     let mut mode_and_index = Vec::with_capacity(n);
@@ -169,14 +168,7 @@ pub(super) fn read_sequence(
         delays.push(f(k, "delay"));
     }
     let duration = times.last().copied().unwrap_or(0.0);
-    let tl = SequenceTimeline::new(
-        entry.slot,
-        entry.name.to_string(),
-        count,
-        times,
-        mode_and_index,
-        delays,
-    );
+    let tl = SequenceTimeline::new(target, times, mode_and_index, delays);
     Some((Timeline::Sequence(tl), duration))
 }
 

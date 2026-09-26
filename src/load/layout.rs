@@ -168,3 +168,81 @@ fn slider_with_an_unknown_animation_is_rejected() {
     }"#;
     assert!(matches!(from_json(json), Err(LoadError::BadReference(name)) if name == "missing"));
 }
+
+/// A rig whose "boy" skin shows, in slot "s1", a linked mesh of the default
+/// skin's "arm" in slot "s0". The link's own entries are `link`. Its
+/// animation "flap" moves vertex 1 of "arm" by 5 in x at time 1.
+fn linked_rig(link: &str) -> String {
+    format!(
+        r#"{{
+        "bones": [ {{ "name": "root" }} ],
+        "slots": [
+            {{ "name": "s0", "bone": "root", "attachment": "arm" }},
+            {{ "name": "s1", "bone": "root", "attachment": "sleeve" }}
+        ],
+        "skins": [
+            {{ "name": "default", "attachments": {{ "s0": {{ "arm": {{
+                "type": "mesh", "uvs": [0,0, 1,0, 0,1], "triangles": [0,1,2],
+                "vertices": [0,0, 10,0, 0,10], "hull": 3
+            }} }} }} }},
+            {{ "name": "boy", "attachments": {{ "s1": {{ "sleeve": {{ {link} }} }} }} }}
+        ],
+        "animations": {{ "flap": {{ "attachments": {{ "default": {{ "s0": {{ "arm": {{
+            "deform": [ {{ "time": 0 }}, {{ "time": 1, "offset": 2, "vertices": [5] }} ]
+        }} }} }} }} }} }}
+    }}"#
+    )
+}
+
+/// Load `json`, play "flap" to its end with the "boy" skin active, and
+/// return each slot's deform.
+fn flapped(json: &str) -> Vec<Vec<f32>> {
+    let data = from_json(json).unwrap();
+    let anim = Arc::clone(data.find_animation("flap").unwrap());
+    let mut sk = Skeleton::new(Arc::new(data));
+    sk.set_skin("boy");
+    anim.apply(&mut sk, -1.0, 1.0, 1.0, MixFrom::Setup, false);
+    sk.slots().iter().map(|slot| slot.deform.clone()).collect()
+}
+
+/// The resolved mesh `name` in `slot` of `skin`.
+fn mesh<'a>(skin: &'a Skin, slot: usize, name: &str) -> &'a crate::attach::MeshAttachment {
+    match skin.attachment(slot, name) {
+        Some(Attachment::Mesh(mesh)) => mesh,
+        other => panic!("{name} is not a resolved mesh: {other:?}"),
+    }
+}
+
+// Spine 4.3 names a linked mesh's source "source", its slot "slot", and
+// whether it inherits the source's timelines "timelines", and a "mesh" with
+// a source is linked. The loader read the older "parent" and "deform" keys
+// and the link's own slot, so this link resolved against itself and drew
+// nothing, and the source's deform never reached it.
+#[test]
+fn linked_meshes_read_their_source_slot_and_timelines() {
+    let json = linked_rig(
+        r#""path": "girl/sleeve", "type": "mesh", "source": "arm", "slot": "s0",
+           "sequence": { "count": 3 }"#,
+    );
+    let data = from_json(&json).unwrap();
+    let sleeve = mesh(&data.skins[0], 1, "sleeve");
+    assert_eq!(sleeve.path, "girl/sleeve");
+    assert_eq!(sleeve.triangles, [0, 1, 2]);
+    assert_eq!(sleeve.sequence.as_ref().map(|s| s.count), Some(3));
+    assert_eq!(&mesh(&data.default_skin, 0, "arm").timeline_slots[..], [1]);
+
+    let deforms = flapped(&json);
+    assert_eq!(deforms[0], [0.0, 0.0, 15.0, 0.0, 0.0, 10.0]);
+    assert_eq!(deforms[1], deforms[0]);
+}
+
+// A link with "timelines": false keeps its own timelines, so the source's
+// deform does not reach it.
+#[test]
+fn a_link_without_timelines_keeps_its_own() {
+    let json =
+        linked_rig(r#""type": "linkedmesh", "source": "arm", "slot": "s0", "timelines": false"#);
+    let deforms = flapped(&json);
+    assert_eq!(deforms[0], [0.0, 0.0, 15.0, 0.0, 0.0, 10.0]);
+    assert!(deforms[1].is_empty());
+}

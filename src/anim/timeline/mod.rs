@@ -8,9 +8,11 @@
 //! bone, constraint, physics reset, and event timelines, and the `slot` module
 //! holds the slot timelines.
 
+use std::sync::Arc;
+
 use super::curve::{absolute_value_with, Curve};
 use super::MixFrom;
-use crate::attach::Attachment;
+use crate::attach::{Attachment, AttachmentKey, MeshAttachment};
 use crate::constraint::physics::{PhysicsConstraint, PhysicsConstraintData};
 use crate::data::{Color, Inherit};
 use crate::event::Event;
@@ -248,33 +250,56 @@ impl EventTimeline {
     }
 }
 
+/// The attachment a deform or sequence timeline drives, and the slots it
+/// reaches.
+///
+/// The timeline applies to its own slot and to each timeline slot, wherever
+/// the slot currently shows an attachment that takes its timelines from
+/// `key`: the attachment at `key` itself, or a linked mesh inheriting its
+/// timelines.
+#[derive(Debug, Clone)]
+pub(crate) struct AttachmentTarget {
+    key: AttachmentKey,
+    timeline_slots: Arc<[usize]>,
+}
+
+impl AttachmentTarget {
+    /// A target for the attachment at `key`, also reaching `timeline_slots`.
+    pub(crate) fn new(key: AttachmentKey, timeline_slots: Arc<[usize]>) -> Self {
+        Self {
+            key,
+            timeline_slots,
+        }
+    }
+
+    /// The slots the timeline applies to: its own, then its timeline slots.
+    fn slots(&self) -> impl Iterator<Item = usize> + '_ {
+        std::iter::once(self.key.slot).chain(self.timeline_slots.iter().copied())
+    }
+}
+
 /// A sequence (flipbook) timeline: per keyframe a time, a packed mode-and-index,
 /// and a delay. The shown region index advances from the active keyframe by the
-/// elapsed time over the delay, wrapped per the sequence mode.
+/// elapsed time over the delay, wrapped per the sequence mode over the regions
+/// of the sequence the slot shows.
 #[derive(Debug, Clone)]
 pub(crate) struct SequenceTimeline {
-    slot: usize,
-    attachment: String,
-    count: usize,
+    target: AttachmentTarget,
     times: Vec<f32>,
     mode_and_index: Vec<u32>,
     delays: Vec<f32>,
 }
 
 impl SequenceTimeline {
-    /// A sequence timeline for `slot` / `attachment` over `count` regions.
+    /// A sequence timeline for the attachment `target` names.
     pub(crate) fn new(
-        slot: usize,
-        attachment: String,
-        count: usize,
+        target: AttachmentTarget,
         times: Vec<f32>,
         mode_and_index: Vec<u32>,
         delays: Vec<f32>,
     ) -> Self {
         Self {
-            slot,
-            attachment,
-            count,
+            target,
             times,
             mode_and_index,
             delays,
@@ -284,13 +309,11 @@ impl SequenceTimeline {
 
 /// A mesh deform timeline: per-keyframe vertex offsets. For an unweighted mesh
 /// they add to the setup vertices. For a weighted mesh the setup is zero and the
-/// offsets add per-influence in `compute_vertices`. Only applies while the slot
-/// shows the matching attachment.
+/// offsets add per-influence in `compute_vertices`. Only applies while a slot
+/// shows the attachment `target` names.
 #[derive(Debug, Clone)]
 pub(crate) struct DeformTimeline {
-    slot: usize,
-    attachment: String,
-    skin: Option<String>,
+    target: AttachmentTarget,
     setup: Vec<f32>,
     times: Vec<f32>,
     frames: Vec<Vec<f32>>,
@@ -298,12 +321,11 @@ pub(crate) struct DeformTimeline {
 }
 
 impl DeformTimeline {
-    /// A deform timeline for `slot`/`attachment` with setup vertices, the
-    /// per-keyframe offset frames, and room for `bezier_count` Bezier segments.
+    /// A deform timeline for the attachment `target` names, with setup
+    /// vertices, the per-keyframe offset frames, and room for `bezier_count`
+    /// Bezier segments.
     pub(crate) fn new(
-        slot: usize,
-        attachment: String,
-        skin: Option<String>,
+        target: AttachmentTarget,
         setup: Vec<f32>,
         times: Vec<f32>,
         frames: Vec<Vec<f32>>,
@@ -314,9 +336,7 @@ impl DeformTimeline {
             curve.set_frame1(i, t, 0.0);
         }
         Self {
-            slot,
-            attachment,
-            skin,
+            target,
             setup,
             times,
             frames,

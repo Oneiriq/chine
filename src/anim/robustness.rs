@@ -5,12 +5,25 @@ use std::sync::Arc;
 
 use super::curve::Curve;
 use super::*;
+use crate::attach::{Attachment, AttachmentKey, RegionAttachment, Sequence};
 use crate::data::{BlendMode, BoneData, Color, SkeletonData, SlotData};
 use crate::event::Event;
+use crate::skin::Skin;
 
-/// One bone and one slot showing the attachment `att`.
+/// One bone and one slot showing the attachment `att`, a region with a
+/// four-frame sequence.
 fn rig() -> Skeleton {
+    rig_with_sequence(4)
+}
+
+/// [`rig`] with a sequence of `count` frames.
+fn rig_with_sequence(count: usize) -> Skeleton {
+    let mut region = RegionAttachment::new("att", "att");
+    region.sequence = Some(Sequence::new(count, 0, 0, 0));
+    let mut skin = Skin::new("default");
+    skin.set(0, "att", Attachment::Region(region));
     let data = SkeletonData {
+        default_skin: skin,
         bones: vec![BoneData {
             index: 0,
             name: "root".into(),
@@ -32,6 +45,16 @@ fn rig() -> Skeleton {
 
 fn apply(timeline: &Timeline, sk: &mut Skeleton, time: f32) {
     timeline.apply(sk, time - 0.5, time, 1.0, MixFrom::Setup, false, false);
+}
+
+/// The attachment `att` in `slot` of the default skin, as a timeline target.
+fn target(slot: usize) -> AttachmentTarget {
+    let key = AttachmentKey {
+        skin: None,
+        slot,
+        name: "att".into(),
+    };
+    AttachmentTarget::new(key, Vec::new().into())
 }
 
 fn event() -> Event {
@@ -164,9 +187,7 @@ fn zero_frame_timelines_leave_the_pose_alone() {
         Timeline::SlotAlpha(ConstraintTimeline::new(0, 0, 0, 2)),
         Timeline::SlotTwoColor(ConstraintTimeline::new(0, 0, 0, 8), true),
         Timeline::Deform(DeformTimeline::new(
-            0,
-            "att".into(),
-            None,
+            target(0),
             vec![0.0; 4],
             Vec::new(),
             Vec::new(),
@@ -199,9 +220,7 @@ fn out_of_range_indices_leave_the_skeleton_alone() {
         Timeline::PhysicsReset(PhysicsResetTimeline::new(9, vec![0.0])),
         Timeline::Attachment(AttachmentTimeline::new(9, vec![0.0], vec![None])),
         Timeline::Sequence(SequenceTimeline::new(
-            9,
-            "att".into(),
-            4,
+            target(9),
             vec![0.0],
             vec![2],
             vec![0.1],
@@ -239,9 +258,7 @@ fn stepped_timelines_with_short_value_arrays_are_skipped() {
 fn deform_timeline_with_short_frames_or_nan_time() {
     let mut sk = rig();
     let short = Timeline::Deform(DeformTimeline::new(
-        0,
-        "att".into(),
-        None,
+        target(0),
         vec![0.0; 4],
         vec![0.0, 1.0],
         vec![vec![1.0; 4]],
@@ -253,9 +270,7 @@ fn deform_timeline_with_short_frames_or_nan_time() {
     assert_eq!(sk.slot(0).unwrap().deform, vec![0.0; 4]);
 
     let full = Timeline::Deform(DeformTimeline::new(
-        0,
-        "att".into(),
-        None,
+        target(0),
         vec![0.0; 4],
         vec![0.0, 1.0],
         vec![vec![0.0; 4], vec![2.0; 4]],
@@ -270,9 +285,7 @@ fn sequence_timeline_with_zero_delay_or_huge_count() {
     let mut sk = rig();
     // Loop mode, start index 1, zero delay: the advance saturates.
     let zero_delay = Timeline::Sequence(SequenceTimeline::new(
-        0,
-        "att".into(),
-        4,
+        target(0),
         vec![0.0],
         vec![(1 << 4) | 2],
         vec![0.0],
@@ -282,21 +295,18 @@ fn sequence_timeline_with_zero_delay_or_huge_count() {
 
     // Ping-pong reverse over a count near `usize::MAX`.
     let huge = Timeline::Sequence(SequenceTimeline::new(
-        0,
-        "att".into(),
-        usize::MAX,
+        target(0),
         vec![0.0],
         vec![(5 << 4) | 6],
         vec![0.1],
     ));
-    apply(&huge, &mut sk, 1.0);
-    apply(&huge, &mut sk, f32::INFINITY);
+    let mut huge_rig = rig_with_sequence(usize::MAX);
+    apply(&huge, &mut huge_rig, 1.0);
+    apply(&huge, &mut huge_rig, f32::INFINITY);
 
     // More times than modes or delays.
     let short = Timeline::Sequence(SequenceTimeline::new(
-        0,
-        "att".into(),
-        4,
+        target(0),
         vec![0.0, 1.0],
         vec![(1 << 4) | 2],
         vec![0.1],
@@ -310,15 +320,13 @@ fn hostile_host_values_do_not_panic() {
     rotate.set_frame1(0, 0.0, 0.0);
     rotate.set_frame1(1, 1.0, 90.0);
     let deform = DeformTimeline::new(
-        0,
-        "att".into(),
-        None,
+        target(0),
         vec![0.0; 4],
         vec![0.0, 1.0],
         vec![vec![0.0; 4], vec![2.0; 4]],
         0,
     );
-    let sequence = SequenceTimeline::new(0, "att".into(), 4, vec![0.0], vec![2], vec![0.0]);
+    let sequence = SequenceTimeline::new(target(0), vec![0.0], vec![2], vec![0.0]);
     let anim = Arc::new(Animation::new(
         "hostile",
         1.0,

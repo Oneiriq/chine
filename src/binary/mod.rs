@@ -16,14 +16,14 @@ use std::sync::Arc;
 use glam::Vec2;
 
 use crate::anim::{
-    compute_draw_order, Animation, AttachmentTimeline, BoneAxis, BoneTimeline, ConstraintTimeline,
-    DeformTimeline, DrawOrderTimeline, EventTimeline, InheritTimeline, PhysicsProperty,
-    PhysicsResetTimeline, SequenceTimeline, Timeline, PATH_MIX, PATH_POSITION, PATH_SPACING,
-    TRANSFORM_MIX,
+    compute_draw_order, Animation, AttachmentTarget, AttachmentTimeline, BoneAxis, BoneTimeline,
+    ConstraintTimeline, DeformTimeline, DrawOrderTimeline, EventTimeline, InheritTimeline,
+    PhysicsProperty, PhysicsResetTimeline, SequenceTimeline, Timeline, PATH_MIX, PATH_POSITION,
+    PATH_SPACING, TRANSFORM_MIX,
 };
 use crate::attach::{
-    Attachment, BoundingBoxAttachment, ClippingAttachment, LinkedMeshAttachment, MeshAttachment,
-    MeshVertices, PathAttachment, PointAttachment, RegionAttachment, Sequence,
+    Attachment, AttachmentKey, BoundingBoxAttachment, ClippingAttachment, LinkedMeshAttachment,
+    MeshAttachment, MeshVertices, PathAttachment, PointAttachment, RegionAttachment, Sequence,
 };
 use crate::constraint::ik::IkConstraintData;
 use crate::constraint::path::{PathConstraintData, PositionMode, RotateMode, SpacingMode};
@@ -328,16 +328,25 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
 
     // Skins: the default skin, then named skins. Attachments resolve their
     // names and paths through the string table.
-    data.default_skin = read_skin(&mut r, &strings, &data, true, nonessential);
+    let mut links = Vec::new();
+    let default_skin = read_skin(&mut r, &strings, &data, true, nonessential, &mut links);
+    let has_default = default_skin.is_some();
+    data.default_skin = default_skin.unwrap_or_else(|| Skin::new("default"));
     let skin_count = r.count();
     for _ in 0..skin_count {
-        let skin = read_skin(&mut r, &strings, &data, false, nonessential);
-        data.skins.push(skin);
+        if let Some(skin) = read_skin(&mut r, &strings, &data, false, nonessential, &mut links) {
+            data.skins.push(skin);
+        }
     }
+    let skins = SkinList {
+        has_default,
+        named: data.skins.len(),
+    };
+    name_link_skins(&mut r, &mut data, skins, links);
     status(&r)?;
 
     // Resolve linked meshes before animations so deform timelines bind to the
-    // resolved (parent-shared) geometry rather than unresolved links.
+    // resolved (source-shared) geometry rather than unresolved links.
     crate::link::resolve_linked_meshes(&mut data);
 
     // Events: setup-pose values for named animation events.
@@ -369,7 +378,15 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
     let animation_count = r.count();
     for _ in 0..animation_count {
         let aname = r.string().unwrap_or_default();
-        let anim = read_animation(&mut r, aname, &data, &constraints, &strings, nonessential);
+        let anim = read_animation(
+            &mut r,
+            aname,
+            &data,
+            &constraints,
+            skins,
+            &strings,
+            nonessential,
+        );
         data.animations.push(Arc::new(anim));
         status(&r)?;
     }
@@ -759,7 +776,7 @@ mod reader;
 pub use reader::BinaryReader;
 
 mod skins;
-use skins::read_skin;
+use skins::{name_link_skins, read_skin, SkinList};
 
 mod timelines;
 use timelines::{constraint_list, read_animation};

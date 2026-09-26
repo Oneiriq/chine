@@ -258,10 +258,38 @@ pub(super) fn apply_draw_order(t: &DrawOrderTimeline, skel: &mut Skeleton, time:
     }
 }
 
-/// Mesh deform timeline: set the slot's deform buffer to the setup vertices plus
-/// the interpolated keyframe offsets (scaled by `alpha`). Only applies while the
-/// slot shows the timeline's attachment. The buffer takes the length of the
-/// setup vertices. A keyframe with fewer offsets adds zero to the rest.
+/// The attachment slot `slot` currently shows, when the timelines of the
+/// attachment at `key` drive it. The slot's attachment resolves through the
+/// active skin, then the default skin, as rendering resolves it. It is driven
+/// when it is the attachment at `key`, or a linked mesh that inherits that
+/// attachment's timelines.
+fn driven_attachment<'s>(
+    skel: &'s Skeleton,
+    slot: usize,
+    key: &AttachmentKey,
+) -> Option<&'s Attachment> {
+    let name = skel.slot(slot)?.attachment.as_deref()?;
+    let active = skel.active_skin();
+    let (skin, attachment) = match active.and_then(|skin| skin.attachment(slot, name)) {
+        Some(attachment) => (active.map(|skin| skin.name.as_str()), attachment),
+        None => (None, skel.data().default_skin.attachment(slot, name)?),
+    };
+    let driven = match attachment {
+        Attachment::Mesh(MeshAttachment {
+            timeline_source: Some(source),
+            ..
+        }) => source == key,
+        _ => key.slot == slot && key.name == name && key.skin.as_deref() == skin,
+    };
+    driven.then_some(attachment)
+}
+
+/// Mesh deform timeline: set the deform buffer of each slot the timeline
+/// reaches to the setup vertices plus the interpolated keyframe offsets
+/// (scaled by `alpha`). A slot is changed only while it shows the timeline's
+/// attachment, or a linked mesh inheriting its timelines. The buffer takes
+/// the length of the setup vertices. A keyframe with fewer offsets adds zero
+/// to the rest.
 pub(super) fn apply_deform(
     t: &DeformTimeline,
     skel: &mut Skeleton,
@@ -269,60 +297,55 @@ pub(super) fn apply_deform(
     alpha: f32,
     from: MixFrom,
 ) {
-    let Some(slot) = skel.slot(t.slot) else {
-        return;
-    };
-    if slot.attachment.as_deref() != Some(t.attachment.as_str()) {
-        return;
-    }
-    // Skin-aware: apply only if the slot's current attachment draws its deform
-    // from this timeline's authoring skin (so per-skin deforms and
-    // non-inheriting linked meshes do not cross over).
-    let same_skin = match skel
-        .data()
-        .attachment(t.slot, &t.attachment, skel.active_skin())
-    {
-        Some(Attachment::Mesh(m)) => m.deform_skin.as_deref() == t.skin.as_deref(),
-        _ => t.skin.is_none(),
-    };
-    if !same_skin {
-        return;
-    }
-    let Some((slot, _)) = skel.slot_pose_and_setup(t.slot) else {
-        return;
-    };
-    let n = t.setup.len();
     let before_first = match t.times.first() {
         Some(&first) => time < first,
         None => true,
     };
-    if before_first {
-        if matches!(from, MixFrom::Setup) {
-            slot.deform.clear();
-        }
+    if before_first && !matches!(from, MixFrom::Setup) {
         return;
     }
-    let offset = interp_deform(t, time);
-    slot.deform.resize(n, 0.0);
-    for (i, (d, &s)) in slot.deform.iter_mut().zip(&t.setup).enumerate() {
-        *d = s + offset.get(i).copied().unwrap_or(0.0) * alpha;
+    // Interpolated once, for the first slot that shows the attachment.
+    let mut offset: Option<Vec<f32>> = None;
+    for index in t.target.slots() {
+        if driven_attachment(skel, index, &t.target.key).is_none() {
+            continue;
+        }
+        let Some((slot, _)) = skel.slot_pose_and_setup(index) else {
+            continue;
+        };
+        if before_first {
+            slot.deform.clear();
+            continue;
+        }
+        let offset = offset.get_or_insert_with(|| interp_deform(t, time));
+        slot.deform.resize(t.setup.len(), 0.0);
+        for (i, (d, &s)) in slot.deform.iter_mut().zip(&t.setup).enumerate() {
+            *d = s + offset.get(i).copied().unwrap_or(0.0) * alpha;
+        }
     }
 }
 
-/// Sequence timeline: advance the slot's sequence frame index from the active
-/// keyframe by the elapsed time over the delay, wrapped per the sequence mode.
-/// Applies only while the slot shows the timeline's attachment.
+/// The number of regions in the sequence `attachment` shows, or 0 when it
+/// has no sequence.
+fn sequence_count(attachment: &Attachment) -> usize {
+    let sequence = match attachment {
+        Attachment::Region(region) => region.sequence.as_ref(),
+        Attachment::Mesh(mesh) => mesh.sequence.as_ref(),
+        _ => None,
+    };
+    sequence.map_or(0, |sequence| sequence.count)
+}
+
+/// Sequence timeline: advance the sequence frame index of each slot the
+/// timeline reaches from the active keyframe by the elapsed time over the
+/// delay, wrapped per the sequence mode over the regions of the sequence the
+/// slot shows. A slot is changed only while it shows the timeline's
+/// attachment, or a linked mesh inheriting its timelines.
 pub(super) fn apply_sequence(t: &SequenceTimeline, skel: &mut Skeleton, time: f32) {
     let Some(&first) = t.times.first() else {
         return;
     };
-    if t.count == 0 || time < first {
-        return;
-    }
-    let Some((slot, _)) = skel.slot_pose_and_setup(t.slot) else {
-        return;
-    };
-    if slot.attachment.as_deref() != Some(t.attachment.as_str()) {
+    if time < first {
         return;
     }
     let frame = search_step(&t.times, time);
@@ -333,13 +356,31 @@ pub(super) fn apply_sequence(t: &SequenceTimeline, skel: &mut Skeleton, time: f3
     ) else {
         return;
     };
-    let count = t.count;
+    for index in t.target.slots() {
+        let Some(attachment) = driven_attachment(skel, index, &t.target.key) else {
+            continue;
+        };
+        let count = sequence_count(attachment);
+        if count == 0 {
+            continue;
+        }
+        let shown = sequence_index(mode_and_index, count, time - frame_time, delay);
+        if let Some((slot, _)) = skel.slot_pose_and_setup(index) {
+            // An index past `i32::MAX` only comes from a corrupt mode or delay.
+            slot.sequence_index = i32::try_from(shown).unwrap_or(i32::MAX);
+        }
+    }
+}
+
+/// The region index a sequence key shows `elapsed` seconds after its time,
+/// over a sequence of `count` regions (`count` is not 0).
+fn sequence_index(mode_and_index: u32, count: usize, elapsed: f32, delay: f32) -> usize {
     let mut index = (mode_and_index >> 4) as usize;
     let mode = mode_and_index & 0xf;
     if mode != 0 {
         // The cast saturates: a zero delay or an infinite time gives
         // `usize::MAX`, and NaN gives 0. The add saturates to match.
-        let advance = ((time - frame_time) / delay + 0.000_01) as usize;
+        let advance = (elapsed / delay + 0.000_01) as usize;
         index = index.saturating_add(advance);
         let last = count - 1;
         index = match mode {
@@ -352,8 +393,7 @@ pub(super) fn apply_sequence(t: &SequenceTimeline, skel: &mut Skeleton, time: f3
             _ => index,
         };
     }
-    // An index past `i32::MAX` only comes from a corrupt mode or delay.
-    slot.sequence_index = i32::try_from(index).unwrap_or(i32::MAX);
+    index
 }
 
 /// Wrap an index across a ping-pong sequence of `count` regions.

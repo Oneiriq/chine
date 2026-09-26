@@ -4,8 +4,8 @@ use crate::anim::GLOBAL_PHYSICS;
 
 mod deform;
 use deform::{
-    deform_mesh_info, read_deform_timeline, read_sequence_timeline, sequence_count,
-    skip_deform_timeline,
+    deform_mesh_info, read_deform_timeline, read_sequence_keys, skip_deform_timeline,
+    timeline_target,
 };
 
 /// Wrap a parsed bone timeline in its [`Timeline`] variant.
@@ -137,14 +137,16 @@ fn constraint_index(
 /// Parse one animation, group by group. A timeline's target index is checked
 /// against the table it points into. Constraint timelines index Spine's
 /// single constraint list (see [`constraint_list`]) and are stored with the
-/// index in chine's list for their type. An unknown timeline type records an
-/// error and stops the parse early with the timelines read so far, and the
-/// load then fails.
+/// index in chine's list for their type. Attachment timelines index Spine's
+/// skin list (see [`SkinList`]). An unknown timeline type records an error
+/// and stops the parse early with the timelines read so far, and the load
+/// then fails.
 pub(super) fn read_animation(
     r: &mut BinaryReader,
     name: String,
     data: &SkeletonData,
     constraints: &[Option<(ConstraintKind, usize)>],
+    skins: SkinList,
     strings: &[String],
     nonessential: bool,
 ) -> Animation {
@@ -368,11 +370,12 @@ pub(super) fn read_animation(
 
     // Attachment timelines, nested skins -> slots -> attachments. Mesh deforms
     // and sequence (animated attachment) timelines are both built and applied.
-    // Skin index 0 is the default skin, and `i` is the named skin `i - 1`.
+    // Skins are indexed in Spine's skin list (see `SkinList`).
     let deform_skins = r.count();
     for _ in 0..deform_skins {
         let skin_index = r.var_usize();
-        if skin_index > data.skins.len() {
+        let skin = skins.get(skin_index);
+        if skin.is_none() {
             corrupt(r);
         }
         let slots = r.count();
@@ -386,12 +389,12 @@ pub(super) fn read_animation(
                 let att_name = string_ref(r, strings).unwrap_or_default();
                 let kind = r.byte();
                 let frames = frame_count(r);
+                // The attachment the timeline drives, in the skin it names.
+                let target = skin.and_then(|skin| timeline_target(data, skin, slot, &att_name));
                 match kind {
-                    0 => match deform_mesh_info(data, skin_index, slot, &att_name) {
-                        Some((frame_len, setup, tl_skin)) => {
-                            let (tl, d) = read_deform_timeline(
-                                r, slot, att_name, tl_skin, setup, frame_len, frames,
-                            );
+                    0 => match target.and_then(deform_mesh_info) {
+                        Some((target, frame_len, setup)) => {
+                            let (tl, d) = read_deform_timeline(r, target, setup, frame_len, frames);
                             duration = duration.max(d);
                             timelines.push(Timeline::Deform(tl));
                         }
@@ -399,10 +402,15 @@ pub(super) fn read_animation(
                         None => skip_deform_timeline(r, frames),
                     },
                     1 => {
-                        let count = sequence_count(data, skin_index, slot, &att_name).unwrap_or(0);
-                        let (tl, d) = read_sequence_timeline(r, slot, att_name, count, frames);
-                        duration = duration.max(d);
-                        timelines.push(Timeline::Sequence(tl));
+                        let (keys, d) = read_sequence_keys(r, frames);
+                        // A timeline for a missing attachment has nothing to
+                        // drive.
+                        if let Some((target, _)) = target {
+                            let (times, mode_and_index, delays) = keys;
+                            let tl = SequenceTimeline::new(target, times, mode_and_index, delays);
+                            duration = duration.max(d);
+                            timelines.push(Timeline::Sequence(tl));
+                        }
                     }
                     _ => {
                         r.fail(BinaryError::UnknownTimelineType(kind));
