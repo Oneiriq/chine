@@ -34,7 +34,7 @@ a `.skel` for `binary`, a `.json` for `json`, and an `.atlas` for `atlas`.
 On Windows, run it in Docker:
 
 ```sh
-docker run --rm -it -v "%cd%:/src" rust:1-bookworm bash
+docker run --rm -it -v "%cd%:/src" rust:1-trixie bash
 rustup toolchain install nightly --profile minimal
 cargo +nightly install cargo-fuzz
 cd /src/fuzz && cargo +nightly fuzz run -O -a binary
