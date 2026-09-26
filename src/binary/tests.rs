@@ -91,8 +91,7 @@ fn reads_bone_inherit_before_length() {
     b.push(0); // nonessential = false
     b.push(0); // string table count = 0
     b.push(2); // bone count = 2
-    for (name, parent, inherit, length) in [("root", None, 0, 0.0_f32), ("arm", Some(0), 4, 85.5)]
-    {
+    for (name, parent, inherit, length) in [("root", None, 0, 0.0_f32), ("arm", Some(0), 4, 85.5)] {
         enc_str(&mut b, name);
         if let Some(parent) = parent {
             b.push(parent);
