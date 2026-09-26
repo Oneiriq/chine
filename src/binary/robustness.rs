@@ -153,9 +153,10 @@ impl Rig {
             if i > 0 {
                 o.var(self.parents[i - 1]);
             }
-            // rotation, x, y, scaleX, scaleY, shearX, shearY, length.
-            o.floats(&[0.0, 10.0, 0.0, 1.0, 1.0, 0.0, 0.0, 5.0]);
+            // rotation, x, y, scaleX, scaleY, shearX, shearY.
+            o.floats(&[0.0, 10.0, 0.0, 1.0, 1.0, 0.0, 0.0]);
             o.byte(0); // inherit
+            o.floats(&[5.0]); // length
             o.byte(0); // skin required
         }
 

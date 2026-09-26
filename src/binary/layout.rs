@@ -53,9 +53,10 @@ impl Out {
         if let Some(parent) = parent {
             self.var(parent);
         }
-        // rotation, x, y, scaleX, scaleY, shearX, shearY, length.
-        self.floats(&[0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0]);
+        // rotation, x, y, scaleX, scaleY, shearX, shearY.
+        self.floats(&[0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0]);
         self.byte(0); // inherit
+        self.floats(&[0.0]); // length
         self.byte(0); // skin required
     }
 

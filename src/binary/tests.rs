@@ -49,11 +49,12 @@ fn parses_header_and_bones() {
     b.push(0); // string table count = 0
     b.push(1); // bone count = 1
     enc_str(&mut b, "root");
-    // rotation, x, y, scaleX, scaleY, shearX, shearY, length
-    for v in [0.0_f32, 10.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0] {
+    // rotation, x, y, scaleX, scaleY, shearX, shearY
+    for v in [0.0_f32, 10.0, 0.0, 1.0, 1.0, 0.0, 0.0] {
         b.extend_from_slice(&v.to_be_bytes());
     }
     b.push(3); // inherit = NoScale
+    b.extend_from_slice(&12.5_f32.to_be_bytes()); // length
     b.push(0); // skinRequired = false
     b.push(0); // slot count = 0
     b.push(0); // constraint count = 0
@@ -73,6 +74,44 @@ fn parses_header_and_bones() {
     assert!((root.position.x - 10.0).abs() < 1e-6);
     assert!((root.scale.x - 1.0).abs() < 1e-6);
     assert_eq!(root.inherit, Inherit::NoScale);
+    assert_eq!(root.length, 12.5);
+}
+
+// Spine 4.3 writes a bone's inherit byte before its length. The loader read
+// the length first, so every bone took its length from the inherit byte and
+// the first three length bytes, and its inherit mode from the last one.
+#[test]
+fn reads_bone_inherit_before_length() {
+    let mut b = Vec::new();
+    b.extend_from_slice(&[0; 8]); // hash
+    enc_str(&mut b, "4.3.00"); // version
+    for v in [0.0_f32, 0.0, 0.0, 0.0, 1.0] {
+        b.extend_from_slice(&v.to_be_bytes()); // x, y, width, height, referenceScale
+    }
+    b.push(0); // nonessential = false
+    b.push(0); // string table count = 0
+    b.push(2); // bone count = 2
+    for (name, parent, inherit, length) in [("root", None, 0, 0.0_f32), ("arm", Some(0), 4, 85.5)]
+    {
+        enc_str(&mut b, name);
+        if let Some(parent) = parent {
+            b.push(parent);
+        }
+        // rotation, x, y, scaleX, scaleY, shearX, shearY
+        for v in [0.0_f32, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0] {
+            b.extend_from_slice(&v.to_be_bytes());
+        }
+        b.push(inherit);
+        b.extend_from_slice(&length.to_be_bytes());
+        b.push(0); // skinRequired = false
+    }
+    b.extend_from_slice(&[0; 6]); // slots, constraints, skins, events, animations
+
+    let data = from_binary(&b).unwrap();
+    assert_eq!(data.bones[1].inherit, Inherit::NoScaleOrReflection);
+    assert_eq!(data.bones[1].length, 85.5);
+    assert_eq!(data.bones[0].inherit, Inherit::Normal);
+    assert_eq!(data.bones[0].length, 0.0);
 }
 
 // Validates the parser against a real Spine 4.3 `.skel` when the local
@@ -688,11 +727,12 @@ fn from_binary_round_trips_a_minimal_skeleton() {
     // One root bone.
     b.push(1); // bone count
     put_string(&mut b, "root");
-    // rotation, x, y, scaleX, scaleY, shearX, shearY, length.
-    for v in [0.0_f32, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0] {
+    // rotation, x, y, scaleX, scaleY, shearX, shearY.
+    for v in [0.0_f32, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0] {
         put_f32(&mut b, v);
     }
     b.push(0); // inherit = Normal
+    put_f32(&mut b, 0.0); // length
     b.push(0); // skin required = false
 
     // One slot on the root bone: white, no dark tint, no setup attachment.

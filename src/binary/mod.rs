@@ -229,8 +229,9 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
         let scale_y = r.float();
         let shear_x = r.float();
         let shear_y = r.float();
-        let length = r.float();
+        // Spine 4.3 writes the inherit mode before the length.
         let inherit = inherit_from(r.byte() as usize);
+        let length = r.float();
         let _skin_required = r.bool();
         if nonessential {
             let _color = r.u32();
@@ -763,6 +764,8 @@ use skins::read_skin;
 mod timelines;
 use timelines::{constraint_list, read_animation};
 
+#[cfg(all(test, feature = "json"))]
+mod examples;
 #[cfg(test)]
 mod layout;
 #[cfg(test)]
