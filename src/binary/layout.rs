@@ -417,18 +417,14 @@ fn draw_order_folder_timelines_load_and_apply() {
 // a slot twice, or a key whose moves do not order the folder.
 #[test]
 fn malformed_draw_order_folders_are_corrupt() {
-    let cases: [(&[u32], &[(u32, u32)]); 4] = [
-        (&[1, 9], &[]),
-        (&[1, 1], &[]),
-        (&[1, 3], &[(0, 2)]),
-        (&[1, 3], &[(0, 1), (0, 1)]),
+    let cases = [
+        folder_rig(&[1, 9], &[]),
+        folder_rig(&[1, 1], &[]),
+        folder_rig(&[1, 3], &[(0, 2)]),
+        folder_rig(&[1, 3], &[(0, 1), (0, 1)]),
     ];
-    for (folder, moves) in cases {
-        let loaded = from_binary(&folder_rig(folder, moves));
-        assert_eq!(
-            loaded.err(),
-            Some(BinaryError::CorruptLength),
-            "{folder:?} {moves:?}"
-        );
+    for (i, bytes) in cases.iter().enumerate() {
+        let loaded = from_binary(bytes);
+        assert_eq!(loaded.err(), Some(BinaryError::CorruptLength), "case {i}");
     }
 }
