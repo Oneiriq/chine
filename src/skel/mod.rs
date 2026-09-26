@@ -391,8 +391,12 @@ impl Skeleton {
         self.events.push(event);
     }
 
-    /// Clear the fired-event list (the animation system does this each apply).
-    pub(crate) fn clear_events(&mut self) {
+    /// Clear the fired-event list.
+    ///
+    /// [`crate::anim::AnimationState::apply`] clears it before each apply. A
+    /// host that calls [`crate::anim::Animation::apply`] directly calls this
+    /// first, so [`Self::events`] holds only the events that apply fired.
+    pub fn clear_events(&mut self) {
         self.events.clear();
     }
 

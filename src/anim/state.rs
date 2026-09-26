@@ -470,4 +470,31 @@ mod tests {
         let entry = state.track(0).unwrap();
         assert!(entry.next.is_some());
     }
+
+    // Only the animation state could clear the fired events, so a host that
+    // applied an animation directly saw every event since the skeleton was
+    // made.
+    #[test]
+    fn a_host_applying_an_animation_directly_clears_events() {
+        use crate::anim::timeline::EventTimeline;
+        use crate::event::Event;
+
+        let hit = Event {
+            name: "hit".into(),
+            time: 0.5,
+            int_value: 0,
+            float_value: 0.0,
+            string_value: String::new(),
+            volume: 1.0,
+            balance: 0.0,
+        };
+        let timeline = Timeline::Event(EventTimeline::new(vec![0.5], vec![hit]));
+        let anim = Animation::new("step", 1.0, vec![timeline]);
+        let mut sk = one_bone();
+        anim.apply(&mut sk, 0.0, 1.0, 1.0, MixFrom::Setup, false);
+        assert_eq!(sk.events().len(), 1);
+        sk.clear_events();
+        anim.apply(&mut sk, 0.0, 0.25, 1.0, MixFrom::Setup, false);
+        assert!(sk.events().is_empty());
+    }
 }
