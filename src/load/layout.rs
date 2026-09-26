@@ -1,0 +1,418 @@
+//! Tests for Spine 4.3 JSON layout details: the keys and nesting current
+//! exports use, which older exports spelled differently.
+
+use std::sync::Arc;
+
+use super::*;
+use crate::anim::MixFrom;
+use crate::skel::Skeleton;
+
+/// Load `json` and apply its animation `name` at `time`, from the setup pose.
+fn posed(json: &str, name: &str, time: f32) -> Skeleton {
+    let data = from_json(json).unwrap();
+    let anim = Arc::clone(data.find_animation(name).unwrap());
+    let mut sk = Skeleton::new(Arc::new(data));
+    anim.apply(&mut sk, -1.0, time, 1.0, MixFrom::Setup, false);
+    sk
+}
+
+// Path position and spacing keys hold their value under "value". The loader
+// read "position" and "spacing", so both timelines keyed 0.
+#[test]
+fn path_position_and_spacing_timelines_read_value() {
+    let json = r#"{
+        "bones": [ { "name": "root" }, { "name": "b", "parent": "root" } ],
+        "slots": [ { "name": "s", "bone": "root" } ],
+        "constraints": [
+            { "type": "path", "name": "p", "slot": "s", "bones": [ "b" ] }
+        ],
+        "animations": {
+            "a": { "path": { "p": {
+                "position": [ { "value": 0.5 } ],
+                "spacing": [ { "value": 3 } ]
+            } } }
+        }
+    }"#;
+    let mut sk = posed(json, "a", 0.0);
+    let (pose, _) = sk.path_pose_and_setup(0).unwrap();
+    assert_eq!(pose.position, 0.5);
+    assert_eq!(pose.spacing, 3.0);
+}
+
+// A transform or path mix key without "mixY" uses its "mixX", as Spine's
+// reader does. The loader used 1.
+#[test]
+fn omitted_mix_y_keys_take_mix_x() {
+    let json = r#"{
+        "bones": [ { "name": "root" }, { "name": "b", "parent": "root" } ],
+        "slots": [ { "name": "s", "bone": "root" } ],
+        "constraints": [
+            { "type": "transform", "name": "t", "source": "root", "bones": [ "b" ] },
+            { "type": "path", "name": "p", "slot": "s", "bones": [ "b" ] }
+        ],
+        "animations": {
+            "a": {
+                "transform": { "t": [ { "mixX": 0.25 } ] },
+                "path": { "p": { "mix": [ { "mixX": 0.75 } ] } }
+            }
+        }
+    }"#;
+    let mut sk = posed(json, "a", 0.0);
+    let (transform, _) = sk.transform_pose_and_setup(0).unwrap();
+    assert_eq!((transform.mix_x, transform.mix_y), (0.25, 0.25));
+    let (path, _) = sk.path_pose_and_setup(0).unwrap();
+    assert_eq!((path.mix_x, path.mix_y), (0.75, 0.75));
+}
+
+// Bone "inherit" timelines were skipped as an unknown bone channel.
+#[test]
+fn bone_inherit_timelines_apply() {
+    let json = r#"{
+        "bones": [ { "name": "root" }, { "name": "b", "parent": "root" } ],
+        "animations": {
+            "a": { "bones": { "b": { "inherit": [
+                { "inherit": "onlyTranslation" },
+                { "time": 1, "inherit": "noScaleOrReflection" }
+            ] } } }
+        }
+    }"#;
+    let data = from_json(json).unwrap();
+    assert_eq!(data.find_animation("a").unwrap().duration(), 1.0);
+    let sk = posed(json, "a", 0.5);
+    assert_eq!(sk.bone(1).unwrap().inherit(), Inherit::OnlyTranslation);
+    let sk = posed(json, "a", 1.0);
+    assert_eq!(sk.bone(1).unwrap().inherit(), Inherit::NoScaleOrReflection);
+}
+
+// Since Spine 4.1, JSON exports nest deform timelines under "attachments",
+// beside sequence timelines. The loader read only the Spine 4.0 "deform" map,
+// so mesh deforms from current exports did not play.
+#[test]
+fn deform_timelines_under_attachments_apply() {
+    let json = r#"{
+        "bones": [ { "name": "root" } ],
+        "slots": [ { "name": "s", "bone": "root", "attachment": "m" } ],
+        "skins": [ { "name": "default", "attachments": { "s": { "m": {
+            "type": "mesh", "uvs": [0,0, 1,0, 0,1], "triangles": [0,1,2], "vertices": [0,0, 10,0, 0,10]
+        } } } } ],
+        "animations": {
+            "wobble": { "attachments": { "default": { "s": { "m": { "deform": [
+                { "vertices": [0,0, 0,0, 0,0], "curve": "stepped" },
+                { "time": 1, "offset": 2, "vertices": [5, 0] }
+            ] } } } } }
+        }
+    }"#;
+    let data = from_json(json).unwrap();
+    assert_eq!(data.find_animation("wobble").unwrap().duration(), 1.0);
+    let sk = posed(json, "wobble", 1.0);
+    // Vertex 1's x (index 2) gets +5: setup 10 -> 15.
+    assert_eq!(sk.slot(0).unwrap().deform, [0.0, 0.0, 15.0, 0.0, 0.0, 10.0]);
+    // The first key is stepped, so it holds until the second.
+    let sk = posed(json, "wobble", 0.5);
+    assert_eq!(sk.slot(0).unwrap().deform, [0.0, 0.0, 10.0, 0.0, 0.0, 10.0]);
+}
+
+// Slider constraints in JSON were dropped: the loader parsed only the other
+// constraint types, and skipped slider timelines for lack of a constraint.
+#[test]
+fn slider_constraints_load_and_scrub_their_animation() {
+    let json = r#"{
+        "bones": [ { "name": "root" }, { "name": "b", "parent": "root" } ],
+        "constraints": [
+            { "type": "slider", "name": "clock", "time": 0.5, "animation": "spin" },
+            { "type": "slider", "name": "dial", "bone": "root", "property": "x",
+              "from": 1, "to": 2, "scale": 3, "max": 4, "local": true, "additive": true,
+              "mix": 0.5, "animation": "spin" }
+        ],
+        "animations": {
+            "spin": { "bones": { "b": { "rotate": [ {}, { "time": 1, "value": 90 } ] } } },
+            "still": { "slider": { "clock": { "mix": [ { "value": 0.25 } ] } } }
+        }
+    }"#;
+    let data = from_json(json).unwrap();
+    let spin = data.animations.iter().position(|a| a.name() == "spin");
+    let clock = &data.sliders[0];
+    assert_eq!(clock.time, 0.5);
+    assert!(!clock.looping && clock.bone.is_none());
+    assert_eq!(clock.animation_index, spin);
+    let dial = &data.sliders[1];
+    assert_eq!(dial.bone, Some(0));
+    assert_eq!(dial.property, Some(SliderProperty::X));
+    let values = [
+        dial.property_offset,
+        dial.offset,
+        dial.scale,
+        dial.max,
+        dial.mix,
+    ];
+    assert_eq!(values, [1.0, 2.0, 3.0, 4.0, 0.5]);
+    assert!(dial.local && dial.additive);
+
+    // The bone-less slider scrubs "spin" to its setup time: 45 degrees.
+    let mut sk = Skeleton::new(Arc::new(data));
+    sk.update_world_transform();
+    assert!((sk.bone(1).unwrap().rotation - 45.0).abs() < 1e-4);
+
+    // Slider timelines now find their constraint.
+    let mut sk = posed(json, "still", 0.0);
+    let (pose, _) = sk.slider_pose_and_setup(0).unwrap();
+    assert_eq!(pose.mix, 0.25);
+}
+
+// A slider must name an animation the export defines.
+#[test]
+fn slider_with_an_unknown_animation_is_rejected() {
+    let json = r#"{
+        "bones": [ { "name": "root" } ],
+        "constraints": [ { "type": "slider", "name": "s", "animation": "missing" } ]
+    }"#;
+    assert!(matches!(from_json(json), Err(LoadError::BadReference(name)) if name == "missing"));
+}
+
+/// A rig whose "boy" skin shows, in slot "s1", a linked mesh of the default
+/// skin's "arm" in slot "s0". The link's own entries are `link`. Its
+/// animation "flap" moves vertex 1 of "arm" by 5 in x at time 1.
+fn linked_rig(link: &str) -> String {
+    format!(
+        r#"{{
+        "bones": [ {{ "name": "root" }} ],
+        "slots": [
+            {{ "name": "s0", "bone": "root", "attachment": "arm" }},
+            {{ "name": "s1", "bone": "root", "attachment": "sleeve" }}
+        ],
+        "skins": [
+            {{ "name": "default", "attachments": {{ "s0": {{ "arm": {{
+                "type": "mesh", "uvs": [0,0, 1,0, 0,1], "triangles": [0,1,2],
+                "vertices": [0,0, 10,0, 0,10], "hull": 3
+            }} }} }} }},
+            {{ "name": "boy", "attachments": {{ "s1": {{ "sleeve": {{ {link} }} }} }} }}
+        ],
+        "animations": {{ "flap": {{ "attachments": {{ "default": {{ "s0": {{ "arm": {{
+            "deform": [ {{ "time": 0 }}, {{ "time": 1, "offset": 2, "vertices": [5] }} ]
+        }} }} }} }} }} }}
+    }}"#
+    )
+}
+
+/// Load `json`, play "flap" to its end with the "boy" skin active, and
+/// return each slot's deform.
+fn flapped(json: &str) -> Vec<Vec<f32>> {
+    let data = from_json(json).unwrap();
+    let anim = Arc::clone(data.find_animation("flap").unwrap());
+    let mut sk = Skeleton::new(Arc::new(data));
+    sk.set_skin("boy");
+    anim.apply(&mut sk, -1.0, 1.0, 1.0, MixFrom::Setup, false);
+    sk.slots().iter().map(|slot| slot.deform.clone()).collect()
+}
+
+/// The resolved mesh `name` in `slot` of `skin`.
+fn mesh<'a>(skin: &'a Skin, slot: usize, name: &str) -> &'a crate::attach::MeshAttachment {
+    match skin.attachment(slot, name) {
+        Some(Attachment::Mesh(mesh)) => mesh,
+        other => panic!("{name} is not a resolved mesh: {other:?}"),
+    }
+}
+
+// Spine 4.3 names a linked mesh's source "source", its slot "slot", and
+// whether it inherits the source's timelines "timelines", and a "mesh" with
+// a source is linked. The loader read the older "parent" and "deform" keys
+// and the link's own slot, so this link resolved against itself and drew
+// nothing, and the source's deform never reached it.
+#[test]
+fn linked_meshes_read_their_source_slot_and_timelines() {
+    let json = linked_rig(
+        r#""path": "girl/sleeve", "type": "mesh", "source": "arm", "slot": "s0",
+           "sequence": { "count": 3 }"#,
+    );
+    let data = from_json(&json).unwrap();
+    let sleeve = mesh(&data.skins[0], 1, "sleeve");
+    assert_eq!(sleeve.path, "girl/sleeve");
+    assert_eq!(sleeve.triangles, [0, 1, 2]);
+    assert_eq!(sleeve.sequence.as_ref().map(|s| s.count), Some(3));
+    assert_eq!(&mesh(&data.default_skin, 0, "arm").timeline_slots[..], [1]);
+
+    let deforms = flapped(&json);
+    assert_eq!(deforms[0], [0.0, 0.0, 15.0, 0.0, 0.0, 10.0]);
+    assert_eq!(deforms[1], deforms[0]);
+}
+
+// A link with "timelines": false keeps its own timelines, so the source's
+// deform does not reach it.
+#[test]
+fn a_link_without_timelines_keeps_its_own() {
+    let json =
+        linked_rig(r#""type": "linkedmesh", "source": "arm", "slot": "s0", "timelines": false"#);
+    let deforms = flapped(&json);
+    assert_eq!(deforms[0], [0.0, 0.0, 15.0, 0.0, 0.0, 10.0]);
+    assert!(deforms[1].is_empty());
+}
+
+// An attachment's "name" is the name its path defaults to. The loader used
+// the attachment's key in the skin, so it drew the wrong atlas region.
+#[test]
+fn attachment_name_sets_the_default_path() {
+    let json = r#"{
+        "bones": [ { "name": "root" } ],
+        "slots": [ { "name": "s", "bone": "root", "attachment": "head" } ],
+        "skins": [ { "name": "default", "attachments": { "s": {
+            "head": { "name": "boy/head", "width": 10, "height": 10 },
+            "hat": { "name": "boy/hat", "path": "hats/red", "width": 10, "height": 10 }
+        } } } ]
+    }"#;
+    let data = from_json(json).unwrap();
+    let path = |key: &str| match data.default_skin.attachment(0, key) {
+        Some(Attachment::Region(region)) => region.path.clone(),
+        other => panic!("{key} is not a region: {other:?}"),
+    };
+    assert_eq!(path("head"), "boy/head");
+    assert_eq!(path("hat"), "hats/red");
+}
+
+/// A rig of four slots, "a" to "d", whose animation "a" holds the draw
+/// order folder timeline `folder`.
+fn folder_rig(folder: &str) -> String {
+    format!(
+        r#"{{
+        "bones": [ {{ "name": "root" }} ],
+        "slots": [
+            {{ "name": "a", "bone": "root" }}, {{ "name": "b", "bone": "root" }},
+            {{ "name": "c", "bone": "root" }}, {{ "name": "d", "bone": "root" }}
+        ],
+        "animations": {{ "a": {{ "drawOrderFolder": [ {folder} ] }} }}
+    }}"#
+    )
+}
+
+// Draw order folder timelines reorder a folder of slots among the positions
+// those slots hold. The loader did not read them, so the folder kept its
+// setup order.
+#[test]
+fn draw_order_folder_timelines_reorder_their_slots() {
+    let json = folder_rig(
+        r#"{ "slots": [ "b", "d" ], "keys": [
+            { "time": 0.5, "offsets": [ { "slot": "b", "offset": 1 } ] },
+            { "time": 1 }
+        ] }"#,
+    );
+    assert_eq!(posed(&json, "a", 0.5).draw_order(), [0, 3, 2, 1]);
+    // A key with no offsets shows the folder in setup order.
+    assert_eq!(posed(&json, "a", 1.0).draw_order(), [0, 1, 2, 3]);
+
+    // Before the first key, a mix from the setup pose puts the folder back in
+    // setup order.
+    let data = from_json(&json).unwrap();
+    let anim = Arc::clone(data.find_animation("a").unwrap());
+    let mut sk = Skeleton::new(Arc::new(data));
+    anim.apply(&mut sk, -1.0, 0.5, 1.0, MixFrom::Setup, false);
+    anim.apply(&mut sk, -1.0, 0.25, 1.0, MixFrom::Current, false);
+    assert_eq!(sk.draw_order(), [0, 3, 2, 1]);
+    anim.apply(&mut sk, -1.0, 0.25, 1.0, MixFrom::Setup, false);
+    assert_eq!(sk.draw_order(), [0, 1, 2, 3]);
+}
+
+// Spine never exports a folder that lists a slot twice, or a key that moves a
+// slot outside its folder or out of its range.
+#[test]
+fn malformed_draw_order_folders_are_rejected() {
+    let folders = [
+        r#"{ "slots": [ "b", "b" ], "keys": [ { "time": 0 } ] }"#,
+        r#"{ "slots": [ "b", "d" ], "keys": [ { "offsets": [ { "slot": "c", "offset": 1 } ] } ] }"#,
+        r#"{ "slots": [ "b", "d" ], "keys": [ { "offsets": [ { "slot": "d", "offset": 1 } ] } ] }"#,
+    ];
+    for folder in folders {
+        let error = from_json(&folder_rig(folder)).unwrap_err();
+        assert!(matches!(error, LoadError::Schema(_)), "{folder}: {error}");
+    }
+}
+
+// A clipping attachment's "convex" and "inverse" flags were not read.
+#[test]
+fn clipping_convex_and_inverse_flags_load() {
+    let json = r#"{
+        "bones": [ { "name": "root" } ],
+        "slots": [ { "name": "s", "bone": "root" } ],
+        "skins": [ { "name": "default", "attachments": { "s": {
+            "plain": { "type": "clipping", "vertexCount": 3, "vertices": [0,0, 10,0, 0,10] },
+            "flagged": { "type": "clipping", "vertexCount": 3, "vertices": [0,0, 10,0, 0,10],
+                "convex": true, "inverse": true }
+        } } } ]
+    }"#;
+    let data = from_json(json).unwrap();
+    let flags = |key: &str| match data.default_skin.attachment(0, key) {
+        Some(Attachment::Clipping(clip)) => (clip.convex, clip.inverse),
+        other => panic!("{key} is not a clipping attachment: {other:?}"),
+    };
+    assert_eq!(flags("plain"), (false, false));
+    assert_eq!(flags("flagged"), (true, true));
+}
+
+// A bone's and a constraint's "skin" flag, and the bones and constraints a
+// skin lists, were not read.
+#[test]
+fn skin_required_bones_and_constraints_load() {
+    let json = r#"{
+        "bones": [ { "name": "root" }, { "name": "hat", "parent": "root", "skin": true } ],
+        "constraints": [
+            { "type": "ik", "name": "k", "bones": [ "hat" ], "target": "root" },
+            { "type": "transform", "name": "t", "bones": [ "hat" ], "source": "root", "skin": true }
+        ],
+        "skins": [ { "name": "hatted", "bones": [ "hat" ], "transform": [ "t" ], "ik": [ "k" ] } ]
+    }"#;
+    let data = from_json(json).unwrap();
+    assert!(!data.bones[0].skin_required);
+    assert!(data.bones[1].skin_required);
+    assert!(!data.ik_constraints[0].skin_required);
+    assert!(data.transform_constraints[0].skin_required);
+    let skin = &data.skins[0];
+    assert_eq!(skin.bones, [1]);
+    assert_eq!(
+        skin.constraints,
+        [SkinConstraint::Ik(0), SkinConstraint::Transform(0)]
+    );
+
+    // A skin that lists an unknown bone is rejected.
+    let json = json.replace(
+        r#""bones": [ "hat" ], "transform""#,
+        r#""bones": [ "cap" ], "transform""#,
+    );
+    assert!(matches!(from_json(&json), Err(LoadError::BadReference(_))));
+}
+
+// A sequence key without a "delay" keeps the previous key's delay, and the
+// editor leaves it out when it does not change. The loader read it as 0, so
+// the flipbook jumped by a saturated frame count.
+#[test]
+fn sequence_keys_without_a_delay_keep_the_previous_one() {
+    let json = r#"{
+        "bones": [ { "name": "root" } ],
+        "slots": [ { "name": "s", "bone": "root", "attachment": "flip" } ],
+        "skins": [ { "name": "default", "attachments": { "s": {
+            "flip": { "width": 10, "height": 10, "sequence": { "count": 10 } }
+        } } } ],
+        "animations": { "a": { "attachments": { "default": { "s": { "flip": {
+            "sequence": [
+                { "mode": "loop", "delay": 0.1 },
+                { "time": 1, "mode": "loop" }
+            ]
+        } } } } } }
+    }"#;
+    assert_eq!(posed(json, "a", 1.25).slot(0).unwrap().sequence_index, 2);
+}
+
+// Deform timelines on a path (and other vertex attachments) were dropped: the
+// loader only built them for meshes.
+#[test]
+fn deform_timelines_on_paths_apply() {
+    let json = r#"{
+        "bones": [ { "name": "root" } ],
+        "slots": [ { "name": "s", "bone": "root", "attachment": "p" } ],
+        "skins": [ { "name": "default", "attachments": { "s": {
+            "p": { "type": "path", "vertexCount": 3, "vertices": [0,0, 10,0, 20,0], "lengths": [20] }
+        } } } ],
+        "animations": { "a": { "attachments": { "default": { "s": { "p": {
+            "deform": [ { "time": 0 }, { "time": 1, "offset": 3, "vertices": [5] } ]
+        } } } } } }
+    }"#;
+    let sk = posed(json, "a", 1.0);
+    assert_eq!(sk.slot(0).unwrap().deform, [0.0, 0.0, 10.0, 5.0, 20.0, 0.0]);
+}

@@ -3,7 +3,9 @@
 //! Spine's clipping attachment masks the slots that follow it: the clip
 //! polygon is decomposed into convex CCW pieces (the polygon itself when
 //! convex, an ear-clipping triangulation otherwise), and every drawn triangle
-//! is Sutherland-Hodgman-clipped against each piece.
+//! is Sutherland-Hodgman-clipped against each piece. A clip marked convex
+//! uses the polygon's convex hull as its one piece. A clip marked inverse
+//! keeps what lies outside that hull instead.
 //!
 //! All of that needs working buffers. [`RenderScratch`] owns them, plus the
 //! emitted commands themselves, so a render loop that keeps one scratch and
@@ -76,6 +78,8 @@ pub struct RenderScratch {
     pub(crate) subject: Vec<ClipVertex>,
     /// Sutherland-Hodgman per-edge output polygon (pong).
     pub(crate) clipped: Vec<ClipVertex>,
+    /// An inverse clip's fragment: the part of a triangle outside one edge.
+    pub(crate) outside: Vec<ClipVertex>,
 }
 
 impl RenderScratch {
@@ -95,16 +99,18 @@ pub(crate) fn replace_clip(
     ranges: &mut Vec<(usize, usize)>,
 ) -> bool {
     let mut unlimited = usize::MAX;
-    replace_clip_within(world, ear, points, ranges, &mut unlimited)
+    replace_clip_within(world, false, ear, points, ranges, &mut unlimited)
 }
 
 /// Decompose `world` into convex CCW pieces appended to `points` / `ranges`,
-/// replacing the pieces already there (the previous clip). A polygon with
-/// fewer than three vertices, or one that yields no piece (degenerate, or out
-/// of `budget` before the first piece), leaves the current pieces in place and
-/// returns `false`.
+/// replacing the pieces already there (the previous clip). With `hull`, a
+/// concave polygon becomes one piece, its convex hull, as Spine does for a
+/// clip marked convex or inverse. A polygon with fewer than three vertices,
+/// or one that yields no piece (degenerate, or out of `budget` before the
+/// first piece), leaves the current pieces in place and returns `false`.
 pub(crate) fn replace_clip_within(
     world: &mut [Vec2],
+    hull: bool,
     ear: &mut Vec<usize>,
     points: &mut Vec<Vec2>,
     ranges: &mut Vec<(usize, usize)>,
@@ -120,6 +126,16 @@ pub(crate) fn replace_clip_within(
     if is_convex(world) {
         ranges.push((points.len(), world.len()));
         points.extend_from_slice(world);
+    } else if hull {
+        // Sorting the corners costs about one more visit each.
+        if spend(budget, world.len()) {
+            let len = convex_hull_into(world, ear, points);
+            if len >= 3 {
+                ranges.push((points.len() - len, len));
+            } else {
+                points.truncate(points_mark);
+            }
+        }
     } else {
         triangulate_into(world, ear, points, ranges, budget);
     }
@@ -179,31 +195,92 @@ pub(crate) fn clip_into(
                 break 'triangles;
             }
             clip_triangle(subject, clipped, &p, &uv, polygon);
-            if subject.len() < 3 {
-                continue;
-            }
-            // The polygon's last vertex index must fit in u16.
-            let (Ok(base), Ok(count)) = (
-                u16::try_from(dst.positions.len()),
-                u16::try_from(subject.len()),
-            ) else {
+            if subject.len() >= 3 && !push_fan(dst, subject) {
                 break 'triangles;
-            };
-            if base.checked_add(count - 1).is_none() {
-                break 'triangles;
-            }
-            for (pt, (u, v)) in subject.iter() {
-                dst.positions.push(*pt);
-                dst.uvs.push(*u);
-                dst.uvs.push(*v);
-            }
-            // `base + count - 1` fits in u16, so none of these sums overflow.
-            for k in 1..count - 1 {
-                dst.triangles
-                    .extend_from_slice(&[base, base + k, base + k + 1]);
             }
         }
     }
+    finish(src, dst)
+}
+
+/// Clip `src`'s triangles to the outside of the convex CCW `polygon`, for an
+/// inverse clip: each triangle keeps the parts that lie outside the polygon,
+/// as convex fragments with interpolated UVs, in `dst` (whose buffers are
+/// cleared and reused). Returns `false`, leaving `dst`'s buffers empty, if
+/// nothing survives.
+///
+/// Each edge of the polygon splits the rest of the triangle: the part outside
+/// the edge is a fragment, and the part inside goes on to the next edge. What
+/// is inside every edge is inside the polygon, and is dropped. Skipped
+/// triangles, the budget, and the `u16` limit work as in [`clip_into`].
+pub(crate) fn clip_outside_into(
+    src: &RenderCommand,
+    polygon: &[Vec2],
+    subject: &mut Vec<ClipVertex>,
+    clipped: &mut Vec<ClipVertex>,
+    outside: &mut Vec<ClipVertex>,
+    dst: &mut RenderCommand,
+    budget: &mut usize,
+) -> bool {
+    dst.positions.clear();
+    dst.uvs.clear();
+    dst.triangles.clear();
+    let m = polygon.len();
+    'triangles: for tri in src.triangles.chunks(3) {
+        let Ok(tri) = <&[u16; 3]>::try_from(tri) else {
+            continue;
+        };
+        let Some(corners) = corners(src, tri) else {
+            continue;
+        };
+        if !spend(budget, m) {
+            break;
+        }
+        subject.clear();
+        subject.extend_from_slice(&corners);
+        for i in 0..m {
+            split_by_edge(subject, clipped, outside, polygon[i], polygon[(i + 1) % m]);
+            if outside.len() >= 3 && !push_fan(dst, outside) {
+                break 'triangles;
+            }
+            mem::swap(subject, clipped);
+            if subject.len() < 3 {
+                break;
+            }
+        }
+    }
+    finish(src, dst)
+}
+
+/// Append convex polygon `polygon` to `dst` as a triangle fan. Returns
+/// `false`, appending nothing, when its last vertex index would not fit in
+/// the `u16` range that triangles index.
+fn push_fan(dst: &mut RenderCommand, polygon: &[ClipVertex]) -> bool {
+    let (Ok(base), Ok(count)) = (
+        u16::try_from(dst.positions.len()),
+        u16::try_from(polygon.len()),
+    ) else {
+        return false;
+    };
+    if base.checked_add(count - 1).is_none() {
+        return false;
+    }
+    for (pt, (u, v)) in polygon {
+        dst.positions.push(*pt);
+        dst.uvs.push(*u);
+        dst.uvs.push(*v);
+    }
+    // `base + count - 1` fits in u16, so none of these sums overflow.
+    for k in 1..count - 1 {
+        dst.triangles
+            .extend_from_slice(&[base, base + k, base + k + 1]);
+    }
+    true
+}
+
+/// Copy `src`'s tint, texture, and blend onto clipped command `dst`. Returns
+/// `false` when no triangle survived the clip.
+fn finish(src: &RenderCommand, dst: &mut RenderCommand) -> bool {
     if dst.triangles.is_empty() {
         return false;
     }
@@ -247,6 +324,40 @@ fn clip_triangle(
         }
         clip_against_edge(subject, clipped, polygon[i], polygon[(i + 1) % m]);
         mem::swap(subject, clipped);
+    }
+}
+
+/// Split a subject polygon along the line of directed edge `e1 -> e2` into
+/// its part on the inside (left) half-plane, in `inside`, and its part on the
+/// outside half-plane, in `outside`. Both are cleared first. Points on the
+/// line count as inside, as in [`clip_against_edge`]. The crossings, with
+/// interpolated UVs, belong to both parts.
+fn split_by_edge(
+    subject: &[ClipVertex],
+    inside: &mut Vec<ClipVertex>,
+    outside: &mut Vec<ClipVertex>,
+    e1: Vec2,
+    e2: Vec2,
+) {
+    inside.clear();
+    outside.clear();
+    let n = subject.len();
+    let edge = e2 - e1;
+    let is_inside = |pt: Vec2| edge.x * (pt.y - e1.y) - edge.y * (pt.x - e1.x) >= 0.0;
+    for i in 0..n {
+        let (cur, cur_uv) = subject[i];
+        let (prev, prev_uv) = subject[(i + n - 1) % n];
+        let cur_in = is_inside(cur);
+        if cur_in != is_inside(prev) {
+            let crossing = edge_intersect(prev, prev_uv, cur, cur_uv, e1, e2);
+            inside.push(crossing);
+            outside.push(crossing);
+        }
+        if cur_in {
+            inside.push((cur, cur_uv));
+        } else {
+            outside.push((cur, cur_uv));
+        }
     }
 }
 
@@ -337,6 +448,43 @@ fn is_convex(poly: &[Vec2]) -> bool {
     true
 }
 
+/// Append the convex hull of `poly` to `points`, counter-clockwise, and
+/// return its vertex count (fewer than three for a degenerate polygon).
+/// Collinear corners are dropped. `order` is a reused buffer for the corners
+/// sorted by position.
+fn convex_hull_into(poly: &[Vec2], order: &mut Vec<usize>, points: &mut Vec<Vec2>) -> usize {
+    order.clear();
+    order.extend(0..poly.len());
+    order.sort_unstable_by(|&a, &b| {
+        let (p, q) = (poly[a], poly[b]);
+        p.x.total_cmp(&q.x).then(p.y.total_cmp(&q.y))
+    });
+    // Add corner `c` to the chain that starts at index `base`, first dropping
+    // the chain's last corners while they do not turn left toward `c`.
+    let add = |points: &mut Vec<Vec2>, base: usize, c: Vec2| {
+        while let [.., a, b] = points[base..] {
+            if (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x) > 0.0 {
+                break;
+            }
+            points.pop();
+        }
+        points.push(c);
+    };
+    let start = points.len();
+    // The lower hull left to right, then the upper hull right to left from
+    // the rightmost corner, which ends the lower hull.
+    for &i in order.iter() {
+        add(points, start, poly[i]);
+    }
+    let base = points.len() - 1;
+    for &i in order.iter().rev().skip(1) {
+        add(points, base, poly[i]);
+    }
+    // The upper hull ends on the first corner again.
+    points.pop();
+    points.len().saturating_sub(start)
+}
+
 /// Ear-clipping triangulation of a simple CCW polygon: each CCW triangle is
 /// appended to `points` / `ranges`. `indices` is the reused working set.
 /// Each corner visited costs one unit of `budget` and each ear test one unit
@@ -408,399 +556,4 @@ fn tri_sign(p: Vec2, a: Vec2, b: Vec2) -> f32 {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::alloc::{GlobalAlloc, Layout, System};
-    use std::cell::Cell;
-    use std::sync::Arc;
-
-    use super::*;
-    use crate::attach::{Attachment, ClippingAttachment, MeshAttachment, MeshVertices};
-    use crate::data::{BlendMode, BoneData, Color, SkeletonData, SlotData};
-    use crate::render::render_with;
-    use crate::skel::Skeleton;
-    use crate::skin::Skin;
-
-    /// Counts this thread's heap allocations (alloc / realloc / alloc_zeroed)
-    /// so a test can assert that a code path performs none. Thread-local, so
-    /// parallel tests do not pollute each other's counts.
-    struct CountingAlloc;
-
-    thread_local! {
-        static ALLOCATIONS: Cell<u64> = const { Cell::new(0) };
-    }
-
-    fn count_one() {
-        // `try_with` so late allocations during thread teardown stay safe.
-        let _ = ALLOCATIONS.try_with(|count| count.set(count.get() + 1));
-    }
-
-    fn allocation_count() -> u64 {
-        ALLOCATIONS.with(Cell::get)
-    }
-
-    // SAFETY: delegates every operation directly to `System`. The counter is a
-    // const-initialized thread-local `Cell`, which does not itself allocate.
-    unsafe impl GlobalAlloc for CountingAlloc {
-        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            count_one();
-            System.alloc(layout)
-        }
-
-        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-            System.dealloc(ptr, layout);
-        }
-
-        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-            count_one();
-            System.realloc(ptr, layout, new_size)
-        }
-
-        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-            count_one();
-            System.alloc_zeroed(layout)
-        }
-    }
-
-    #[global_allocator]
-    static COUNTING: CountingAlloc = CountingAlloc;
-
-    fn square() -> Vec<Vec2> {
-        vec![
-            Vec2::new(0.0, 0.0),
-            Vec2::new(10.0, 0.0),
-            Vec2::new(10.0, 10.0),
-            Vec2::new(0.0, 10.0),
-        ]
-    }
-
-    /// Run [`clip_triangle`] with throwaway buffers, returning the result.
-    fn clip_one(p: &[Vec2; 3], uv: &[(f32, f32); 3], polygon: &[Vec2]) -> Vec<ClipVertex> {
-        let mut subject = Vec::new();
-        let mut clipped = Vec::new();
-        clip_triangle(&mut subject, &mut clipped, p, uv, polygon);
-        subject
-    }
-
-    #[test]
-    fn clip_triangle_inside_is_unchanged() {
-        let p = [
-            Vec2::new(2.0, 2.0),
-            Vec2::new(8.0, 2.0),
-            Vec2::new(2.0, 8.0),
-        ];
-        let uv = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)];
-        assert_eq!(clip_one(&p, &uv, &square()).len(), 3);
-    }
-
-    #[test]
-    fn clip_triangle_crosses_right_edge() {
-        // A=(5,5) inside, B=(15,5) outside (x>10), C=(5,8) inside.
-        let p = [
-            Vec2::new(5.0, 5.0),
-            Vec2::new(15.0, 5.0),
-            Vec2::new(5.0, 8.0),
-        ];
-        let uv = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)];
-        let clipped = clip_one(&p, &uv, &square());
-        // Clipped to four vertices including the two right-edge crossings.
-        assert_eq!(clipped.len(), 4);
-        // The (10,5) crossing lies halfway along A->B, so its UV is (0.5, 0).
-        let at = clipped
-            .iter()
-            .find(|(pt, _)| (pt.x - 10.0).abs() < 1e-3 && (pt.y - 5.0).abs() < 1e-3)
-            .expect("a vertex at (10,5)");
-        let &(_, (u, v)) = at;
-        assert!((u - 0.5).abs() < 1e-3, "u={u}");
-        assert!(v.abs() < 1e-3, "v={v}");
-        // Nothing escapes the clip square.
-        for (pt, _) in &clipped {
-            assert!(pt.x <= 10.0 + 1e-3, "{pt:?}");
-        }
-    }
-
-    /// A command drawing triangle `(1,1) (3,1) (1,3)` with `triangles`.
-    fn small_triangle(triangles: Vec<u16>) -> RenderCommand {
-        RenderCommand {
-            positions: vec![
-                Vec2::new(1.0, 1.0),
-                Vec2::new(3.0, 1.0),
-                Vec2::new(1.0, 3.0),
-            ],
-            uvs: vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
-            triangles,
-            ..Default::default()
-        }
-    }
-
-    /// Run [`clip_into`] against the pieces of `clip` with `budget`.
-    fn clip_command(src: &RenderCommand, clip: Vec<Vec2>, budget: &mut usize) -> RenderCommand {
-        let mut world = clip;
-        let (mut ear, mut points, mut ranges) = (Vec::new(), Vec::new(), Vec::new());
-        assert!(replace_clip(&mut world, &mut ear, &mut points, &mut ranges));
-        let mut dst = RenderCommand::default();
-        let (mut subject, mut clipped) = (Vec::new(), Vec::new());
-        clip_into(
-            src,
-            &points,
-            &ranges,
-            &mut subject,
-            &mut clipped,
-            &mut dst,
-            budget,
-        );
-        dst
-    }
-
-    /// [`clip_command`] with no work limit.
-    fn clip_unbounded(src: &RenderCommand, clip: Vec<Vec2>) -> RenderCommand {
-        let mut unlimited = usize::MAX;
-        clip_command(src, clip, &mut unlimited)
-    }
-
-    // Triangles that index past the command's positions or UVs used to index
-    // out of bounds. They are skipped, and the valid triangle is still clipped.
-    #[test]
-    fn clip_into_skips_triangles_past_the_vertices() {
-        let mut src = small_triangle(vec![0, 1, 2, 0, 1, 3, 9, 9, 9, 0]);
-        let out = clip_unbounded(&src, square());
-        assert_eq!(out.triangles, vec![0, 1, 2]);
-        src.uvs.truncate(5);
-        let out = clip_unbounded(&src, square());
-        assert!(out.triangles.is_empty());
-    }
-
-    // 22,000 copies of one triangle clip to 66,000 vertices, more than u16
-    // indices can address. The index base used to wrap and then overflow.
-    // Output now stops at the last polygon that fits.
-    #[test]
-    fn clip_output_stops_at_the_u16_index_limit() {
-        let src = small_triangle([0, 1, 2].repeat(22_000));
-        let out = clip_unbounded(&src, square());
-        assert!(out.positions.len() <= 1 << 16);
-        assert_eq!(out.positions.len(), 65_535);
-        assert!(out
-            .triangles
-            .iter()
-            .all(|&t| usize::from(t) < out.positions.len()));
-    }
-
-    // NaN in the clip polygon or the drawn triangle must not panic or loop.
-    #[test]
-    fn nan_clip_geometry_does_not_panic() {
-        let nan = Vec2::new(f32::NAN, 0.0);
-        let mut concave_nan = vec![
-            Vec2::ZERO,
-            Vec2::new(10.0, 0.0),
-            nan,
-            Vec2::new(4.0, 4.0),
-            Vec2::new(0.0, 10.0),
-        ];
-        let (mut ear, mut points, mut ranges) = (Vec::new(), Vec::new(), Vec::new());
-        let _ = replace_clip(&mut concave_nan, &mut ear, &mut points, &mut ranges);
-        let mut src = small_triangle(vec![0, 1, 2]);
-        src.positions[1] = nan;
-        let _ = clip_unbounded(&src, square());
-        let mut all_nan = vec![nan; 5];
-        let _ = replace_clip(&mut all_nan, &mut ear, &mut points, &mut ranges);
-    }
-
-    // A concave clip polygon costs its vertex count squared to decompose, and
-    // clipping costs triangles times pieces. Both stop when the frame's budget
-    // runs out, keeping what was done.
-    #[test]
-    fn clip_work_stops_when_the_budget_runs_out() {
-        let comb: Vec<Vec2> = (0..400)
-            .map(|i: u16| {
-                let x = f32::from(i % 200);
-                if i < 200 {
-                    Vec2::new(x, if i.is_multiple_of(2) { 0.0 } else { 10.0 })
-                } else {
-                    Vec2::new(199.0 - x, -10.0)
-                }
-            })
-            .collect();
-        let (mut ear, mut points, mut ranges) = (Vec::new(), Vec::new(), Vec::new());
-        let mut full = comb.clone();
-        assert!(replace_clip(&mut full, &mut ear, &mut points, &mut ranges));
-        let pieces = ranges.len();
-        let mut budget = 5_000;
-        let mut partial = comb;
-        assert!(replace_clip_within(
-            &mut partial,
-            &mut ear,
-            &mut points,
-            &mut ranges,
-            &mut budget
-        ));
-        assert_eq!(budget, 0);
-        assert!(ranges.len() < pieces);
-
-        let src = small_triangle([0, 1, 2].repeat(100));
-        let mut budget = 4 * 10;
-        let out = clip_command(&src, square(), &mut budget);
-        assert_eq!(out.triangles.len(), 10 * 3);
-        assert_eq!(budget, 0);
-    }
-
-    #[test]
-    fn convex_clip_stays_one_piece() {
-        let mut world = square();
-        assert!(is_convex(&world));
-        let (mut ear, mut points, mut ranges) = (Vec::new(), Vec::new(), Vec::new());
-        assert!(replace_clip(&mut world, &mut ear, &mut points, &mut ranges));
-        assert_eq!(ranges, vec![(0, 4)]);
-        assert_eq!(points.len(), 4);
-    }
-
-    #[test]
-    fn degenerate_clip_keeps_the_previous_pieces() {
-        let (mut ear, mut points, mut ranges) = (Vec::new(), Vec::new(), Vec::new());
-        assert!(replace_clip(
-            &mut square(),
-            &mut ear,
-            &mut points,
-            &mut ranges
-        ));
-        // A two-vertex "polygon" yields nothing: the square stays active.
-        let mut line = vec![Vec2::ZERO, Vec2::new(5.0, 0.0)];
-        assert!(!replace_clip(&mut line, &mut ear, &mut points, &mut ranges));
-        assert_eq!(ranges, vec![(0, 4)]);
-        // A real triangle replaces it, rebased to the buffer's start.
-        let mut tri = vec![Vec2::ZERO, Vec2::new(5.0, 0.0), Vec2::new(0.0, 5.0)];
-        assert!(replace_clip(&mut tri, &mut ear, &mut points, &mut ranges));
-        assert_eq!(ranges, vec![(0, 3)]);
-        assert_eq!(points.len(), 3);
-    }
-
-    #[test]
-    fn concave_clip_decomposes_and_excludes_the_notch() {
-        // L-shape (concave). The top-right region (x>4, y>4) is outside it.
-        let mut l = vec![
-            Vec2::new(0.0, 0.0),
-            Vec2::new(10.0, 0.0),
-            Vec2::new(10.0, 4.0),
-            Vec2::new(4.0, 4.0),
-            Vec2::new(4.0, 10.0),
-            Vec2::new(0.0, 10.0),
-        ];
-        assert!(!is_convex(&l));
-        let (mut ear, mut points, mut ranges) = (Vec::new(), Vec::new(), Vec::new());
-        assert!(replace_clip(&mut l, &mut ear, &mut points, &mut ranges));
-        assert!(
-            ranges.len() >= 2,
-            "concave clip should decompose: {}",
-            ranges.len()
-        );
-        let uv = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)];
-        let pieces: Vec<&[Vec2]> = ranges
-            .iter()
-            .map(|&(start, len)| &points[start..start + len])
-            .collect();
-        // A triangle entirely in the notch survives against no piece.
-        let notch = [
-            Vec2::new(6.0, 6.0),
-            Vec2::new(9.0, 6.0),
-            Vec2::new(6.0, 9.0),
-        ];
-        let hits = pieces
-            .iter()
-            .filter(|poly| clip_one(&notch, &uv, poly).len() >= 3)
-            .count();
-        assert_eq!(hits, 0, "notch triangle must be fully clipped");
-        // A triangle inside the L survives against at least one piece.
-        let inside = [
-            Vec2::new(1.0, 1.0),
-            Vec2::new(3.0, 1.0),
-            Vec2::new(1.0, 3.0),
-        ];
-        let hits2 = pieces
-            .iter()
-            .filter(|poly| clip_one(&inside, &uv, poly).len() >= 3)
-            .count();
-        assert!(hits2 >= 1, "inside triangle must survive");
-    }
-
-    /// A skeleton with a concave (L-shaped) clip on slot 0 masking a mesh
-    /// triangle on slot 1 that spills past it: every clip-path branch runs
-    /// (ear-clipping decomposition, multi-piece Sutherland-Hodgman clipping).
-    fn clipped_skeleton() -> Skeleton {
-        let mut skin = Skin::new("default");
-        skin.set(
-            0,
-            "clip",
-            Attachment::Clipping(ClippingAttachment::new(
-                "clip",
-                "m",
-                MeshVertices::Unweighted(vec![
-                    0.0, 0.0, 10.0, 0.0, 10.0, 4.0, 4.0, 4.0, 4.0, 10.0, 0.0, 10.0,
-                ]),
-                6,
-            )),
-        );
-        skin.set(
-            1,
-            "tri",
-            Attachment::Mesh(MeshAttachment::new(
-                "tri",
-                "tri",
-                MeshVertices::Unweighted(vec![1.0, 1.0, 30.0, 1.0, 1.0, 30.0]),
-                vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
-                vec![0, 1, 2],
-            )),
-        );
-        let data = SkeletonData {
-            bones: vec![BoneData {
-                index: 0,
-                name: "root".into(),
-                ..Default::default()
-            }],
-            slots: vec![
-                SlotData {
-                    index: 0,
-                    name: "clipslot".into(),
-                    bone: 0,
-                    color: Color::WHITE,
-                    dark_color: None,
-                    attachment: Some("clip".into()),
-                    blend: BlendMode::Normal,
-                },
-                SlotData {
-                    index: 1,
-                    name: "m".into(),
-                    bone: 0,
-                    color: Color::WHITE,
-                    dark_color: None,
-                    attachment: Some("tri".into()),
-                    blend: BlendMode::Normal,
-                },
-            ],
-            default_skin: skin,
-            ..Default::default()
-        };
-        let mut sk = Skeleton::new(Arc::new(data));
-        sk.update_world_transform();
-        sk
-    }
-
-    // The zero-allocation guarantee: after warm-up frames have grown every
-    // scratch buffer, rendering the clipped skeleton again must not touch the
-    // heap at all (the counting allocator tallies this thread's allocations).
-    #[test]
-    fn steady_state_clipped_render_allocates_nothing() {
-        let sk = clipped_skeleton();
-        let mut scratch = RenderScratch::new();
-        let first = render_with(&sk, &mut scratch).len();
-        assert!(first > 0, "the clipped mesh must draw");
-        let _ = render_with(&sk, &mut scratch);
-
-        let before = allocation_count();
-        let commands = render_with(&sk, &mut scratch);
-        let after = allocation_count();
-        assert_eq!(commands.len(), first);
-        assert_eq!(
-            after - before,
-            0,
-            "steady-state clipped rendering must not allocate"
-        );
-    }
-}
+mod tests;

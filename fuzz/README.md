@@ -11,9 +11,10 @@ panics, hangs, and runaway memory use on malformed skeletons and atlases.
 | `pose` | control bytes, a skeleton, an atlas | loading, `bind_atlas`, skins, several tracks with queued and crossfaded animations, physics time, world transforms, and `render_with` over several frames |
 
 The `pose` input starts with a 35-byte header: a flags byte (bit 0 reads the payload as
-JSON instead of binary, bit 1 picks a skin, bit 7 makes times and scales raw `f32` bits),
-the payload length as a little-endian `u16`, and 32 control bytes. The skeleton payload
-follows, and the atlas text is whatever comes after it. See `fuzz_targets/pose.rs`.
+JSON instead of binary, bit 1 picks a skin, bit 2 switches skins mid-play, bit 7 makes
+times and scales raw `f32` bits), the payload length as a little-endian `u16`, and 32
+control bytes. The skeleton payload follows, and the atlas text is whatever comes after
+it. See `fuzz_targets/pose.rs`.
 
 ## Running
 
@@ -34,7 +35,7 @@ a `.skel` for `binary`, a `.json` for `json`, and an `.atlas` for `atlas`.
 On Windows, run it in Docker:
 
 ```sh
-docker run --rm -it -v "%cd%:/src" rust:1-bookworm bash
+docker run --rm -it -v "%cd%:/src" rust:1-trixie bash
 rustup toolchain install nightly --profile minimal
 cargo +nightly install cargo-fuzz
 cd /src/fuzz && cargo +nightly fuzz run -O -a binary

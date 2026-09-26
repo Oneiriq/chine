@@ -8,9 +8,9 @@
 //!
 //! Covered: every Spine 4.3 timeline plus multi-track playback with crossfade
 //! mixing and a queue. The timelines are bone rotate / translate / scale / shear
-//! and single-axis variants, IK / transform / path / physics / slider mixes,
-//! slot color / alpha / two-color / attachment / draw-order, deform, events, and
-//! sequences.
+//! and single-axis variants, bone inherit, IK / transform / path / physics /
+//! slider mixes, slot color / alpha / two-color / attachment / draw-order,
+//! draw order folders, deform, events, and sequences.
 
 mod channels;
 mod curve;
@@ -19,12 +19,15 @@ mod robustness;
 mod state;
 mod timeline;
 
+#[cfg(feature = "json")]
+pub(crate) use channels::Fallback;
 pub(crate) use channels::{PATH_MIX, PATH_POSITION, PATH_SPACING, TRANSFORM_MIX};
 pub use state::{AnimationState, TrackEntry};
 pub(crate) use timeline::{
-    compute_draw_order, AttachmentTimeline, BoneAxis, BoneTimeline, ConstraintTimeline,
-    DeformTimeline, DrawOrderTimeline, EventTimeline, PhysicsProperty, PhysicsResetTimeline,
-    SequenceTimeline, Timeline, GLOBAL_PHYSICS,
+    compute_draw_order, sort_draw_order_moves, AttachmentTarget, AttachmentTimeline, BoneAxis,
+    BoneTimeline, ConstraintTimeline, DeformTimeline, DrawOrderFolderTimeline, DrawOrderTimeline,
+    EventTimeline, InheritTimeline, PhysicsProperty, PhysicsResetTimeline, SequenceTimeline,
+    Timeline, GLOBAL_PHYSICS,
 };
 
 use crate::skel::Skeleton;
@@ -71,10 +74,22 @@ impl Animation {
         self.duration
     }
 
+    /// The bones this animation's timelines change, once each.
+    pub(crate) fn bones(&self) -> Vec<usize> {
+        let mut bones: Vec<usize> = self.timelines.iter().filter_map(Timeline::bone).collect();
+        bones.sort_unstable();
+        bones.dedup();
+        bones
+    }
+
     /// Apply every timeline to `skeleton` over the window `(last_time, time]`
     /// (seconds), mixing with weight `alpha` from `from`. `add` selects additive
     /// blending. `last_time` is used only by the physics reset and event
     /// timelines. Timeline indices out of range for `skeleton` are skipped.
+    ///
+    /// Fired events are added to [`Skeleton::events`]. A host that calls this
+    /// directly calls [`Skeleton::clear_events`] first, as
+    /// [`AnimationState::apply`] does, to keep only this call's events.
     pub fn apply(
         &self,
         skeleton: &mut Skeleton,

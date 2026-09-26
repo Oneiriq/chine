@@ -16,13 +16,14 @@ use std::sync::Arc;
 use glam::Vec2;
 
 use crate::anim::{
-    compute_draw_order, Animation, AttachmentTimeline, BoneAxis, BoneTimeline, ConstraintTimeline,
-    DeformTimeline, DrawOrderTimeline, EventTimeline, PhysicsProperty, PhysicsResetTimeline,
+    compute_draw_order, sort_draw_order_moves, Animation, AttachmentTarget, AttachmentTimeline,
+    BoneAxis, BoneTimeline, ConstraintTimeline, DeformTimeline, DrawOrderFolderTimeline,
+    DrawOrderTimeline, EventTimeline, InheritTimeline, PhysicsProperty, PhysicsResetTimeline,
     SequenceTimeline, Timeline, PATH_MIX, PATH_POSITION, PATH_SPACING, TRANSFORM_MIX,
 };
 use crate::attach::{
-    Attachment, BoundingBoxAttachment, ClippingAttachment, LinkedMeshAttachment, MeshAttachment,
-    MeshVertices, PathAttachment, PointAttachment, RegionAttachment, Sequence,
+    Attachment, AttachmentKey, BoundingBoxAttachment, ClippingAttachment, LinkedMeshAttachment,
+    MeshAttachment, MeshVertices, PathAttachment, PointAttachment, RegionAttachment, Sequence,
 };
 use crate::constraint::ik::IkConstraintData;
 use crate::constraint::path::{PathConstraintData, PositionMode, RotateMode, SpacingMode};
@@ -34,7 +35,7 @@ use crate::constraint::transform::{
 use crate::constraint::ScaleYMode;
 use crate::data::{BlendMode, BoneData, Color, Inherit, SkeletonData, SlotData};
 use crate::event::{Event, EventData};
-use crate::skin::Skin;
+use crate::skin::{Skin, SkinConstraint};
 
 /// The Spine `major.minor` release whose binary layout this loader reads.
 ///
@@ -154,12 +155,10 @@ fn inherit_from(ordinal: usize) -> Inherit {
 /// The full section sequence is read: header, bones, slots, the IK / transform
 /// / path / physics / slider constraints, skins (including sequence
 /// attachments), events, and animations. The timeline groups decoded are bone
-/// (rotate / translate / scale / shear), slot (attachment, color, two-color,
-/// alpha), deform, draw order, event, the IK / transform / path / physics
-/// constraint timelines, and the slider and sequence timelines. Bone inherit
-/// timelines are not decoded and report
-/// [`BinaryError::UnknownTimelineType`], and draw order folder timelines are
-/// read past without being kept.
+/// (rotate / translate / scale / shear / inherit), slot (attachment, color,
+/// two-color, alpha), deform, draw order, draw order folder, event, the IK /
+/// transform / path / physics constraint timelines, and the slider and
+/// sequence timelines.
 ///
 /// Every index the file stores (bone parents, slot bones, constraint bones and
 /// targets, timeline targets, skin slots, weighted vertex bones, mesh
@@ -195,9 +194,10 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
     }
     let x = r.float();
     let y = r.float();
-    let _width = r.float();
-    let _height = r.float();
+    let width = r.float();
+    let height = r.float();
     data.position = Vec2::new(x, y);
+    data.size = Vec2::new(width, height);
     data.reference_scale = r.float();
     let nonessential = r.bool();
     if nonessential {
@@ -229,9 +229,10 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
         let scale_y = r.float();
         let shear_x = r.float();
         let shear_y = r.float();
-        let length = r.float();
+        // Spine 4.3 writes the inherit mode before the length.
         let inherit = inherit_from(r.byte() as usize);
-        let _skin_required = r.bool();
+        let length = r.float();
+        let skin_required = r.bool();
         if nonessential {
             let _color = r.u32();
             let _icon = r.string();
@@ -250,6 +251,7 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
             scale: Vec2::new(scale_x, scale_y),
             shear: Vec2::new(shear_x, shear_y),
             inherit,
+            skin_required,
         });
     }
     // Spine writes every parent before its children, so a parent at or after
@@ -326,17 +328,43 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
     status(&r)?;
 
     // Skins: the default skin, then named skins. Attachments resolve their
-    // names and paths through the string table.
-    data.default_skin = read_skin(&mut r, &strings, &data, true, nonessential);
+    // names and paths through the string table, and skins and constraint
+    // timelines index the single constraint list.
+    let constraints = constraint_list(&data);
+    let mut links = Vec::new();
+    let default_skin = read_skin(
+        &mut r,
+        &strings,
+        &data,
+        &constraints,
+        true,
+        nonessential,
+        &mut links,
+    );
+    let has_default = default_skin.is_some();
+    data.default_skin = default_skin.unwrap_or_else(|| Skin::new("default"));
     let skin_count = r.count();
     for _ in 0..skin_count {
-        let skin = read_skin(&mut r, &strings, &data, false, nonessential);
-        data.skins.push(skin);
+        let skin = read_skin(
+            &mut r,
+            &strings,
+            &data,
+            &constraints,
+            false,
+            nonessential,
+            &mut links,
+        );
+        data.skins.extend(skin);
     }
+    let skins = SkinList {
+        has_default,
+        named: data.skins.len(),
+    };
+    name_link_skins(&mut r, &mut data, skins, links);
     status(&r)?;
 
-    // Resolve linked meshes before animations so deform timelines bind to the
-    // resolved (parent-shared) geometry rather than unresolved links.
+    // Resolve linked meshes before animations, so deform timelines bind to
+    // the geometry each link shares with its source.
     crate::link::resolve_linked_meshes(&mut data);
 
     // Events: setup-pose values for named animation events.
@@ -363,11 +391,19 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
         });
     }
 
-    // Animations.
+    // Animations. Their constraint timelines index the single constraint list.
     let animation_count = r.count();
     for _ in 0..animation_count {
         let aname = r.string().unwrap_or_default();
-        let anim = read_animation(&mut r, aname, &data, &strings, nonessential);
+        let anim = read_animation(
+            &mut r,
+            aname,
+            &data,
+            &constraints,
+            skins,
+            &strings,
+            nonessential,
+        );
         data.animations.push(Arc::new(anim));
         status(&r)?;
     }
@@ -429,6 +465,7 @@ fn parse_ik(r: &mut BinaryReader, name: String, order: usize) -> IkConstraintDat
     } else {
         ScaleYMode::None
     };
+    // Bit 32 marks a non-zero mix and bit 64 one that is not 1.
     let mix = if flags & 32 != 0 {
         if flags & 64 != 0 {
             r.float()
@@ -436,12 +473,13 @@ fn parse_ik(r: &mut BinaryReader, name: String, order: usize) -> IkConstraintDat
             1.0
         }
     } else {
-        1.0
+        0.0
     };
     let softness = if flags & 128 != 0 { r.float() } else { 0.0 };
     IkConstraintData {
         name,
         order,
+        skin_required: flags & 1 != 0,
         bones,
         target,
         scale_y_mode,
@@ -480,9 +518,14 @@ fn parse_slider(
             data.time = value;
         }
     }
-    if flags & 16 != 0 {
-        data.mix = if flags & 32 != 0 { r.float() } else { 1.0 };
-    }
+    // Bit 16 marks a non-zero mix and bit 32 one that is not 1.
+    data.mix = if flags & 16 == 0 {
+        0.0
+    } else if flags & 32 != 0 {
+        r.float()
+    } else {
+        1.0
+    };
     if flags & 64 != 0 {
         data.local = flags & 128 != 0;
         data.bone = Some(r.var_usize());
@@ -536,6 +579,7 @@ fn parse_path(r: &mut BinaryReader, name: String, order: usize) -> PathConstrain
     PathConstraintData {
         name,
         order,
+        skin_required: flags & 1 != 0,
         bones,
         slot,
         position_mode,
@@ -584,6 +628,7 @@ fn parse_physics(r: &mut BinaryReader, name: String, order: usize) -> PhysicsCon
     PhysicsConstraintData {
         name,
         order,
+        skin_required: flags & 1 != 0,
         bone,
         x,
         y,
@@ -638,7 +683,7 @@ fn to_prop_byte(b: u8) -> Option<ToProp> {
 
 /// Parse one transform constraint (Spine 4.3 property-mapping layout). The flags
 /// byte's high bits hold the source-property count. Offsets default to 0 and
-/// mixes to 1 when their flag is clear. chine loads at scale 1.
+/// mixes to 0 when their flag is clear. chine loads at scale 1.
 fn parse_transform(r: &mut BinaryReader, name: String, order: usize) -> TransformConstraintData {
     let bone_count = r.count();
     let bones = (0..bone_count).map(|_| r.var_usize()).collect();
@@ -689,6 +734,7 @@ fn parse_transform(r: &mut BinaryReader, name: String, order: usize) -> Transfor
     TransformConstraintData {
         name,
         order,
+        skin_required: flags & 1 != 0,
         bones,
         source,
         offsets,
@@ -697,12 +743,12 @@ fn parse_transform(r: &mut BinaryReader, name: String, order: usize) -> Transfor
         additive,
         clamp,
         properties,
-        mix_rotate: if mix_flags & 1 != 0 { r.float() } else { 1.0 },
-        mix_x: if mix_flags & 2 != 0 { r.float() } else { 1.0 },
-        mix_y: if mix_flags & 4 != 0 { r.float() } else { 1.0 },
-        mix_scale_x: if mix_flags & 8 != 0 { r.float() } else { 1.0 },
-        mix_scale_y: if mix_flags & 16 != 0 { r.float() } else { 1.0 },
-        mix_shear_y: if mix_flags & 32 != 0 { r.float() } else { 1.0 },
+        mix_rotate: if mix_flags & 1 != 0 { r.float() } else { 0.0 },
+        mix_x: if mix_flags & 2 != 0 { r.float() } else { 0.0 },
+        mix_y: if mix_flags & 4 != 0 { r.float() } else { 0.0 },
+        mix_scale_x: if mix_flags & 8 != 0 { r.float() } else { 0.0 },
+        mix_scale_y: if mix_flags & 16 != 0 { r.float() } else { 0.0 },
+        mix_shear_y: if mix_flags & 32 != 0 { r.float() } else { 0.0 },
     }
 }
 
@@ -751,11 +797,15 @@ mod reader;
 pub use reader::BinaryReader;
 
 mod skins;
-use skins::read_skin;
+use skins::{name_link_skins, read_skin, SkinList};
 
 mod timelines;
-use timelines::read_animation;
+use timelines::{constraint_list, read_animation, ConstraintKind};
 
+#[cfg(all(test, feature = "json"))]
+mod examples;
+#[cfg(test)]
+mod layout;
 #[cfg(test)]
 mod robustness;
 #[cfg(test)]

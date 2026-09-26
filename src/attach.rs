@@ -4,8 +4,11 @@
 //! textured mesh whose vertices may be weighted across several bones) are the
 //! renderable types. [`PathAttachment`] holds the Bezier control points that
 //! path constraints follow. Bounding-box and point attachments are exposed as
-//! geometry/transform data. Linked meshes resolve to their parent's geometry at
-//! load time. Clipping attachments mask the slots they cover with a polygon.
+//! geometry/transform data. Linked meshes resolve to their source mesh's
+//! geometry at load time. Clipping attachments mask the slots they cover with
+//! a polygon.
+
+use std::sync::Arc;
 
 use glam::Vec2;
 
@@ -39,7 +42,7 @@ pub enum Attachment {
     BoundingBox(BoundingBoxAttachment),
     /// A point with a position and rotation on a bone (not rendered).
     Point(PointAttachment),
-    /// A mesh that borrows a parent mesh's geometry (resolved to `Mesh` at load).
+    /// A mesh that borrows a source mesh's geometry (resolved to `Mesh` at load).
     LinkedMesh(LinkedMeshAttachment),
     /// A polygon that masks the slots it covers (not rendered itself).
     Clipping(ClippingAttachment),
@@ -157,7 +160,7 @@ impl Sequence {
 /// A textured quad attached to a slot's bone.
 #[derive(Debug, Clone)]
 pub struct RegionAttachment {
-    /// Attachment name (the key within a skin).
+    /// Attachment name, which can differ from its key in the skin.
     pub name: String,
     /// Atlas region name this draws (`AtlasRegion::name`).
     pub path: String,
@@ -303,10 +306,77 @@ pub enum MeshVertices {
     },
 }
 
+impl MeshVertices {
+    /// The length of a deform vertex array for these vertices: `2 *` the vertex
+    /// count when unweighted, or `2 *` the total influence count when weighted.
+    pub(crate) fn deform_len(&self) -> usize {
+        match self {
+            MeshVertices::Unweighted(v) => v.len(),
+            MeshVertices::Weighted { vertices, .. } => (vertices.len() / 3) * 2,
+        }
+    }
+
+    /// The unweighted setup positions, or `None` when weighted.
+    pub(crate) fn unweighted(&self) -> Option<&[f32]> {
+        match self {
+            MeshVertices::Unweighted(v) => Some(v),
+            MeshVertices::Weighted { .. } => None,
+        }
+    }
+
+    /// The bones weighted vertices are bound to, once per influence (none
+    /// when unweighted). A count past the layout ends the walk.
+    pub(crate) fn weighted_bones(&self) -> Vec<usize> {
+        let MeshVertices::Weighted { bones, .. } = self else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let mut i = 0;
+        while let Some(&count) = bones.get(i) {
+            let from = i + 1;
+            let Some(influences) = from.checked_add(count).and_then(|to| bones.get(from..to))
+            else {
+                break;
+            };
+            out.extend_from_slice(influences);
+            i = from + count;
+        }
+        out
+    }
+}
+
+impl Attachment {
+    /// The bind-pose vertices of a vertex attachment (a mesh, path, bounding
+    /// box, or clipping polygon), which deform timelines offset. `None` for
+    /// the other kinds.
+    pub(crate) fn deform_vertices(&self) -> Option<&MeshVertices> {
+        match self {
+            Attachment::Mesh(m) => Some(&m.vertices),
+            Attachment::Path(p) => Some(&p.vertices),
+            Attachment::BoundingBox(b) => Some(&b.vertices),
+            Attachment::Clipping(c) => Some(&c.vertices),
+            Attachment::Region(_) | Attachment::Point(_) | Attachment::LinkedMesh(_) => None,
+        }
+    }
+}
+
+/// Where an attachment lives: the skin that holds it (`None` for the default
+/// skin), its slot, and its name in that slot. Deform and sequence timelines
+/// name the attachment they drive this way.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct AttachmentKey {
+    /// The named skin holding the attachment, or `None` for the default skin.
+    pub skin: Option<String>,
+    /// The slot index.
+    pub slot: usize,
+    /// The attachment's name in the slot (its key within the skin).
+    pub name: String,
+}
+
 /// A textured mesh attachment.
 #[derive(Debug, Clone)]
 pub struct MeshAttachment {
-    /// Attachment name (the key within a skin).
+    /// Attachment name, which can differ from its key in the skin.
     pub name: String,
     /// Atlas region name this draws.
     pub path: String,
@@ -322,9 +392,14 @@ pub struct MeshAttachment {
     vertices: MeshVertices,
     /// Atlas page index (texture), set when the atlas is bound.
     pub page: usize,
-    /// Skin whose deform timelines drive this mesh (`None` = default skin). For
-    /// an inheriting linked mesh this points at the parent's skin.
-    pub deform_skin: Option<String>,
+    /// The mesh whose deform and sequence timelines drive this one. `None`
+    /// means the mesh's own timelines. A linked mesh that inherits its source
+    /// mesh's timelines names the source here.
+    pub timeline_source: Option<AttachmentKey>,
+    /// Other slots whose attachments this mesh's deform and sequence timelines
+    /// also drive: slots that show a linked mesh inheriting this mesh's
+    /// timelines.
+    pub timeline_slots: Arc<[usize]>,
     /// The animated sequence this attachment cycles through, if any.
     pub sequence: Option<Sequence>,
 }
@@ -348,7 +423,8 @@ impl MeshAttachment {
             hull_length: 0,
             vertices,
             page: 0,
-            deform_skin: None,
+            timeline_source: None,
+            timeline_slots: Vec::new().into(),
             sequence: None,
         }
     }
@@ -397,10 +473,7 @@ impl MeshAttachment {
     /// a weighted mesh. Used to build deform timelines.
     #[must_use]
     pub fn setup_vertices(&self) -> Option<&[f32]> {
-        match &self.vertices {
-            MeshVertices::Unweighted(v) => Some(v),
-            MeshVertices::Weighted { .. } => None,
-        }
+        self.vertices.unweighted()
     }
 
     /// The number of values in this mesh's geometry arrays (UVs, triangles, and
@@ -422,10 +495,7 @@ impl MeshAttachment {
     /// an unweighted mesh, or `2 *` the total influence count for a weighted one.
     #[must_use]
     pub fn deform_len(&self) -> usize {
-        match &self.vertices {
-            MeshVertices::Unweighted(v) => v.len(),
-            MeshVertices::Weighted { vertices, .. } => (vertices.len() / 3) * 2,
-        }
+        self.vertices.deform_len()
     }
 
     /// Remap the mesh's `[0, 1]` region-relative UVs into page space using the
@@ -552,7 +622,7 @@ fn compute_vertices_into(
 /// geometry.
 #[derive(Debug, Clone)]
 pub struct PathAttachment {
-    /// Attachment name (the key within a skin).
+    /// Attachment name, which can differ from its key in the skin.
     pub name: String,
     /// Whether the start and end knots connect.
     pub closed: bool,
@@ -596,7 +666,24 @@ impl PathAttachment {
     /// Compute world-space positions for every control point.
     #[must_use]
     pub fn compute_world_vertices(&self, skeleton: &Skeleton, slot_bone: usize) -> Vec<Vec2> {
-        compute_vertices(&self.vertices, self.vertex_count, skeleton, slot_bone, &[])
+        self.compute_deformed_vertices(skeleton, slot_bone, &[])
+    }
+
+    /// [`Self::compute_world_vertices`] with a deform timeline's `deform`
+    /// applied, as a mesh applies one (empty for none).
+    pub(crate) fn compute_deformed_vertices(
+        &self,
+        skeleton: &Skeleton,
+        slot_bone: usize,
+        deform: &[f32],
+    ) -> Vec<Vec2> {
+        compute_vertices(
+            &self.vertices,
+            self.vertex_count,
+            skeleton,
+            slot_bone,
+            deform,
+        )
     }
 }
 
@@ -604,7 +691,7 @@ impl PathAttachment {
 /// collision/hit queries. It is not rendered. The host transforms it to world space.
 #[derive(Debug, Clone)]
 pub struct BoundingBoxAttachment {
-    /// Attachment name (the key within a skin).
+    /// Attachment name, which can differ from its key in the skin.
     pub name: String,
     /// Polygon vertices (bind pose).
     vertices: MeshVertices,
@@ -640,7 +727,7 @@ impl BoundingBoxAttachment {
 /// effects, aiming, and similar). Not rendered.
 #[derive(Debug, Clone)]
 pub struct PointAttachment {
-    /// Attachment name (the key within a skin).
+    /// Attachment name, which can differ from its key in the skin.
     pub name: String,
     /// Local x offset from the bone.
     pub x: f32,
@@ -681,69 +768,98 @@ impl PointAttachment {
     }
 }
 
-/// A linked mesh: a mesh that borrows its geometry from a parent mesh in some
-/// skin, supplying only its own texture path and tint. Resolved to a plain
-/// [`MeshAttachment`] at load time, once every skin is parsed.
+/// A linked mesh: a mesh that borrows its geometry from a source mesh in some
+/// skin and slot, supplying only its own texture path, tint, and sequence.
+/// Resolved to a plain [`MeshAttachment`] at load time, once every skin is
+/// parsed.
 #[derive(Debug, Clone)]
 pub struct LinkedMeshAttachment {
-    /// Attachment name (the key within a skin).
+    /// Attachment name, which can differ from its key in the skin.
     pub name: String,
     /// Atlas region name this draws.
     pub path: String,
-    /// Skin holding the parent mesh, or `None` for the linked mesh's own skin.
+    /// Skin holding the source mesh, or `None` for the default skin.
     pub skin: Option<String>,
-    /// Parent attachment name (within the linked mesh's slot).
-    pub parent: String,
+    /// Slot holding the source mesh, or `None` for the linked mesh's own slot.
+    pub source_slot: Option<usize>,
+    /// The source mesh's name in its slot.
+    pub source: String,
     /// Tint color.
     pub color: Color,
-    /// Whether this link shares its parent's deform timelines (Spine `deform`).
-    pub inherit_deform: bool,
+    /// Whether the source mesh's deform and sequence timelines also drive
+    /// this mesh (Spine `timelines`).
+    pub inherit_timelines: bool,
+    /// The linked mesh's own animated sequence, if any.
+    pub sequence: Option<Sequence>,
 }
 
 impl LinkedMeshAttachment {
-    /// A linked-mesh reference from its parts.
+    /// A linked-mesh reference from its parts, with its source in its own
+    /// slot and no sequence.
     #[must_use]
     pub fn new(
         name: impl Into<String>,
         path: impl Into<String>,
         skin: Option<String>,
-        parent: impl Into<String>,
+        source: impl Into<String>,
         color: Color,
-        inherit_deform: bool,
+        inherit_timelines: bool,
     ) -> Self {
         Self {
             name: name.into(),
             path: path.into(),
             skin,
-            parent: parent.into(),
+            source_slot: None,
+            source: source.into(),
             color,
-            inherit_deform,
+            inherit_timelines,
+            sequence: None,
         }
     }
 
-    /// Resolve to a concrete mesh by borrowing `parent`'s geometry (vertices,
-    /// UVs, triangles, hull) while keeping this link's own name, path, and tint.
-    /// The page is reset so atlas binding re-resolves it against this path.
+    /// Resolve to a concrete mesh by borrowing `source`'s geometry (vertices,
+    /// UVs, triangles, hull) while keeping this link's own name, path, tint,
+    /// and sequence. `source_key` is where the source lives: an inheriting
+    /// link takes its timelines from there. The page is reset so atlas
+    /// binding re-resolves it against this path.
     #[must_use]
-    pub fn resolve(&self, parent: &MeshAttachment) -> MeshAttachment {
-        let mut m = parent.clone();
+    pub fn resolve(&self, source: &MeshAttachment, source_key: &AttachmentKey) -> MeshAttachment {
+        let mut m = source.clone();
         m.name = self.name.clone();
         m.path = self.path.clone();
         m.color = self.color;
+        m.sequence = self.sequence.clone();
         m.page = 0;
+        m.timeline_source = if self.inherit_timelines {
+            Some(
+                source
+                    .timeline_source
+                    .clone()
+                    .unwrap_or_else(|| source_key.clone()),
+            )
+        } else {
+            None
+        };
+        m.timeline_slots = Vec::new().into();
         m
     }
 }
 
 /// A clipping attachment: a polygon that masks the slots from its own slot up to
-/// and including `end_slot` (in draw order). Convex polygons clip exactly.
-/// Concave polygons clip against their convex span (a known simplification).
+/// and including `end_slot` (in draw order). A concave polygon is split into
+/// convex pieces, so it clips exactly, unless `convex` clips to its convex
+/// hull instead.
 #[derive(Debug, Clone)]
 pub struct ClippingAttachment {
-    /// Attachment name (the key within a skin).
+    /// Attachment name, which can differ from its key in the skin.
     pub name: String,
     /// Name of the slot at which clipping ends (resolved at render time).
     pub end_slot: String,
+    /// Whether to clip to the polygon's convex hull, even when it is concave.
+    pub convex: bool,
+    /// Whether to keep what lies outside the polygon instead of inside it. An
+    /// inverse clip always uses the convex hull.
+    pub inverse: bool,
     /// Clip polygon vertices (bind pose).
     vertices: MeshVertices,
     /// Number of polygon vertices.
@@ -762,6 +878,8 @@ impl ClippingAttachment {
         Self {
             name: name.into(),
             end_slot: end_slot.into(),
+            convex: false,
+            inverse: false,
             vertices,
             vertex_count,
         }
@@ -787,12 +905,24 @@ impl ClippingAttachment {
         slot_bone: usize,
         out: &mut Vec<Vec2>,
     ) {
+        self.compute_deformed_vertices_into(skeleton, slot_bone, &[], out);
+    }
+
+    /// [`Self::compute_world_vertices_into`] with a deform timeline's
+    /// `deform` applied, as a mesh applies one (empty for none).
+    pub(crate) fn compute_deformed_vertices_into(
+        &self,
+        skeleton: &Skeleton,
+        slot_bone: usize,
+        deform: &[f32],
+        out: &mut Vec<Vec2>,
+    ) {
         compute_vertices_into(
             &self.vertices,
             self.vertex_count,
             skeleton,
             slot_bone,
-            &[],
+            deform,
             out,
         );
     }

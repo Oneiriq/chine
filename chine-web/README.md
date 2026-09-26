@@ -63,6 +63,33 @@ replace that runtime `<script>` with this module:
 chine-web registers under `<spine-skeleton>` as well as `<chine-spine>` and
 reads the same embedded globals, so the export renders unchanged.
 
+## Skins
+
+Both elements take a `skin` attribute that names the skin to show. It is read
+at load time and again whenever it changes, so a script can switch skins with
+`setAttribute("skin", ...)`:
+
+```html
+<chine-spine
+  atlas="mix-and-match-pro.atlas"
+  skeleton="mix-and-match-pro.skel"
+  skin="full-skins/girl"
+  animation="walk"
+></chine-spine>
+```
+
+Without the attribute, only the default skin shows. A skin's skin-required
+bones and constraints, and the deform and sequence keys that name it, apply
+only while it is the active skin. An unknown name shows the default skin and
+logs a warning. The skeleton is fit to the element again after each change.
+
+Spine's `<spine-skeleton>` accepts a comma-separated list of skins and
+combines them into one. chine-web shows only the first skin in the list.
+
+Code that drives the `WebSpine` wasm API directly lists the skins with
+`skin_names()`, which starts with `default`, and shows one with
+`set_skin(name)`, which returns `false` for an unknown name.
+
 ## Demos
 
 - `examples/diamond.html`: the diamond rig loaded by URL.

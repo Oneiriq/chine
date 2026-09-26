@@ -17,10 +17,10 @@ Spine skeleton data requires a valid
 
 The established Rust runtime, `rusty_spine`, is transpiled from `spine-c` and
 tops out at Spine 4.2. Esoteric discontinued `spine-c` at 4.3. `chine` is a
-from-scratch, dependency-light (`glam` plus optional `serde`) implementation of
-the 4.3 runtime, so projects can target current Spine in pure Rust (native and
-WebAssembly). It reproduces the official runtime's behavior. It does not port
-or copy the official code.
+from-scratch, dependency-light (`glam` plus optional `serde_json`)
+implementation of the 4.3 runtime, so projects can target current Spine in pure
+Rust (native and WebAssembly). It reproduces the official runtime's behavior. It
+does not port or copy the official code.
 
 (The name is the *chine*, the backbone.)
 
@@ -55,6 +55,9 @@ let atlas = Atlas::parse(&atlas_text);
 let mut data = chine::load::from_json(&skeleton_json)?;
 bind_atlas(&mut data, &atlas); // resolve attachment UVs + atlas pages
 let mut skeleton = Skeleton::new(Arc::new(data));
+// For a rig with named skins. A skin's skin-required bones and constraints,
+// and the deform and sequence keys that name it, apply only while it is set.
+skeleton.set_skin("goblin");
 
 let walk = skeleton.data().find_animation("walk").unwrap().clone();
 let mut state = AnimationState::new();
@@ -87,35 +90,46 @@ animating, and emitting draw data:
 
 - **Loaders**: JSON (`.json`) and binary (`.skel`) skeleton exports, and
   texture atlas (`.atlas`) parsing (the 4.1+ format plus common legacy keys).
-- **Skeleton**: bones, slots, and skins. Region, mesh (including weighted),
-  path, bounding-box, point, clipping, and linked-mesh attachments. Animated
-  (flipbook) sequences.
+- **Skeleton**: bones, slots, and skins, with skin-required bones and
+  constraints that apply only while a skin lists them. Region, mesh
+  (including weighted), path, bounding-box, point, clipping, and linked-mesh
+  attachments. Animated (flipbook) sequences.
 - **Forward kinematics** with all five inherit modes.
 - **Constraints**, ordered by a topological update cache:
   - **IK**: 1- and 2-bone solvers with softness, stretch, compress, and scale.
   - **Transform**: the 4.3 source-to-target property-mapping system.
-  - **Path**: constant-speed Bezier arc-length sampling along a path attachment.
+  - **Path**: Bezier sampling along the path attachment a slot shows, by arc
+    length or, for a path without constant speed, by its exported curve lengths.
   - **Physics**: the 4.3 spring-damper simulation, with skeleton wind / gravity.
   - **Slider**: the 4.3 slider constraint.
 - **Animation**: every timeline kind, with stepped / linear / Bezier curves:
-  - bone rotate / translate / scale / shear, plus single-axis variants
+  - bone rotate / translate / scale / shear, plus single-axis variants and
+    inherit-mode keys
   - IK / transform / path / physics / slider mix timelines
-  - slot color / alpha / two-color / attachment-swap / draw-order
+  - slot color / alpha / two-color / attachment-swap / draw-order, and the
+    draw order of slot folders
   - deform, events, and sequences
   - a multi-track `AnimationState` with crossfade mixing and an animation queue
 - **Rendering**: a renderer-agnostic `RenderCommand` stream, including two-color
-  (tint-black) tinting and polygon clipping.
+  (tint-black) tinting and polygon clipping, with convex and inverse clips.
 
 The loaders are validated against real exports (for example spineboy: 67 bones,
 52 slots, 11 animations, 7 IK + 7 transform constraints) and a binary rig that
 exercises sequences and clipping.
+
+To check both loaders against the official Spine 4.3 example rigs, put their
+`.json` and `.skel` exports in `data/examples/` (coin-pro, diamond-pro,
+mix-and-match-pro, raptor-pro, spineboy-pro, stretchyman-pro, tank-pro, and
+vine-pro). `cargo test` then loads each rig from both formats and requires the
+same bones and the same pose for every animation and skin. The directory is
+gitignored.
 
 ## Cargo features
 
 Both loaders are on by default. Disable either to trim dependencies or binary
 size.
 
-- `json` *(default)*: the `.json` skeleton loader (pulls `serde` / `serde_json`).
+- `json` *(default)*: the `.json` skeleton loader (pulls in `serde_json`).
 - `binary` *(default)*: the binary `.skel` loader (no extra dependencies).
 
 With neither feature, `chine` is a manual pose / render runtime over a
@@ -149,6 +163,8 @@ has the cargo-fuzz targets that check this.
 - broader validation against more production exports
 - performance passes on the per-frame pose and draw paths
 - publishing to crates.io once the API has settled
+
+[`CHANGELOG.md`](CHANGELOG.md) lists the changes in each version.
 
 ## Attribution
 

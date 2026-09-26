@@ -87,6 +87,8 @@ pub struct TransformConstraintData {
     pub name: String,
     /// Global constraint order (lower applies first).
     pub order: usize,
+    /// Whether the constraint applies only while the active skin lists it.
+    pub skin_required: bool,
     /// Constrained bone indices.
     pub bones: Vec<usize>,
     /// Source bone index.
@@ -515,6 +517,7 @@ mod tests {
         TransformConstraintData {
             name: "follow".into(),
             order: 0,
+            skin_required: false,
             bones,
             source,
             offsets: [0.0; 6],

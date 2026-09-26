@@ -12,18 +12,16 @@
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 
+mod player;
 mod renderer;
-
-use std::sync::Arc;
 
 use wasm_bindgen::prelude::*;
 use web_sys::{HtmlCanvasElement, HtmlImageElement};
 
-use chine::anim::AnimationState;
 use chine::atlas::Atlas;
-use chine::render::{bind_atlas, render_into, RenderCommand};
-use chine::skel::Skeleton;
+use chine::render::{bind_atlas, RenderCommand};
 
+use player::Player;
 use renderer::GlRenderer;
 
 /// A loaded, animatable Spine skeleton bound to a WebGL2 canvas.
@@ -31,17 +29,14 @@ use renderer::GlRenderer;
 /// Build with [`WebSpine::from_binary`] or [`WebSpine::from_json`], register the
 /// atlas-page images with [`WebSpine::add_page`] (in the order given by
 /// [`WebSpine::page_names`]), then drive it each frame with [`WebSpine::frame`].
+/// [`WebSpine::set_skin`] shows one of the skins [`WebSpine::skin_names`]
+/// lists.
 #[wasm_bindgen]
 pub struct WebSpine {
-    skeleton: Skeleton,
-    state: AnimationState,
+    player: Player,
     renderer: GlRenderer,
-    commands: Vec<RenderCommand>,
     page_names: Vec<String>,
     page_pma: Vec<bool>,
-    /// Setup-pose fit: world-space center and half-extents, used to auto-fit
-    /// the skeleton to the canvas.
-    fit: (f32, f32, f32, f32),
 }
 
 #[wasm_bindgen]
@@ -102,43 +97,44 @@ impl WebSpine {
 
     /// Play the named animation, looping or not. Unknown names are ignored.
     pub fn set_animation(&mut self, name: &str, looping: bool) {
-        if let Some(anim) = self.skeleton.data().find_animation(name) {
-            self.state.set_animation(anim.clone(), looping);
-        }
+        self.player.set_animation(name, looping);
     }
 
     /// The animation names available on this skeleton.
     #[must_use]
     pub fn animation_names(&self) -> Vec<String> {
-        self.skeleton
-            .data()
-            .animations
-            .iter()
-            .map(|a| a.name().to_string())
-            .collect()
+        self.player.animation_names()
+    }
+
+    /// The skin names available on this skeleton, starting with `"default"`.
+    #[must_use]
+    pub fn skin_names(&self) -> Vec<String> {
+        self.player.skin_names()
+    }
+
+    /// Show the named skin: its attachments, the skin-required bones and
+    /// constraints it lists, and the deform and sequence keys that name it.
+    /// `"default"` or an unknown name shows the default skin only. Returns
+    /// `false` for an unknown name. The skeleton is fit to the canvas again,
+    /// since the fit depends on the attachments shown.
+    pub fn set_skin(&mut self, name: &str) -> bool {
+        self.player.set_skin(name)
     }
 
     /// Advance the animation by `delta` seconds and render to the canvas, which
     /// is `width` by `height` device pixels. The skeleton is auto-fit and
     /// centered.
     pub fn frame(&mut self, delta: f32, width: i32, height: i32) {
-        self.state.update(delta);
-        self.skeleton.update(delta);
-        self.skeleton.set_bones_to_setup_pose();
-        self.skeleton.set_slots_to_setup_pose();
-        self.state.apply(&mut self.skeleton);
-        self.skeleton.update_world_transform();
-        render_into(&self.skeleton, &mut self.commands);
-
-        let view = fit_view(self.fit, width, height);
+        let view = fit_view(self.player.fit(), width, height);
+        let commands = self.player.advance(delta);
         self.renderer.begin_frame(width, height);
-        self.renderer.draw(&view, &self.commands);
+        self.renderer.draw(&view, commands);
     }
 }
 
 impl WebSpine {
-    /// Bind the atlas, build the renderer and skeleton, and measure the
-    /// setup-pose fit. Shared by both loaders.
+    /// Bind the atlas, build the renderer, and start the player on the
+    /// default skin. Shared by both loaders.
     fn assemble(
         canvas: &HtmlCanvasElement,
         data: &mut chine::data::SkeletonData,
@@ -150,23 +146,11 @@ impl WebSpine {
         let page_pma = atlas.pages.iter().map(|p| p.pma).collect();
 
         let renderer = GlRenderer::new(canvas).map_err(|e| JsValue::from_str(&e))?;
-        let mut skeleton = Skeleton::new(Arc::new(std::mem::take(data)));
-        skeleton.set_bones_to_setup_pose();
-        skeleton.set_slots_to_setup_pose();
-        skeleton.update_world_transform();
-
-        let mut commands = Vec::new();
-        render_into(&skeleton, &mut commands);
-        let fit = setup_fit(&commands);
-
         Ok(WebSpine {
-            skeleton,
-            state: AnimationState::new(),
+            player: Player::new(std::mem::take(data)),
             renderer,
-            commands,
             page_names,
             page_pma,
-            fit,
         })
     }
 }

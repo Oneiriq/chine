@@ -22,7 +22,7 @@ use crate::skin::Skin;
 
 mod cache;
 
-use cache::{build_update_cache, valid_parent, Updatable};
+use cache::{build_update_cache, is_set, valid_parent, ConstraintActivity, Updatable};
 
 /// Degrees-to-radians factor.
 const DEG_RAD: f32 = core::f32::consts::PI / 180.0;
@@ -39,7 +39,11 @@ const EPSILON_SQ: f32 = 0.0001 * 0.0001;
 #[derive(Debug, Clone)]
 pub struct Bone {
     parent: Option<usize>,
-    inherit: Inherit,
+    // How the bone inherits its parent's transform. Starts at the setup
+    // mode, and a bone inherit timeline can change it.
+    pub(crate) inherit: Inherit,
+    // Whether the bone applies with the active skin (see `Self::active`).
+    pub(crate) active: bool,
     /// Local x relative to the parent.
     pub x: f32,
     /// Local y relative to the parent.
@@ -69,6 +73,7 @@ impl Bone {
         let mut bone = Self {
             parent: valid_parent(data.parent, bone_count),
             inherit: data.inherit,
+            active: true,
             x: 0.0,
             y: 0.0,
             rotation: 0.0,
@@ -87,8 +92,10 @@ impl Bone {
         bone
     }
 
-    /// Reset the local pose to the setup pose described by `data`.
+    /// Reset the local pose, and the inherit mode, to the setup pose described
+    /// by `data`.
     pub fn set_to_setup_pose(&mut self, data: &BoneData) {
+        self.inherit = data.inherit;
         self.x = data.position.x;
         self.y = data.position.y;
         self.rotation = data.rotation;
@@ -102,6 +109,22 @@ impl Bone {
     #[must_use]
     pub fn parent(&self) -> Option<usize> {
         self.parent
+    }
+
+    /// How this bone currently inherits its parent's transform: the setup
+    /// mode, unless a bone inherit timeline has changed it.
+    #[must_use]
+    pub fn inherit(&self) -> Inherit {
+        self.inherit
+    }
+
+    /// Whether the bone applies with the active skin: it is not
+    /// skin-required, or the active skin lists it or one of its descendants.
+    /// Timelines do not change an inactive bone, its world transform is not
+    /// updated, and the slots on it are not drawn.
+    #[must_use]
+    pub fn active(&self) -> bool {
+        self.active
     }
 
     /// World matrix component `a` (world x-axis x).
@@ -234,6 +257,9 @@ pub struct Skeleton {
     skin: Option<usize>,
     events: Vec<Event>,
     update_cache: Vec<Updatable>,
+    // Which constraints are active with the current skin. Timelines leave an
+    // inactive constraint's pose alone.
+    constraint_activity: ConstraintActivity,
     // Accumulated simulation time, advanced by `update`, read by physics.
     time: f32,
     /// World-space x offset applied to the whole skeleton.
@@ -279,8 +305,7 @@ impl Skeleton {
         let sliders = data.sliders.iter().map(SliderPose::from_data).collect();
         let slots = data.slots.iter().map(Slot::from_data).collect();
         let draw_order: Vec<usize> = (0..data.slots.len()).collect();
-        let update_cache = build_update_cache(&data);
-        Self {
+        let mut skeleton = Self {
             data,
             bones,
             ik_constraints,
@@ -292,12 +317,28 @@ impl Skeleton {
             draw_order,
             skin: None,
             events: Vec::new(),
-            update_cache,
+            update_cache: Vec::new(),
+            constraint_activity: ConstraintActivity::default(),
             time: 0.0,
             x: 0.0,
             y: 0.0,
             scale_x: 1.0,
             scale_y: 1.0,
+        };
+        skeleton.rebuild_cache();
+        skeleton
+    }
+
+    /// Rebuild the update cache for the active skin, and mark which bones and
+    /// constraints are active: a skin-required bone or constraint applies only
+    /// while the active skin lists it.
+    fn rebuild_cache(&mut self) {
+        let skin = self.skin.and_then(|i| self.data.skins.get(i));
+        let (cache, active, constraints) = build_update_cache(&self.data, skin);
+        self.update_cache = cache;
+        self.constraint_activity = constraints;
+        for (bone, active) in self.bones.iter_mut().zip(active) {
+            bone.active = active;
         }
     }
 
@@ -314,21 +355,32 @@ impl Skeleton {
     }
 
     /// Set the active skin by name: it overrides the default skin for attachment
-    /// lookups (so linked meshes and other variants in that skin are shown). An
-    /// unknown name (or `"default"`) clears the active skin.
+    /// lookups (so linked meshes and other variants in that skin are shown),
+    /// and activates the skin-required bones and constraints it lists. An
+    /// unknown name (or `"default"`) clears the active skin. Deform and
+    /// sequence keys drive only the attachments of the skin they name. The
+    /// skin can change between frames: this rebuilds the update cache.
     pub fn set_skin(&mut self, name: &str) {
         self.skin = self.data.skins.iter().position(|s| s.name == name);
+        self.rebuild_cache();
     }
 
-    /// Clear the active skin, using only the default skin.
+    /// Clear the active skin, using only the default skin. Skin-required
+    /// bones and constraints no longer apply.
     pub fn clear_skin(&mut self) {
         self.skin = None;
+        self.rebuild_cache();
     }
 
     /// The active named skin, if one is set.
     #[must_use]
     pub fn active_skin(&self) -> Option<&Skin> {
         self.skin.and_then(|i| self.data.skins.get(i))
+    }
+
+    /// The index (into `data().skins`) of the active named skin, if one is set.
+    pub(crate) fn active_skin_index(&self) -> Option<usize> {
+        self.skin
     }
 
     /// All bones, in hierarchy order.
@@ -368,6 +420,12 @@ impl Skeleton {
         self.draw_order.extend_from_slice(order);
     }
 
+    /// The current draw order, to reorder in place (for the draw order folder
+    /// timeline).
+    pub(crate) fn draw_order_mut(&mut self) -> &mut [usize] {
+        &mut self.draw_order
+    }
+
     /// The events fired by the animation since the last apply (footsteps, hit
     /// frames, audio cues).
     #[must_use]
@@ -380,8 +438,12 @@ impl Skeleton {
         self.events.push(event);
     }
 
-    /// Clear the fired-event list (the animation system does this each apply).
-    pub(crate) fn clear_events(&mut self) {
+    /// Clear the fired-event list.
+    ///
+    /// [`crate::anim::AnimationState::apply`] clears it before each apply. A
+    /// host that calls [`crate::anim::Animation::apply`] directly calls this
+    /// first, so [`Self::events`] holds only the events that apply fired.
+    pub fn clear_events(&mut self) {
         self.events.clear();
     }
 
@@ -391,23 +453,39 @@ impl Skeleton {
         self.physics_constraints.get(index)
     }
 
-    /// Every physics constraint's mutable runtime pose, for global physics
-    /// timelines. Pair with [`Self::data_arc`] to read the matching setup data.
-    pub(crate) fn physics_constraints_mut(&mut self) -> &mut [PhysicsConstraint] {
-        &mut self.physics_constraints
+    /// Every active physics constraint's mutable pose paired with its setup
+    /// data, for global physics timelines. Inactive ones are skipped.
+    pub(crate) fn active_physics_poses_and_setup(
+        &mut self,
+    ) -> impl Iterator<Item = (&mut PhysicsConstraint, &PhysicsConstraintData)> {
+        let active = &self.constraint_activity.physics;
+        self.physics_constraints
+            .iter_mut()
+            .zip(&self.data.physics_constraints)
+            .enumerate()
+            .filter(move |&(i, _)| is_set(active, i))
+            .map(|(_, pair)| pair)
     }
 
-    /// Mark physics constraint `i` to reset on the next world-transform update.
+    /// Mark physics constraint `i` to reset on the next world-transform
+    /// update, unless it is inactive.
     pub(crate) fn request_physics_reset(&mut self, i: usize) {
+        if !is_set(&self.constraint_activity.physics, i) {
+            return;
+        }
         if let Some(c) = self.physics_constraints.get_mut(i) {
             c.set_pending_reset();
         }
     }
 
-    /// Mark every physics constraint to reset on the next world-transform update.
+    /// Mark every active physics constraint to reset on the next
+    /// world-transform update.
     pub(crate) fn request_all_physics_reset(&mut self) {
-        for c in &mut self.physics_constraints {
-            c.set_pending_reset();
+        let active = &self.constraint_activity.physics;
+        for (i, c) in self.physics_constraints.iter_mut().enumerate() {
+            if is_set(active, i) {
+                c.set_pending_reset();
+            }
         }
     }
 
@@ -417,17 +495,22 @@ impl Skeleton {
     }
 
     /// Split borrow for the animation system: a bone's mutable local pose paired
-    /// with its immutable setup data. `None` if `index` is out of range.
+    /// with its immutable setup data. `None` if `index` is out of range or the
+    /// bone is inactive, which timelines leave alone.
     pub(crate) fn bone_and_setup(&mut self, index: usize) -> Option<(&mut Bone, &BoneData)> {
         let setup = self.data.bones.get(index)?;
-        let bone = self.bones.get_mut(index)?;
+        let bone = self.bones.get_mut(index).filter(|bone| bone.active)?;
         Some((bone, setup))
     }
 
     /// A slot's mutable runtime pose paired with its setup data, for slot
-    /// timelines.
+    /// timelines. `None` if `i` is out of range or the slot's bone is
+    /// inactive, which timelines leave alone.
     pub(crate) fn slot_pose_and_setup(&mut self, i: usize) -> Option<(&mut Slot, &SlotData)> {
         let setup = self.data.slots.get(i)?;
+        if self.bones.get(setup.bone).is_some_and(|bone| !bone.active) {
+            return None;
+        }
         let slot = self.slots.get_mut(i)?;
         Some((slot, setup))
     }
@@ -442,52 +525,72 @@ impl Skeleton {
     }
 
     /// A slider's mutable pose paired with its setup data, for the animation
-    /// system (the SLIDER_TIME / SLIDER_MIX timelines).
+    /// system (the SLIDER_TIME / SLIDER_MIX timelines). `None` if `i` is out
+    /// of range or the slider is inactive, which timelines leave alone.
     pub(crate) fn slider_pose_and_setup(
         &mut self,
         i: usize,
     ) -> Option<(&mut SliderPose, &SliderData)> {
+        if !is_set(&self.constraint_activity.sliders, i) {
+            return None;
+        }
         let setup = self.data.sliders.get(i)?;
         let pose = self.sliders.get_mut(i)?;
         Some((pose, setup))
     }
 
     /// An IK constraint's mutable pose paired with its setup data, for the
-    /// animation system.
+    /// animation system. `None` if `i` is out of range or the constraint is
+    /// inactive, which timelines leave alone.
     pub(crate) fn ik_pose_and_setup(
         &mut self,
         i: usize,
     ) -> Option<(&mut IkConstraint, &IkConstraintData)> {
+        if !is_set(&self.constraint_activity.ik, i) {
+            return None;
+        }
         let setup = self.data.ik_constraints.get(i)?;
         let pose = self.ik_constraints.get_mut(i)?;
         Some((pose, setup))
     }
 
     /// A transform constraint's mutable pose paired with its setup data.
+    /// `None` if `i` is out of range or the constraint is inactive.
     pub(crate) fn transform_pose_and_setup(
         &mut self,
         i: usize,
     ) -> Option<(&mut TransformConstraint, &TransformConstraintData)> {
+        if !is_set(&self.constraint_activity.transform, i) {
+            return None;
+        }
         let setup = self.data.transform_constraints.get(i)?;
         let pose = self.transform_constraints.get_mut(i)?;
         Some((pose, setup))
     }
 
-    /// A path constraint's mutable pose paired with its setup data.
+    /// A path constraint's mutable pose paired with its setup data. `None` if
+    /// `i` is out of range or the constraint is inactive.
     pub(crate) fn path_pose_and_setup(
         &mut self,
         i: usize,
     ) -> Option<(&mut PathConstraint, &PathConstraintData)> {
+        if !is_set(&self.constraint_activity.path, i) {
+            return None;
+        }
         let setup = self.data.path_constraints.get(i)?;
         let pose = self.path_constraints.get_mut(i)?;
         Some((pose, setup))
     }
 
-    /// A physics constraint's mutable pose paired with its setup data.
+    /// A physics constraint's mutable pose paired with its setup data. `None`
+    /// if `i` is out of range or the constraint is inactive.
     pub(crate) fn physics_pose_and_setup(
         &mut self,
         i: usize,
     ) -> Option<(&mut PhysicsConstraint, &PhysicsConstraintData)> {
+        if !is_set(&self.constraint_activity.physics, i) {
+            return None;
+        }
         let setup = self.data.physics_constraints.get(i)?;
         let pose = self.physics_constraints.get_mut(i)?;
         Some((pose, setup))

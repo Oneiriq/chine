@@ -1,12 +1,23 @@
 use super::*;
 
 use crate::anim::{
-    compute_draw_order, Animation, AttachmentTimeline, BoneAxis, BoneTimeline, ConstraintTimeline,
-    DeformTimeline, DrawOrderTimeline, EventTimeline, PhysicsProperty, PhysicsResetTimeline,
-    SequenceTimeline, Timeline, GLOBAL_PHYSICS, PATH_MIX, PATH_POSITION, PATH_SPACING,
-    TRANSFORM_MIX,
+    compute_draw_order, sort_draw_order_moves, Animation, AttachmentTarget, AttachmentTimeline,
+    BoneAxis, BoneTimeline, ConstraintTimeline, DeformTimeline, DrawOrderFolderTimeline,
+    DrawOrderTimeline, EventTimeline, Fallback, InheritTimeline, PhysicsProperty,
+    PhysicsResetTimeline, SequenceTimeline, Timeline, GLOBAL_PHYSICS, PATH_MIX, PATH_POSITION,
+    PATH_SPACING, TRANSFORM_MIX,
 };
+use crate::attach::AttachmentKey;
 use crate::event::Event;
+
+mod attachments;
+use attachments::{attachment_entries, read_deform, read_sequence};
+mod curves;
+use curves::{
+    read_curve, read_curve_timeline, read_ik_timeline, read_slot_rgb_timeline,
+    read_slot_rgba_timeline, read_slot_two_color_timeline, read_timeline1, read_timeline2,
+    value_channel,
+};
 
 /// Parse one animation: bone, slot, deform, event, draw-order, and constraint
 /// timelines. `names` resolves the names timelines refer to, and `budget`
@@ -73,6 +84,18 @@ pub(super) fn parse_animation(
                     "sheary" => {
                         let (tl, d) = read_timeline1(keys, bone, 0.0);
                         (Timeline::BoneAxis(tl, BoneAxis::ShearY), d)
+                    }
+                    "inherit" => {
+                        let times: Vec<f32> = keys.iter().map(|k| f(k, "time")).collect();
+                        let modes = keys
+                            .iter()
+                            .map(|k| parse_inherit(k.get("inherit")))
+                            .collect();
+                        let d = times.iter().copied().fold(0.0, f32::max);
+                        (
+                            Timeline::Inherit(InheritTimeline::new(bone, times, modes)),
+                            d,
+                        )
                     }
                     _ => continue, // unknown bone channels are skipped
                 };
@@ -182,7 +205,7 @@ pub(super) fn parse_animation(
                     "mix" => (PhysicsProperty::Mix, 1.0),
                     _ => continue, // Unknown channels are skipped.
                 };
-                let (tl, dur) = read_curve_timeline(keys, idx, &[("value", default)]);
+                let (tl, dur) = read_curve_timeline(keys, idx, &value_channel(default));
                 duration = duration.max(dur);
                 timelines.push(Timeline::Physics(tl, property));
             }
@@ -237,7 +260,7 @@ pub(super) fn parse_animation(
                     }
                     "alpha" => {
                         // A one-channel value curve over the slot tint's alpha.
-                        let (tl, dur) = read_curve_timeline(keys, idx, &[("value", 0.0)]);
+                        let (tl, dur) = read_curve_timeline(keys, idx, &value_channel(0.0));
                         duration = duration.max(dur);
                         timelines.push(Timeline::SlotAlpha(tl));
                     }
@@ -270,6 +293,17 @@ pub(super) fn parse_animation(
         }
     }
 
+    // Draw order folder timelines (Spine 4.3): the draw order of a folder of
+    // slots, each keyed like the draw order over the folder's slots.
+    if let Some(folders) = anim.get("drawOrderFolder").and_then(Value::as_array) {
+        for folder in folders {
+            if let Some((tl, dur)) = read_draw_order_folder(folder, names)? {
+                duration = duration.max(dur);
+                timelines.push(tl);
+            }
+        }
+    }
+
     if let Some(events) = anim.get("events").and_then(Value::as_array) {
         if !events.is_empty() {
             let (tl, dur) = read_event_timeline(events, data, names, budget)?;
@@ -278,84 +312,13 @@ pub(super) fn parse_animation(
         }
     }
 
-    if let Some(deforms) = anim.get("deform").and_then(Value::as_object) {
-        for (skin_name, slots) in deforms {
-            let skin = if skin_name == "default" {
-                None
-            } else {
-                names.skin(data, skin_name)
-            };
-            let Some(slots) = slots.as_object() else {
-                continue;
-            };
-            for (slot_name, attachments) in slots {
-                let Some(&slot_idx) = names.slots.get(slot_name.as_str()) else {
-                    continue;
-                };
-                let Some(attachments) = attachments.as_object() else {
-                    continue;
-                };
-                for (att_name, keys) in attachments {
-                    let Some(keys) = keys.as_array() else {
-                        continue;
-                    };
-                    if keys.is_empty() {
-                        continue;
-                    }
-                    let Some(Attachment::Mesh(mesh)) = data.attachment(slot_idx, att_name, skin)
-                    else {
-                        continue;
-                    };
-                    let frame_len = mesh.deform_len();
-                    let n = keys.len();
-                    // The setup vertices plus one full frame per key.
-                    budget.charge(
-                        n.saturating_add(1)
-                            .saturating_mul(frame_len)
-                            .saturating_mul(size_of::<f32>()),
-                        "a deform timeline",
-                    )?;
-                    // Unweighted: setup = the bind vertices (offsets add to them).
-                    // Weighted: setup = zeros (offsets are added per-influence to
-                    // the bind positions in compute_vertices).
-                    let setup = match mesh.setup_vertices() {
-                        Some(v) => v.to_vec(),
-                        None => vec![0.0; frame_len],
-                    };
-                    let mut times = Vec::with_capacity(n);
-                    let mut frames = Vec::with_capacity(n);
-                    for k in keys {
-                        times.push(f(k, "time"));
-                        frames.push(read_deform_frame(k, frame_len));
-                    }
-                    duration = duration.max(times.last().copied().unwrap_or(0.0));
-                    let tl_skin = if skin_name == "default" {
-                        None
-                    } else {
-                        Some(skin_name.clone())
-                    };
-                    let mut tl = DeformTimeline::new(
-                        slot_idx,
-                        att_name.clone(),
-                        tl_skin,
-                        setup,
-                        times,
-                        frames,
-                        n,
-                    );
-                    let mut bezier = 0;
-                    let mut frame = 0;
-                    while frame + 1 < n {
-                        if let Some(curve) = keys[frame].get("curve") {
-                            let time = f(&keys[frame], "time");
-                            let time2 = f(&keys[frame + 1], "time");
-                            bezier =
-                                read_curve(curve, &mut tl, bezier, frame, 0, time, time2, 0.0, 1.0);
-                        }
-                        frame += 1;
-                    }
-                    timelines.push(Timeline::Deform(tl));
-                }
+    // Spine 4.0 exports keep deform timelines in their own "deform" map. Later
+    // exports nest them under "attachments", read below.
+    if let Some(map) = anim.get("deform") {
+        for entry in attachment_entries(map, names) {
+            if let Some((tl, d)) = read_deform(&entry, entry.value, data, names, budget)? {
+                duration = duration.max(d);
+                timelines.push(tl);
             }
         }
     }
@@ -364,12 +327,7 @@ pub(super) fn parse_animation(
     // one-value curve keyed by slider name.
     if let Some(sliders) = anim.get("slider").and_then(Value::as_object) {
         for (slider_name, channels) in sliders {
-            // The JSON loader does not parse slider constraints (only the binary
-            // loader does), so a slider timeline with no matching constraint is
-            // skipped, not an error.
-            let Some(idx) = data.sliders.iter().position(|s| s.name == *slider_name) else {
-                continue;
-            };
+            let idx = lookup(&names.sliders, slider_name)?;
             let Some(channels) = channels.as_object() else {
                 continue;
             };
@@ -382,12 +340,12 @@ pub(super) fn parse_animation(
                 }
                 match channel.as_str() {
                     "time" => {
-                        let (tl, dur) = read_curve_timeline(keys, idx, &[("value", 1.0)]);
+                        let (tl, dur) = read_curve_timeline(keys, idx, &value_channel(1.0));
                         duration = duration.max(dur);
                         timelines.push(Timeline::SliderTime(tl));
                     }
                     "mix" => {
-                        let (tl, dur) = read_curve_timeline(keys, idx, &[("value", 1.0)]);
+                        let (tl, dur) = read_curve_timeline(keys, idx, &value_channel(1.0));
                         duration = duration.max(dur);
                         timelines.push(Timeline::SliderMix(tl));
                     }
@@ -397,61 +355,20 @@ pub(super) fn parse_animation(
         }
     }
 
-    // Attachment sequence (flipbook) timelines: skin -> slot -> attachment ->
-    // "sequence", each keyframe a packed mode/index plus a hold delay.
-    if let Some(attachments) = anim.get("attachments").and_then(Value::as_object) {
-        for (skin_name, slots) in attachments {
-            let skin = if skin_name == "default" {
-                None
-            } else {
-                names.skin(data, skin_name)
-            };
-            let Some(slots) = slots.as_object() else {
-                continue;
-            };
-            for (slot_name, atts) in slots {
-                let Some(&slot_idx) = names.slots.get(slot_name.as_str()) else {
-                    continue;
-                };
-                let Some(atts) = atts.as_object() else {
-                    continue;
-                };
-                for (att_name, channels) in atts {
-                    let Some(seq_keys) = channels.get("sequence").and_then(Value::as_array) else {
-                        continue;
-                    };
-                    if seq_keys.is_empty() {
-                        continue;
-                    }
-                    let count = match data.attachment(slot_idx, att_name, skin) {
-                        Some(Attachment::Region(r)) => r.sequence.as_ref().map_or(0, |s| s.count),
-                        Some(Attachment::Mesh(m)) => m.sequence.as_ref().map_or(0, |s| s.count),
-                        _ => 0,
-                    };
-                    let n = seq_keys.len();
-                    let mut times = Vec::with_capacity(n);
-                    let mut mode_and_index = Vec::with_capacity(n);
-                    let mut delays = Vec::with_capacity(n);
-                    for k in seq_keys {
-                        // The index shares a `u32` with the 4-bit mode, so a
-                        // larger index saturates instead of losing its high bits.
-                        let index = k.get("index").and_then(Value::as_u64).map_or(0, |i| {
-                            u32::try_from(i).unwrap_or(u32::MAX).min(u32::MAX >> 4)
-                        });
-                        let mode = sequence_mode(k.get("mode").and_then(Value::as_str));
-                        times.push(f(k, "time"));
-                        mode_and_index.push((index << 4) | mode);
-                        delays.push(f(k, "delay"));
-                    }
-                    duration = duration.max(times.last().copied().unwrap_or(0.0));
-                    timelines.push(Timeline::Sequence(SequenceTimeline::new(
-                        slot_idx,
-                        att_name.clone(),
-                        count,
-                        times,
-                        mode_and_index,
-                        delays,
-                    )));
+    // Attachment timelines, keyed by skin, slot, and attachment: vertex deforms
+    // and sequence (flipbook) keys.
+    if let Some(map) = anim.get("attachments") {
+        for entry in attachment_entries(map, names) {
+            if let Some(keys) = entry.value.get("deform") {
+                if let Some((tl, d)) = read_deform(&entry, keys, data, names, budget)? {
+                    duration = duration.max(d);
+                    timelines.push(tl);
+                }
+            }
+            if let Some(keys) = entry.value.get("sequence") {
+                if let Some((tl, d)) = read_sequence(&entry, keys, data, names) {
+                    duration = duration.max(d);
+                    timelines.push(tl);
                 }
             }
         }
@@ -460,411 +377,68 @@ pub(super) fn parse_animation(
     Ok(Animation::new(name, duration, timelines))
 }
 
-/// Map a Spine sequence mode name to its ordinal (`hold` = 0 by default).
-fn sequence_mode(name: Option<&str>) -> u32 {
-    match name {
-        Some("once") => 1,
-        Some("loop") => 2,
-        Some("pingpong") => 3,
-        Some("onceReverse") => 4,
-        Some("loopReverse") => 5,
-        Some("pingpongReverse") => 6,
-        _ => 0, // hold
+/// Read one draw order folder timeline: its `slots` (in setup order), then
+/// per key a time and `offsets` that move folder slots by an offset within
+/// the folder. `None` when the folder has no slots or no keys.
+///
+/// # Errors
+/// Returns [`LoadError::BadReference`] for an unknown slot, and
+/// [`LoadError::Schema`] for a slot listed twice in the folder, or for key
+/// offsets that name a slot outside the folder or do not order it.
+fn read_draw_order_folder(
+    folder: &Value,
+    names: &Names,
+) -> Result<Option<(Timeline, f32)>, LoadError> {
+    let corrupt = |problem: &str| LoadError::Schema(format!("draw order folder {problem}"));
+    let mut slots = Vec::new();
+    for slot in folder
+        .get("slots")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        slots.push(names.slot(slot.as_str().unwrap_or_default())?);
     }
-}
-
-/// Read a one-value (rotate) timeline. Returns the timeline and its last
-/// keyframe time. Mirrors Spine's `readTimeline` for `CurveTimeline1`.
-fn read_timeline1(keys: &[Value], bone: usize, default_value: f32) -> (BoneTimeline, f32) {
-    let n = keys.len();
-    let mut tl = BoneTimeline::one_value(bone, n, n);
-    let mut bezier = 0;
-    let mut duration = 0.0_f32;
-    let mut frame = 0;
-    while frame < n {
-        let k = &keys[frame];
-        let time = f(k, "time");
-        let value = f_or(k, "value", default_value);
-        tl.set_frame1(frame, time, value);
-        duration = duration.max(time);
-        if frame + 1 < n {
-            if let Some(curve) = k.get("curve") {
-                let next = &keys[frame + 1];
-                let time2 = f(next, "time");
-                let value2 = f_or(next, "value", default_value);
-                bezier = read_curve(curve, &mut tl, bezier, frame, 0, time, time2, value, value2);
-            }
+    let mut sorted = slots.clone();
+    sorted.sort_unstable();
+    if sorted.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(corrupt("lists a slot twice"));
+    }
+    // A slot's position in the folder.
+    let positions: HashMap<usize, usize> = slots.iter().enumerate().map(|(i, &s)| (s, i)).collect();
+    let keys = folder.get("keys").and_then(Value::as_array);
+    let mut times = Vec::new();
+    let mut moves = Vec::new();
+    for k in keys.into_iter().flatten() {
+        let mut key = Vec::new();
+        for offset in k
+            .get("offsets")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let slot = names.slot(str_ref(offset, "slot")?)?;
+            let position = *positions
+                .get(&slot)
+                .ok_or_else(|| corrupt("moves a slot outside the folder"))?;
+            let by = offset.get("offset").and_then(Value::as_i64).unwrap_or(0);
+            let by = i32::try_from(by).map_err(|_| corrupt("moves a slot out of range"))?;
+            key.push((position, by));
         }
-        frame += 1;
-    }
-    (tl, duration)
-}
-
-/// Read a two-value (translate / scale) timeline. Mirrors Spine's `readTimeline`
-/// for `BoneTimeline2`.
-fn read_timeline2(
-    keys: &[Value],
-    bone: usize,
-    name1: &str,
-    name2: &str,
-    default_value: f32,
-) -> (BoneTimeline, f32) {
-    let n = keys.len();
-    let mut tl = BoneTimeline::two_value(bone, n, n * 2);
-    let mut bezier = 0;
-    let mut duration = 0.0_f32;
-    let mut frame = 0;
-    while frame < n {
-        let k = &keys[frame];
-        let time = f(k, "time");
-        let v1 = f_or(k, name1, default_value);
-        let v2 = f_or(k, name2, default_value);
-        tl.set_frame2(frame, time, v1, v2);
-        duration = duration.max(time);
-        if frame + 1 < n {
-            if let Some(curve) = k.get("curve") {
-                let next = &keys[frame + 1];
-                let time2 = f(next, "time");
-                let nv1 = f_or(next, name1, default_value);
-                let nv2 = f_or(next, name2, default_value);
-                bezier = read_curve(curve, &mut tl, bezier, frame, 0, time, time2, v1, nv1);
-                bezier = read_curve(curve, &mut tl, bezier, frame, 1, time, time2, v2, nv2);
-            }
+        if !sort_draw_order_moves(slots.len(), &mut key) {
+            return Err(corrupt("offsets do not form an order"));
         }
-        frame += 1;
+        times.push(f(k, "time"));
+        moves.push(key);
     }
-    (tl, duration)
-}
-
-/// A timeline whose curve interpolation the loader can configure (stepped or
-/// Bezier), implemented by bone and constraint timelines so [`read_curve`] works
-/// for both.
-trait CurveBuilder {
-    fn stepped(&mut self, frame: usize);
-    #[allow(clippy::too_many_arguments)]
-    fn bezier(
-        &mut self,
-        bezier: usize,
-        frame: usize,
-        value: usize,
-        time1: f32,
-        value1: f32,
-        cx1: f32,
-        cy1: f32,
-        cx2: f32,
-        cy2: f32,
-        time2: f32,
-        value2: f32,
-    );
-}
-
-impl CurveBuilder for BoneTimeline {
-    fn stepped(&mut self, frame: usize) {
-        self.set_stepped(frame);
-    }
-    fn bezier(
-        &mut self,
-        bezier: usize,
-        frame: usize,
-        value: usize,
-        time1: f32,
-        value1: f32,
-        cx1: f32,
-        cy1: f32,
-        cx2: f32,
-        cy2: f32,
-        time2: f32,
-        value2: f32,
-    ) {
-        self.set_bezier(
-            bezier, frame, value, time1, value1, cx1, cy1, cx2, cy2, time2, value2,
-        );
-    }
-}
-
-impl CurveBuilder for ConstraintTimeline {
-    fn stepped(&mut self, frame: usize) {
-        self.set_stepped(frame);
-    }
-    fn bezier(
-        &mut self,
-        bezier: usize,
-        frame: usize,
-        value: usize,
-        time1: f32,
-        value1: f32,
-        cx1: f32,
-        cy1: f32,
-        cx2: f32,
-        cy2: f32,
-        time2: f32,
-        value2: f32,
-    ) {
-        self.set_bezier(
-            bezier, frame, value, time1, value1, cx1, cy1, cx2, cy2, time2, value2,
-        );
-    }
-}
-
-impl CurveBuilder for DeformTimeline {
-    fn stepped(&mut self, frame: usize) {
-        self.set_stepped(frame);
-    }
-    fn bezier(
-        &mut self,
-        bezier: usize,
-        frame: usize,
-        value: usize,
-        time1: f32,
-        value1: f32,
-        cx1: f32,
-        cy1: f32,
-        cx2: f32,
-        cy2: f32,
-        time2: f32,
-        value2: f32,
-    ) {
-        self.set_bezier(
-            bezier, frame, value, time1, value1, cx1, cy1, cx2, cy2, time2, value2,
-        );
-    }
-}
-
-/// Apply one keyframe's `curve` field (absent = linear, `"stepped"`, or a Bezier
-/// array, which holds 4 floats per value channel at offset `value_ord * 4`).
-/// Mirrors Spine's `readCurve`.
-#[allow(clippy::too_many_arguments)]
-fn read_curve(
-    curve: &Value,
-    tl: &mut impl CurveBuilder,
-    bezier: usize,
-    frame: usize,
-    value_ord: usize,
-    time1: f32,
-    time2: f32,
-    value1: f32,
-    value2: f32,
-) -> usize {
-    if let Some(s) = curve.as_str() {
-        if s == "stepped" {
-            tl.stepped(frame);
-        }
-        return bezier;
-    }
-    let Some(arr) = curve.as_array() else {
-        return bezier;
+    let Some(&duration) = times.last() else {
+        return Ok(None);
     };
-    let base = value_ord * 4;
-    let at = |i: usize| arr.get(base + i).and_then(Value::as_f64).unwrap_or(0.0) as f32;
-    tl.bezier(
-        bezier,
-        frame,
-        value_ord,
-        time1,
-        value1,
-        at(0),
-        at(1),
-        at(2),
-        at(3),
-        time2,
-        value2,
-    );
-    bezier + 1
-}
-
-/// Read a generic N-channel constraint timeline (all channels Bezier-curved).
-/// `channels` is `(json field, default)` per channel.
-fn read_curve_timeline(
-    keys: &[Value],
-    constraint: usize,
-    channels: &[(&str, f32)],
-) -> (ConstraintTimeline, f32) {
-    let n = keys.len();
-    let nc = channels.len();
-    let mut tl = ConstraintTimeline::new(constraint, n, n * nc, nc + 1);
-    let mut bezier = 0;
-    let mut duration = 0.0_f32;
-    let mut frame = 0;
-    while frame < n {
-        let k = &keys[frame];
-        let time = f(k, "time");
-        let values: Vec<f32> = channels
-            .iter()
-            .map(|(field, def)| f_or(k, field, *def))
-            .collect();
-        tl.set_frame(frame, time, &values);
-        duration = duration.max(time);
-        if frame + 1 < n {
-            if let Some(curve) = k.get("curve") {
-                let next = &keys[frame + 1];
-                let time2 = f(next, "time");
-                for (ci, (field, def)) in channels.iter().enumerate() {
-                    let v2 = f_or(next, field, *def);
-                    bezier = read_curve(
-                        curve, &mut tl, bezier, frame, ci, time, time2, values[ci], v2,
-                    );
-                }
-            }
-        }
-        frame += 1;
+    if slots.is_empty() {
+        return Ok(None);
     }
-    (tl, duration)
-}
-
-/// Read an IK constraint timeline: mix and softness are Bezier-curved. Bend
-/// direction, compress, and stretch are stored stepped.
-fn read_ik_timeline(keys: &[Value], constraint: usize) -> (ConstraintTimeline, f32) {
-    let n = keys.len();
-    let mut tl = ConstraintTimeline::new(constraint, n, n * 2, 6);
-    let mut bezier = 0;
-    let mut duration = 0.0_f32;
-    let mut frame = 0;
-    while frame < n {
-        let k = &keys[frame];
-        let time = f(k, "time");
-        let mix = f_or(k, "mix", 1.0);
-        let softness = f(k, "softness");
-        let bend = if bool_or(k, "bendPositive", true) {
-            1.0
-        } else {
-            -1.0
-        };
-        let compress = f32::from(bool_or(k, "compress", false));
-        let stretch = f32::from(bool_or(k, "stretch", false));
-        tl.set_frame(frame, time, &[mix, softness, bend, compress, stretch]);
-        duration = duration.max(time);
-        if frame + 1 < n {
-            if let Some(curve) = k.get("curve") {
-                let next = &keys[frame + 1];
-                let time2 = f(next, "time");
-                let mix2 = f_or(next, "mix", 1.0);
-                let soft2 = f(next, "softness");
-                bezier = read_curve(curve, &mut tl, bezier, frame, 0, time, time2, mix, mix2);
-                bezier = read_curve(
-                    curve, &mut tl, bezier, frame, 1, time, time2, softness, soft2,
-                );
-            }
-        }
-        frame += 1;
-    }
-    (tl, duration)
-}
-
-/// Read a slot RGBA color timeline (four channels from each keyframe's `color`
-/// hex string).
-fn read_slot_rgba_timeline(keys: &[Value], slot: usize) -> (ConstraintTimeline, f32) {
-    let n = keys.len();
-    let mut tl = ConstraintTimeline::new(slot, n, n * 4, 5);
-    let mut bezier = 0;
-    let mut duration = 0.0_f32;
-    let mut frame = 0;
-    while frame < n {
-        let k = &keys[frame];
-        let time = f(k, "time");
-        let c = parse_color(k.get("color").and_then(Value::as_str), Color::WHITE);
-        tl.set_frame(frame, time, &[c.r, c.g, c.b, c.a]);
-        duration = duration.max(time);
-        if frame + 1 < n {
-            if let Some(curve) = k.get("curve") {
-                let next = &keys[frame + 1];
-                let time2 = f(next, "time");
-                let c2 = parse_color(next.get("color").and_then(Value::as_str), Color::WHITE);
-                bezier = read_curve(curve, &mut tl, bezier, frame, 0, time, time2, c.r, c2.r);
-                bezier = read_curve(curve, &mut tl, bezier, frame, 1, time, time2, c.g, c2.g);
-                bezier = read_curve(curve, &mut tl, bezier, frame, 2, time, time2, c.b, c2.b);
-                bezier = read_curve(curve, &mut tl, bezier, frame, 3, time, time2, c.a, c2.a);
-            }
-        }
-        frame += 1;
-    }
-    (tl, duration)
-}
-
-/// Read a slot RGB color timeline (three channels from each keyframe's `color`
-/// hex string, and the slot's alpha is left unchanged).
-fn read_slot_rgb_timeline(keys: &[Value], slot: usize) -> (ConstraintTimeline, f32) {
-    let n = keys.len();
-    let mut tl = ConstraintTimeline::new(slot, n, n * 3, 4);
-    let mut bezier = 0;
-    let mut duration = 0.0_f32;
-    let mut frame = 0;
-    while frame < n {
-        let k = &keys[frame];
-        let time = f(k, "time");
-        let c = parse_color(k.get("color").and_then(Value::as_str), Color::WHITE);
-        tl.set_frame(frame, time, &[c.r, c.g, c.b]);
-        duration = duration.max(time);
-        if frame + 1 < n {
-            if let Some(curve) = k.get("curve") {
-                let next = &keys[frame + 1];
-                let time2 = f(next, "time");
-                let c2 = parse_color(next.get("color").and_then(Value::as_str), Color::WHITE);
-                bezier = read_curve(curve, &mut tl, bezier, frame, 0, time, time2, c.r, c2.r);
-                bezier = read_curve(curve, &mut tl, bezier, frame, 1, time, time2, c.g, c2.g);
-                bezier = read_curve(curve, &mut tl, bezier, frame, 2, time, time2, c.b, c2.b);
-            }
-        }
-        frame += 1;
-    }
-    (tl, duration)
-}
-
-/// Read a slot two-color timeline: the light tint (RGB, or RGBA when
-/// `light_alpha`) from each keyframe's `light` hex, then the dark tint (RGB)
-/// from `dark`.
-fn read_slot_two_color_timeline(
-    keys: &[Value],
-    slot: usize,
-    light_alpha: bool,
-) -> (ConstraintTimeline, f32) {
-    let nc = if light_alpha { 7 } else { 6 };
-    let n = keys.len();
-    let mut tl = ConstraintTimeline::new(slot, n, n * nc, nc + 1);
-    let channels = |k: &Value| -> Vec<f32> {
-        let light = parse_color(k.get("light").and_then(Value::as_str), Color::WHITE);
-        let dark = parse_color(
-            k.get("dark").and_then(Value::as_str),
-            Color::new(0.0, 0.0, 0.0, 1.0),
-        );
-        let mut v = vec![light.r, light.g, light.b];
-        if light_alpha {
-            v.push(light.a);
-        }
-        v.extend([dark.r, dark.g, dark.b]);
-        v
-    };
-    let mut bezier = 0;
-    let mut duration = 0.0_f32;
-    let mut frame = 0;
-    while frame < n {
-        let k = &keys[frame];
-        let time = f(k, "time");
-        let vals = channels(k);
-        tl.set_frame(frame, time, &vals);
-        duration = duration.max(time);
-        if frame + 1 < n {
-            if let Some(curve) = k.get("curve") {
-                let next = &keys[frame + 1];
-                let time2 = f(next, "time");
-                let next_vals = channels(next);
-                for ci in 0..nc {
-                    bezier = read_curve(
-                        curve,
-                        &mut tl,
-                        bezier,
-                        frame,
-                        ci,
-                        time,
-                        time2,
-                        vals[ci],
-                        next_vals[ci],
-                    );
-                }
-            }
-        }
-        frame += 1;
-    }
-    (tl, duration)
+    let timeline = DrawOrderFolderTimeline::new(slots, times, moves);
+    Ok(Some((Timeline::DrawOrderFolder(timeline), duration)))
 }
 
 /// Read one draw-order keyframe's `offsets` into a full slot ordering (the setup
@@ -964,20 +538,4 @@ fn read_event_timeline(
         duration = duration.max(time);
     }
     Ok((EventTimeline::new(times, events), duration))
-}
-
-/// Read one deform keyframe's sparse `offset`/`vertices` into a full `len`-long
-/// offset array (zero where unspecified). Values past the end are dropped.
-fn read_deform_frame(k: &Value, len: usize) -> Vec<f32> {
-    let mut frame = vec![0.0; len];
-    let offset = k.get("offset").and_then(Value::as_u64).unwrap_or(0);
-    let window = usize::try_from(offset)
-        .ok()
-        .and_then(|offset| frame.get_mut(offset..));
-    if let Some(window) = window {
-        for (slot, v) in window.iter_mut().zip(f_array(k, "vertices")) {
-            *slot = v;
-        }
-    }
-    frame
 }

@@ -4,9 +4,12 @@ use crate::anim::GLOBAL_PHYSICS;
 
 mod deform;
 use deform::{
-    deform_mesh_info, read_deform_timeline, read_sequence_timeline, sequence_count,
-    skip_deform_timeline,
+    deform_setup, read_deform_timeline, read_sequence_keys, skip_deform_timeline, timeline_target,
 };
+
+mod draw_order;
+use draw_order::read_draw_order_folders;
+pub(super) use draw_order::read_draw_order_timeline;
 
 /// Wrap a parsed bone timeline in its [`Timeline`] variant.
 fn wrap((tl, d): (BoneTimeline, f32), make: fn(BoneTimeline) -> Timeline) -> (Timeline, f32) {
@@ -78,21 +81,81 @@ fn next_bezier(r: &mut BinaryReader, bezier: &mut usize, capacity: usize) -> Opt
     }
 }
 
+/// A constraint type in Spine's single constraint list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ConstraintKind {
+    Ik,
+    Path,
+    Transform,
+    Physics,
+    Slider,
+}
+
+/// Spine's single constraint list: for each position, the constraint's type
+/// and its index in chine's list for that type. A constraint's `order` is its
+/// position in the single list.
+pub(super) fn constraint_list(data: &SkeletonData) -> Vec<Option<(ConstraintKind, usize)>> {
+    let mut list = vec![None; constraint_count(data)];
+    let mut put = |order: usize, kind: ConstraintKind, index: usize| {
+        if let Some(entry) = list.get_mut(order) {
+            *entry = Some((kind, index));
+        }
+    };
+    for (i, c) in data.ik_constraints.iter().enumerate() {
+        put(c.order, ConstraintKind::Ik, i);
+    }
+    for (i, c) in data.path_constraints.iter().enumerate() {
+        put(c.order, ConstraintKind::Path, i);
+    }
+    for (i, c) in data.transform_constraints.iter().enumerate() {
+        put(c.order, ConstraintKind::Transform, i);
+    }
+    for (i, c) in data.physics_constraints.iter().enumerate() {
+        put(c.order, ConstraintKind::Physics, i);
+    }
+    for (i, c) in data.sliders.iter().enumerate() {
+        put(c.order, ConstraintKind::Slider, i);
+    }
+    list
+}
+
+/// Resolve a constraint timeline's `index` into Spine's single constraint list
+/// to the constraint's index in chine's list for `kind`. An index past the
+/// list, or one that names a constraint of another type, is corrupt.
+fn constraint_index(
+    r: &mut BinaryReader,
+    constraints: &[Option<(ConstraintKind, usize)>],
+    index: usize,
+    kind: ConstraintKind,
+) -> usize {
+    match constraints.get(index) {
+        Some(&Some((found, i))) if found == kind => i,
+        _ => {
+            corrupt(r);
+            index
+        }
+    }
+}
+
 /// Parse one animation, group by group. A timeline's target index is checked
-/// against the table it points into. An unknown timeline type records an
-/// error and stops the parse early with the timelines read so far, and the
-/// load then fails.
+/// against the table it points into. Constraint timelines index Spine's
+/// single constraint list (see [`constraint_list`]) and are stored with the
+/// index in chine's list for their type. Attachment timelines index Spine's
+/// skin list (see [`SkinList`]). An unknown timeline type records an error
+/// and stops the parse early with the timelines read so far, and the load
+/// then fails.
 pub(super) fn read_animation(
     r: &mut BinaryReader,
     name: String,
     data: &SkeletonData,
+    constraints: &[Option<(ConstraintKind, usize)>],
+    skins: SkinList,
     strings: &[String],
     nonessential: bool,
 ) -> Animation {
     let _timeline_count = r.var_usize();
     let mut timelines = Vec::new();
     let mut duration = 0.0_f32;
-    let constraints = constraint_count(data);
 
     // Slot timelines: per animated slot, one or more typed timelines (color,
     // two-color, attachment, alpha).
@@ -144,7 +207,8 @@ pub(super) fn read_animation(
     }
 
     // Bone timelines: one group per animated bone, each with one or more typed
-    // timelines (rotate / translate / scale / shear and their single axes).
+    // timelines (rotate / translate / scale / shear, their single axes, and
+    // inherit).
     let bone_groups = r.count();
     for _ in 0..bone_groups {
         let bone = r.var_usize();
@@ -166,6 +230,10 @@ pub(super) fn read_animation(
                 7 => wrap(read_bone_timeline2(r, bone, frames), Timeline::Shear),
                 8 => axis(read_bone_timeline1(r, bone, frames), BoneAxis::ShearX),
                 9 => axis(read_bone_timeline1(r, bone, frames), BoneAxis::ShearY),
+                10 => {
+                    let (tl, d) = read_inherit_timeline(r, bone, frames);
+                    (Timeline::Inherit(tl), d)
+                }
                 _ => {
                     r.fail(BinaryError::UnknownTimelineType(kind));
                     return Animation::new(name, duration, timelines);
@@ -178,15 +246,13 @@ pub(super) fn read_animation(
 
     // Remaining timeline groups: IK, transform, path, physics, slider,
     // attachment / deform, draw order, and events. Constraint timelines index
-    // Spine's single constraint list, so each index is checked against the
-    // constraint count.
+    // Spine's single constraint list, and each index must name a constraint
+    // of the timeline's type.
     // IK constraint timelines (one per animated IK constraint).
     let ik_groups = r.count();
     for _ in 0..ik_groups {
-        let index = r.var_usize();
-        if index >= constraints {
-            corrupt(r);
-        }
+        let raw = r.var_usize();
+        let index = constraint_index(r, constraints, raw, ConstraintKind::Ik);
         let frames = frame_count(r);
         let (tl, d) = read_ik_constraint_timeline(r, index, frames);
         duration = duration.max(d);
@@ -196,10 +262,8 @@ pub(super) fn read_animation(
     // Transform constraint timelines (six mix channels).
     let transform_groups = r.count();
     for _ in 0..transform_groups {
-        let index = r.var_usize();
-        if index >= constraints {
-            corrupt(r);
-        }
+        let raw = r.var_usize();
+        let index = constraint_index(r, constraints, raw, ConstraintKind::Transform);
         let frames = frame_count(r);
         let (tl, d) = read_curve_timeline_n(r, index, frames, TRANSFORM_MIX.len());
         duration = duration.max(d);
@@ -209,10 +273,8 @@ pub(super) fn read_animation(
     // Path constraint timelines: position, spacing, or mix per inner entry.
     let path_groups = r.count();
     for _ in 0..path_groups {
-        let index = r.var_usize();
-        if index >= constraints {
-            corrupt(r);
-        }
+        let raw = r.var_usize();
+        let index = constraint_index(r, constraints, raw, ConstraintKind::Path);
         let count = r.count();
         for _ in 0..count {
             let kind = r.byte();
@@ -252,12 +314,7 @@ pub(super) fn read_animation(
         let raw = r.var_usize();
         let index = match raw.checked_sub(1) {
             None => GLOBAL_PHYSICS,
-            Some(index) => {
-                if index >= constraints {
-                    corrupt(r);
-                }
-                index
-            }
+            Some(index) => constraint_index(r, constraints, index, ConstraintKind::Physics),
         };
         let count = r.count();
         for _ in 0..count {
@@ -295,10 +352,8 @@ pub(super) fn read_animation(
     // one-value curve setting the slider's pose.
     let slider_groups = r.count();
     for _ in 0..slider_groups {
-        let index = r.var_usize();
-        if index >= constraints {
-            corrupt(r);
-        }
+        let raw = r.var_usize();
+        let index = constraint_index(r, constraints, raw, ConstraintKind::Slider);
         let count = r.count();
         for _ in 0..count {
             let kind = r.byte();
@@ -316,13 +371,14 @@ pub(super) fn read_animation(
         }
     }
 
-    // Attachment timelines, nested skins -> slots -> attachments. Mesh deforms
+    // Attachment timelines, nested skins -> slots -> attachments. Vertex deforms
     // and sequence (animated attachment) timelines are both built and applied.
-    // Skin index 0 is the default skin, and `i` is the named skin `i - 1`.
+    // Skins are indexed in Spine's skin list (see `SkinList`).
     let deform_skins = r.count();
     for _ in 0..deform_skins {
         let skin_index = r.var_usize();
-        if skin_index > data.skins.len() {
+        let skin = skins.get(skin_index);
+        if skin.is_none() {
             corrupt(r);
         }
         let slots = r.count();
@@ -336,12 +392,12 @@ pub(super) fn read_animation(
                 let att_name = string_ref(r, strings).unwrap_or_default();
                 let kind = r.byte();
                 let frames = frame_count(r);
+                // The attachment the timeline drives, in the skin it names.
+                let target = skin.and_then(|skin| timeline_target(data, skin, slot, &att_name));
                 match kind {
-                    0 => match deform_mesh_info(data, skin_index, slot, &att_name) {
-                        Some((frame_len, setup, tl_skin)) => {
-                            let (tl, d) = read_deform_timeline(
-                                r, slot, att_name, tl_skin, setup, frame_len, frames,
-                            );
+                    0 => match target.and_then(deform_setup) {
+                        Some((target, frame_len, setup)) => {
+                            let (tl, d) = read_deform_timeline(r, target, setup, frame_len, frames);
                             duration = duration.max(d);
                             timelines.push(Timeline::Deform(tl));
                         }
@@ -349,10 +405,15 @@ pub(super) fn read_animation(
                         None => skip_deform_timeline(r, frames),
                     },
                     1 => {
-                        let count = sequence_count(data, skin_index, slot, &att_name).unwrap_or(0);
-                        let (tl, d) = read_sequence_timeline(r, slot, att_name, count, frames);
-                        duration = duration.max(d);
-                        timelines.push(Timeline::Sequence(tl));
+                        let (keys, d) = read_sequence_keys(r, frames);
+                        // A timeline for a missing attachment has nothing to
+                        // drive.
+                        if let Some((target, _)) = target {
+                            let (times, mode_and_index, delays) = keys;
+                            let tl = SequenceTimeline::new(target, times, mode_and_index, delays);
+                            duration = duration.max(d);
+                            timelines.push(Timeline::Sequence(tl));
+                        }
                     }
                     _ => {
                         r.fail(BinaryError::UnknownTimelineType(kind));
@@ -371,25 +432,10 @@ pub(super) fn read_animation(
         timelines.push(Timeline::DrawOrder(tl));
     }
 
-    // Draw-order folder timelines (new in Spine 4.3): folder-scoped slot
-    // reorders. chine has no folder timeline, so these are consumed to keep the
-    // stream aligned.
-    let folder_count = r.count();
-    for _ in 0..folder_count {
-        let folder_slot_count = r.count();
-        for _ in 0..folder_slot_count {
-            r.var_usize();
-        }
-        let key_count = r.count();
-        for _ in 0..key_count {
-            r.float();
-            let change_count = r.count();
-            for _ in 0..change_count {
-                r.var_usize();
-                r.var_usize();
-            }
-        }
-    }
+    // Draw order folder timelines (new in Spine 4.3): the draw order of a
+    // folder of slots.
+    let d = read_draw_order_folders(r, data.slots.len(), &mut timelines);
+    duration = duration.max(d);
 
     // Event timeline: keyframes that fire named events with per-key overrides.
     let event_count = r.count();
@@ -447,6 +493,31 @@ pub(super) fn read_bone_timeline1(
         value = value2;
     }
     (tl, duration)
+}
+
+/// Read a bone inherit timeline: per frame a time and an inherit-mode byte.
+/// Stepped, so there is no curve data. A mode past the five Spine defines is
+/// corrupt.
+pub(super) fn read_inherit_timeline(
+    r: &mut BinaryReader,
+    bone: usize,
+    frames: usize,
+) -> (InheritTimeline, f32) {
+    let frames = fitting_frames(r, frames, 5);
+    let mut times = Vec::with_capacity(frames);
+    let mut modes = Vec::with_capacity(frames);
+    let mut duration = 0.0_f32;
+    for _ in 0..frames {
+        let time = r.float();
+        let mode = r.byte();
+        if mode > 4 {
+            corrupt(r);
+        }
+        times.push(time);
+        modes.push(inherit_from(usize::from(mode)));
+        duration = duration.max(time);
+    }
+    (InheritTimeline::new(bone, times, modes), duration)
 }
 
 /// Read a two-value bone timeline (translate / scale / shear). The stream gives
@@ -689,77 +760,6 @@ fn read_slot_attachment_timeline(
         duration = duration.max(time);
     }
     (AttachmentTimeline::new(slot, times, names), duration)
-}
-
-/// Read a draw-order timeline: per frame a time and a set of slot moves (each a
-/// slot index and an offset), resolved into a full slot permutation. A frame
-/// with no moves keeps the setup order.
-pub(super) fn read_draw_order_timeline(
-    r: &mut BinaryReader,
-    frames: usize,
-    slot_count: usize,
-) -> (DrawOrderTimeline, f32) {
-    let frames = fitting_frames(r, frames, 5);
-    let mut times = Vec::with_capacity(frames);
-    let mut orders = Vec::with_capacity(frames);
-    let mut duration = 0.0_f32;
-    for _ in 0..frames {
-        let time = r.float();
-        let change_count = r.count();
-        let mut offsets: Vec<(usize, i32)> = Vec::with_capacity(change_count);
-        for _ in 0..change_count {
-            let slot = r.var_usize();
-            // The offset is a signed 32-bit value stored as a var_uint, so
-            // this cast reinterprets its bits.
-            let offset = r.var_uint() as i32;
-            offsets.push((slot, offset));
-        }
-        let order = if offsets.is_empty() {
-            (0..slot_count).collect()
-        } else {
-            resolve_draw_order(r, slot_count, &mut offsets)
-        };
-        times.push(time);
-        orders.push(order);
-        duration = duration.max(time);
-    }
-    (DrawOrderTimeline::new(times, orders), duration)
-}
-
-/// Resolve one draw-order key's slot moves into a full slot permutation.
-///
-/// Spine moves each slot at most once and keeps it inside the slot list, so
-/// the key must name distinct slots in range, move each to a position in
-/// range, and move no two slots to the same position. Any other key is
-/// corrupt: this records the error and keeps the setup order.
-fn resolve_draw_order(
-    r: &mut BinaryReader,
-    slot_count: usize,
-    offsets: &mut [(usize, i32)],
-) -> Vec<usize> {
-    let in_range = |&(slot, offset): &(usize, i32)| {
-        i32::try_from(slot_count).is_ok()
-            && slot < slot_count
-            && isize::try_from(offset)
-                .ok()
-                .and_then(|offset| slot.checked_add_signed(offset))
-                .is_some_and(|position| position < slot_count)
-    };
-    offsets.sort_by_key(|&(slot, _)| slot);
-    let distinct = offsets
-        .iter()
-        .zip(offsets.iter().skip(1))
-        .all(|(a, b)| a.0 < b.0);
-    if distinct && offsets.iter().all(in_range) {
-        let order = compute_draw_order(slot_count, offsets);
-        // Two slots moved to one position leave a gap the permutation
-        // cannot fill, marked by `usize::MAX`.
-        if !order.contains(&usize::MAX) {
-            return order;
-        }
-    }
-    corrupt(r);
-    (0..slot_count).collect()
 }
 
 /// Read an event timeline: per frame a time and the fired event. Each event's

@@ -11,6 +11,9 @@
 // (`skeletonData`, `atlasData`, `textureData`) and registers under Spine's
 // element name `<spine-skeleton>` as well as `<chine-spine>`. The skeleton may
 // be a binary `.skel` or a `.json` export; the type is auto-detected.
+//
+// The optional `skin` attribute names the skin to show. It is read at load
+// time and again whenever it changes.
 
 import init, { WebSpine } from "../pkg/chine_web.js";
 
@@ -52,6 +55,17 @@ function makeSpine(canvas, skelBytes, atlasText) {
   return WebSpine.from_binary(canvas, skelBytes, atlasText);
 }
 
+// Spine's `<spine-skeleton>` takes a comma-separated list of skins and
+// combines them. chine-web shows one skin: the first name in the list. No
+// name shows the default skin.
+function firstSkin(value) {
+  const name = (value || "")
+    .split(",")
+    .map((s) => s.trim())
+    .find((s) => s);
+  return name || "default";
+}
+
 function loadImage(src) {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -63,6 +77,15 @@ function loadImage(src) {
 }
 
 class ChineSpine extends HTMLElement {
+  static get observedAttributes() {
+    return ["skin"];
+  }
+
+  // Before the skeleton loads, `_boot` reads the attribute instead.
+  attributeChangedCallback(name) {
+    if (name === "skin" && this._spine) this._applySkin();
+  }
+
   connectedCallback() {
     if (this._booted) return;
     this._booted = true;
@@ -107,6 +130,7 @@ class ChineSpine extends HTMLElement {
       const skelBytes = new Uint8Array(await fetch(skelUrl).then((r) => r.arrayBuffer()));
       this._spine = makeSpine(this._canvas, skelBytes, atlasText);
     }
+    this._applySkin();
 
     // Upload each atlas page image as a texture, in page order.
     for (const name of this._spine.page_names()) {
@@ -120,6 +144,13 @@ class ChineSpine extends HTMLElement {
 
     this._last = performance.now();
     this._loop();
+  }
+
+  _applySkin() {
+    const skin = firstSkin(this.getAttribute("skin"));
+    if (!this._spine.set_skin(skin)) {
+      console.warn("[chine-spine] unknown skin, showing the default:", skin);
+    }
   }
 
   _resize() {

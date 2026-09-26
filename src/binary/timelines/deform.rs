@@ -1,4 +1,4 @@
-//! Attachment timelines: mesh deform and sequence (flipbook) keys, read from
+//! Attachment timelines: vertex deform and sequence (flipbook) keys, read from
 //! the nested skin, slot, and attachment groups of an animation.
 
 use super::*;
@@ -38,35 +38,43 @@ pub(super) fn skip_deform_timeline(r: &mut BinaryReader, frames: usize) {
     }
 }
 
-/// The number of regions in a sequenced region/mesh attachment, for a sequence
-/// timeline's index wrapping.
-pub(super) fn sequence_count(
-    data: &SkeletonData,
-    skin_index: usize,
+/// The attachment an attachment timeline drives: `name` in `slot` of `skin`
+/// (`None` for the default skin, else an index into `data.skins`). Spine looks
+/// only in that skin. A mesh's timeline slots join the target.
+pub(super) fn timeline_target<'d>(
+    data: &'d SkeletonData,
+    skin: Option<usize>,
     slot: usize,
     name: &str,
-) -> Option<usize> {
-    let skin = if skin_index == 0 {
-        None
-    } else {
-        data.skins.get(skin_index - 1)
+) -> Option<(AttachmentTarget, &'d Attachment)> {
+    let (skin_name, skin) = match skin {
+        None => (None, &data.default_skin),
+        Some(i) => {
+            let skin = data.skins.get(i)?;
+            (Some(skin.name.clone()), skin)
+        }
     };
-    match data.attachment(slot, name, skin) {
-        Some(Attachment::Region(r)) => r.sequence.as_ref().map(|s| s.count),
-        Some(Attachment::Mesh(m)) => m.sequence.as_ref().map(|s| s.count),
-        _ => None,
-    }
+    let attachment = skin.attachment(slot, name)?;
+    let timeline_slots = match attachment {
+        Attachment::Mesh(mesh) => Arc::clone(&mesh.timeline_slots),
+        _ => Vec::new().into(),
+    };
+    let key = AttachmentKey {
+        skin: skin_name,
+        slot,
+        name: name.to_string(),
+    };
+    Some((AttachmentTarget::new(key, timeline_slots), attachment))
 }
 
-/// Read a sequence (flipbook) timeline: per frame a time, a packed mode-and-index
-/// int, and a delay. Stepped, so there is no curve data.
-pub(super) fn read_sequence_timeline(
-    r: &mut BinaryReader,
-    slot: usize,
-    attachment: String,
-    count: usize,
-    frames: usize,
-) -> (SequenceTimeline, f32) {
+/// A sequence timeline's keys: the times, the packed modes and indices,
+/// and the delays.
+pub(super) type SequenceKeys = (Vec<f32>, Vec<u32>, Vec<f32>);
+
+/// Read a sequence (flipbook) timeline's keys: per frame a time, a packed
+/// mode-and-index int, and a delay. Stepped, so there is no curve data.
+/// Returns the keys and the duration.
+pub(super) fn read_sequence_keys(r: &mut BinaryReader, frames: usize) -> (SequenceKeys, f32) {
     let frames = fitting_frames(r, frames, 12);
     let mut times = Vec::with_capacity(frames);
     let mut mode_and_index = Vec::with_capacity(frames);
@@ -79,35 +87,23 @@ pub(super) fn read_sequence_timeline(
         times.push(time);
         duration = duration.max(time);
     }
-    (
-        SequenceTimeline::new(slot, attachment, count, times, mode_and_index, delays),
-        duration,
-    )
+    ((times, mode_and_index, delays), duration)
 }
 
-/// Resolve a deform timeline's mesh: the setup-pose deform length, the setup
-/// vertices to add at apply time (zeros for a weighted mesh), and the
-/// timeline's skin name (`None` for the default skin). Returns `None` when no
-/// matching mesh is found, so the caller consumes the bytes instead.
-pub(super) fn deform_mesh_info(
-    data: &SkeletonData,
-    skin_index: usize,
-    slot: usize,
-    name: &str,
-) -> Option<(usize, Vec<f32>, Option<String>)> {
-    let skin = if skin_index == 0 {
-        None
-    } else {
-        data.skins.get(skin_index - 1)
-    };
-    let Some(Attachment::Mesh(mesh)) = data.attachment(slot, name, skin) else {
-        return None;
-    };
-    let frame_len = mesh.deform_len();
-    let setup = mesh
-        .setup_vertices()
+/// Resolve a deform timeline's target, a mesh, path, bounding box, or
+/// clipping polygon: the target, the setup-pose deform length, and the setup
+/// vertices to add at apply time (zeros for weighted vertices). Returns
+/// `None` for any other attachment, so the caller consumes the bytes
+/// instead.
+pub(super) fn deform_setup(
+    (target, attachment): (AttachmentTarget, &Attachment),
+) -> Option<(AttachmentTarget, usize, Vec<f32>)> {
+    let vertices = attachment.deform_vertices()?;
+    let frame_len = vertices.deform_len();
+    let setup = vertices
+        .unweighted()
         .map_or_else(|| vec![0.0; frame_len], <[f32]>::to_vec);
-    Some((frame_len, setup, skin.map(|s| s.name.clone())))
+    Some((target, frame_len, setup))
 }
 
 /// Read a mesh-deform timeline into chine's relative-offset model: per frame a
@@ -117,9 +113,7 @@ pub(super) fn deform_mesh_info(
 /// that ends past the mesh's `frame_len` deform values is corrupt.
 pub(super) fn read_deform_timeline(
     r: &mut BinaryReader,
-    slot: usize,
-    attachment: String,
-    skin: Option<String>,
+    target: AttachmentTarget,
     setup: Vec<f32>,
     frame_len: usize,
     frames: usize,
@@ -162,15 +156,7 @@ pub(super) fn read_deform_timeline(
         time = time2;
     }
     let duration = times.last().copied().unwrap_or(0.0);
-    let mut tl = DeformTimeline::new(
-        slot,
-        attachment,
-        skin,
-        setup,
-        times.clone(),
-        offsets,
-        beziers,
-    );
+    let mut tl = DeformTimeline::new(target, setup, times.clone(), offsets, beziers);
     let mut bezier = 0;
     // Segment `frame` runs from `times[frame]` to `times[frame + 1]`.
     let spans = times.iter().zip(times.iter().skip(1));

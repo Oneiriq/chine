@@ -244,6 +244,36 @@ pub(super) fn apply_bone_axis(
     }
 }
 
+/// Bone inherit timeline: set the bone's inherit mode to the key at or before
+/// `time`. The mode steps, so `alpha` does not apply. Before the first key,
+/// and when mixing out, the bone returns to its setup mode unless blending
+/// from the current pose.
+pub(super) fn apply_inherit(
+    t: &InheritTimeline,
+    skel: &mut Skeleton,
+    time: f32,
+    from: MixFrom,
+    out: bool,
+) {
+    let Some((bone, setup)) = skel.bone_and_setup(t.bone) else {
+        return;
+    };
+    let Some(&first) = t.times.first() else {
+        return;
+    };
+    if out || time < first {
+        if !matches!(from, MixFrom::Current) {
+            bone.inherit = setup.inherit;
+        }
+        return;
+    }
+    // The last key at or before `time`. `time >= first`, so there is one.
+    let key = t.times.partition_point(|&k| k <= time).saturating_sub(1);
+    if let Some(&mode) = t.modes.get(key) {
+        bone.inherit = mode;
+    }
+}
+
 /// Reset one scale channel toward its setup value (the before-first-frame case).
 pub(super) fn apply_scale_setup(scale: &mut f32, setup: f32, alpha: f32, from: MixFrom) {
     match from {
@@ -517,8 +547,8 @@ pub(super) fn apply_path_mix(
 }
 
 /// Physics constraint timeline: drives one tunable on one constraint, or on
-/// every constraint whose matching global flag is set when the target is
-/// [`GLOBAL_PHYSICS`].
+/// every active constraint whose matching global flag is set when the target
+/// is [`GLOBAL_PHYSICS`]. An inactive constraint is left alone.
 pub(super) fn apply_physics(
     t: &ConstraintTimeline,
     property: PhysicsProperty,
@@ -529,12 +559,7 @@ pub(super) fn apply_physics(
     add: bool,
 ) {
     if t.constraint == GLOBAL_PHYSICS {
-        let data = skel.data_arc();
-        for (pose, setup) in skel
-            .physics_constraints_mut()
-            .iter_mut()
-            .zip(&data.physics_constraints)
-        {
+        for (pose, setup) in skel.active_physics_poses_and_setup() {
             if property_global(setup, property) {
                 apply_physics_one(pose, setup, property, &t.curve, time, alpha, from, add);
             }
@@ -604,7 +629,8 @@ pub(super) fn apply_physics_one(
 
 /// Physics reset timeline: if a keyframe time falls in the window
 /// `(last_time, time]` (handling a loop wrap where `time < last_time`), reset
-/// the target constraint, or every physics constraint when global.
+/// the target constraint, or every active physics constraint when global. An
+/// inactive constraint is not reset.
 pub(super) fn apply_physics_reset(
     t: &PhysicsResetTimeline,
     skel: &mut Skeleton,

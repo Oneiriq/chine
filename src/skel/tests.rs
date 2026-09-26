@@ -1,6 +1,7 @@
 use super::*;
 use crate::constraint::ScaleYMode;
 use crate::data::BoneData;
+use crate::skin::SkinConstraint;
 use glam::Vec2;
 
 const EPS: f32 = 1e-4;
@@ -116,6 +117,7 @@ fn physics_skel(gravity: f32) -> Skeleton {
         physics_constraints: vec![PhysicsConstraintData {
             name: "phys".into(),
             order: 0,
+            skin_required: false,
             bone: 1,
             x: 0.0,
             y: 1.0,
@@ -203,6 +205,7 @@ fn ik(order: usize, bones: Vec<usize>, target: usize) -> IkConstraintData {
     IkConstraintData {
         name: "ik".into(),
         order,
+        skin_required: false,
         bones,
         target,
         scale_y_mode: ScaleYMode::None,
@@ -223,6 +226,7 @@ fn transform(
     TransformConstraintData {
         name: "tc".into(),
         order,
+        skin_required: false,
         bones,
         source,
         offsets: [0.0; 6],
@@ -244,6 +248,7 @@ fn path(order: usize, slot: usize, bones: Vec<usize>) -> PathConstraintData {
     PathConstraintData {
         name: "path".into(),
         order,
+        skin_required: false,
         bones,
         slot,
         position_mode: Default::default(),
@@ -439,4 +444,278 @@ fn update_cache_growth_is_bounded() {
         sk.update_cache.len()
     );
     assert!(constraint_entries(&sk) < 2 * pairs);
+}
+
+/// A root, a skin-required bone 1 with a skin-required child 2 (each 5 along
+/// x), and a bone 3 that is not skin-required. Slot 0 on bone 2 shows the
+/// region "r". Skin "s" lists bone 2, and `constraints` adds to it and to the
+/// rig.
+fn skin_required_rig(constraints: impl FnOnce(&mut SkeletonData, &mut Skin)) -> Skeleton {
+    use crate::attach::{Attachment, RegionAttachment};
+    use crate::data::{BlendMode, SlotData};
+
+    let required = |i, parent| BoneData {
+        skin_required: true,
+        ..bone(i, parent)
+    };
+    let mut default = Skin::new("default");
+    let mut region = RegionAttachment::new("r", "r");
+    region.width = 2.0;
+    region.height = 2.0;
+    default.set(0, "r", crate::attach::Attachment::Region(region));
+    let _: &Attachment = default.attachment(0, "r").unwrap();
+    let mut skin = Skin::new("s");
+    skin.bones.push(2);
+    let mut data = SkeletonData {
+        bones: vec![
+            bone(0, None),
+            required(1, Some(0)),
+            required(2, Some(1)),
+            bone(3, Some(0)),
+        ],
+        slots: vec![SlotData {
+            index: 0,
+            name: "slot".into(),
+            bone: 2,
+            color: Color::WHITE,
+            dark_color: None,
+            attachment: Some("r".into()),
+            blend: BlendMode::Normal,
+        }],
+        default_skin: default,
+        ..Default::default()
+    };
+    constraints(&mut data, &mut skin);
+    data.skins.push(skin);
+    Skeleton::new(Arc::new(data))
+}
+
+// Spine poses a skin-required bone, and draws the slots on it, only while the
+// active skin lists it or a descendant. chine read the flag and the skin's
+// bone list and dropped both, so every bone always applied.
+#[test]
+fn skin_required_bones_apply_only_with_their_skin() {
+    let mut sk = skin_required_rig(|_, _| {});
+    let active = |sk: &Skeleton| sk.bones().iter().map(Bone::active).collect::<Vec<_>>();
+    assert_eq!(active(&sk), [true, false, false, true]);
+    sk.update_world_transform();
+    assert_eq!(sk.bone(2).unwrap().world_x(), 0.0);
+    assert!(crate::render::render(&sk).is_empty());
+
+    // The skin lists bone 2, which activates its ancestor bone 1 too.
+    sk.set_skin("s");
+    assert_eq!(active(&sk), [true, true, true, true]);
+    sk.update_world_transform();
+    assert!(close(sk.bone(2).unwrap().world_x(), 15.0));
+    assert_eq!(crate::render::render(&sk).len(), 1);
+
+    sk.clear_skin();
+    assert_eq!(active(&sk), [true, false, false, true]);
+    assert!(crate::render::render(&sk).is_empty());
+}
+
+// Timelines leave an inactive bone alone.
+#[test]
+fn timelines_leave_inactive_bones_alone() {
+    use crate::anim::{BoneTimeline, MixFrom, Timeline};
+
+    let mut rotate = BoneTimeline::one_value(1, 1, 0);
+    rotate.set_frame1(0, 0.0, 45.0);
+    let rotate = Timeline::Rotate(rotate);
+    let mut sk = skin_required_rig(|_, _| {});
+    rotate.apply(&mut sk, 0.0, 0.0, 1.0, MixFrom::Setup, false, false);
+    assert_eq!(sk.bone(1).unwrap().rotation, 0.0);
+    sk.set_skin("s");
+    rotate.apply(&mut sk, 0.0, 0.0, 1.0, MixFrom::Setup, false, false);
+    assert_eq!(sk.bone(1).unwrap().rotation, 45.0);
+}
+
+// A skin-required constraint applies only while the active skin lists it,
+// and a constraint whose source bone is inactive does not apply at all.
+#[test]
+fn skin_required_constraints_apply_only_with_their_skin() {
+    use crate::constraint::transform::{FromMapping, FromProp, ToMapping, ToProp};
+
+    let mapped = |source| TransformConstraintData {
+        properties: vec![FromMapping {
+            property: FromProp::X,
+            offset: 0.0,
+            to: vec![ToMapping {
+                property: ToProp::X,
+                offset: 0.0,
+                max: 0.0,
+                scale: 1.0,
+            }],
+        }],
+        ..transform(0, source, vec![3], false)
+    };
+    // A transform constraint that maps bone 0's x onto bone 3 moves bone 3
+    // off x 10.
+    let moved = |sk: &mut Skeleton| {
+        sk.update_world_transform();
+        !close(sk.bone(3).unwrap().world_x(), 10.0)
+    };
+
+    let mut sk = skin_required_rig(|data, skin| {
+        data.transform_constraints.push(TransformConstraintData {
+            skin_required: true,
+            ..mapped(0)
+        });
+        skin.constraints.push(SkinConstraint::Transform(0));
+    });
+    assert!(!moved(&mut sk));
+    sk.set_skin("s");
+    assert!(moved(&mut sk));
+
+    // Its source, bone 2, is active only with the skin.
+    let mut sk = skin_required_rig(|data, _| {
+        data.transform_constraints.push(mapped(2));
+    });
+    assert!(!moved(&mut sk));
+    sk.set_skin("s");
+    assert!(moved(&mut sk));
+}
+
+// Spine's constraint timelines return early for an inactive constraint, so its
+// pose keeps the values it had. chine's timelines keyed the pose anyway. It
+// had no visible effect, since an inactive constraint is not applied, but the
+// pose was wrong the moment the constraint became active again.
+#[test]
+fn timelines_leave_inactive_constraints_alone() {
+    use crate::anim::{
+        ConstraintTimeline, MixFrom, PhysicsProperty, PhysicsResetTimeline, Timeline,
+        GLOBAL_PHYSICS,
+    };
+    use crate::constraint::slider::SliderData;
+
+    // One skin-required constraint of each kind, all listed by skin "s", plus
+    // an IK constraint that is not skin-required but whose target, bone 2, is
+    // active only with the skin.
+    let mut sk = skin_required_rig(|data, skin| {
+        let required = true;
+        data.ik_constraints.push(IkConstraintData {
+            skin_required: required,
+            ..ik(0, vec![3], 0)
+        });
+        data.ik_constraints.push(ik(1, vec![3], 2));
+        data.transform_constraints.push(TransformConstraintData {
+            skin_required: required,
+            ..transform(2, 0, vec![3], false)
+        });
+        data.path_constraints.push(PathConstraintData {
+            skin_required: required,
+            ..path(3, 0, vec![3])
+        });
+        data.physics_constraints.push(PhysicsConstraintData {
+            skin_required: required,
+            mix_global: true,
+            ..physics(4, 3)
+        });
+        data.sliders.push(SliderData {
+            skin_required: required,
+            order: 5,
+            ..Default::default()
+        });
+        skin.constraints.extend([
+            SkinConstraint::Ik(0),
+            SkinConstraint::Transform(0),
+            SkinConstraint::Path(0),
+            SkinConstraint::Physics(0),
+            SkinConstraint::Slider(0),
+        ]);
+    });
+
+    // One key at time 0 for every constraint timeline kind. `entries` counts
+    // the time plus the channels.
+    let keyed = |constraint: usize, entries: usize, value: f32| {
+        let mut timeline = ConstraintTimeline::new(constraint, 1, 0, entries);
+        timeline.set_frame(0, 0.0, &vec![value; entries - 1]);
+        timeline
+    };
+    let timelines = [
+        Timeline::Ik(keyed(0, 6, 0.25)),
+        Timeline::Ik(keyed(1, 6, 0.25)),
+        Timeline::TransformMix(keyed(0, 7, 0.25)),
+        Timeline::PathPosition(keyed(0, 2, 7.0)),
+        Timeline::PathSpacing(keyed(0, 2, 3.0)),
+        Timeline::PathMix(keyed(0, 4, 0.25)),
+        Timeline::Physics(keyed(0, 2, 0.25), PhysicsProperty::Strength),
+        Timeline::Physics(keyed(GLOBAL_PHYSICS, 2, 0.25), PhysicsProperty::Mix),
+        Timeline::PhysicsReset(PhysicsResetTimeline::new(0, vec![0.0])),
+        Timeline::SliderTime(keyed(0, 2, 0.5)),
+        Timeline::SliderMix(keyed(0, 2, 0.25)),
+    ];
+    let apply_all = |sk: &mut Skeleton| {
+        for timeline in &timelines {
+            timeline.apply(sk, -1.0, 0.0, 1.0, MixFrom::Setup, false, false);
+        }
+    };
+    let poses = |sk: &Skeleton| {
+        let (ik, tc, pc) = (
+            &sk.ik_constraints,
+            &sk.transform_constraints[0],
+            &sk.path_constraints[0],
+        );
+        let (phys, slider) = (&sk.physics_constraints[0], &sk.sliders[0]);
+        vec![
+            ik[0].mix,
+            ik[1].mix,
+            tc.mix_rotate,
+            tc.mix_x,
+            pc.position,
+            pc.spacing,
+            pc.mix_rotate,
+            phys.strength,
+            phys.mix,
+            slider.time,
+            slider.mix,
+        ]
+    };
+
+    let activity = |sk: &Skeleton| {
+        let a = &sk.constraint_activity;
+        [
+            a.ik.clone(),
+            a.transform.clone(),
+            a.path.clone(),
+            a.physics.clone(),
+            a.sliders.clone(),
+        ]
+    };
+    let none = [
+        vec![false, false],
+        vec![false],
+        vec![false],
+        vec![false],
+        vec![false],
+    ];
+    assert_eq!(activity(&sk), none);
+
+    let setup = poses(&sk);
+    apply_all(&mut sk);
+    assert_eq!(poses(&sk), setup);
+    assert!(!sk.physics_constraints[0].take_pending_reset());
+
+    sk.set_skin("s");
+    let all = [
+        vec![true, true],
+        vec![true],
+        vec![true],
+        vec![true],
+        vec![true],
+    ];
+    assert_eq!(activity(&sk), all);
+    apply_all(&mut sk);
+    assert_eq!(
+        poses(&sk),
+        [0.25, 0.25, 0.25, 0.25, 7.0, 3.0, 0.25, 0.25, 0.25, 0.5, 0.25]
+    );
+    assert!(sk.physics_constraints[0].take_pending_reset());
+
+    // Clearing the skin makes them inactive again, and the keyed poses stay.
+    sk.clear_skin();
+    assert_eq!(activity(&sk), none);
+    let keyed_poses = poses(&sk);
+    apply_all(&mut sk);
+    assert_eq!(poses(&sk), keyed_poses);
 }

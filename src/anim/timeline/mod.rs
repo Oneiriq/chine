@@ -8,11 +8,13 @@
 //! bone, constraint, physics reset, and event timelines, and the `slot` module
 //! holds the slot timelines.
 
+use std::sync::Arc;
+
 use super::curve::{absolute_value_with, Curve};
 use super::MixFrom;
-use crate::attach::Attachment;
+use crate::attach::{Attachment, AttachmentKey, MeshAttachment};
 use crate::constraint::physics::{PhysicsConstraint, PhysicsConstraintData};
-use crate::data::Color;
+use crate::data::{Color, Inherit};
 use crate::event::Event;
 use crate::skel::Skeleton;
 
@@ -149,6 +151,22 @@ impl PhysicsResetTimeline {
     }
 }
 
+/// A bone inherit timeline: stepped `(time, mode)` pairs setting how a bone
+/// inherits its parent's transform.
+#[derive(Debug, Clone)]
+pub(crate) struct InheritTimeline {
+    bone: usize,
+    times: Vec<f32>,
+    modes: Vec<Inherit>,
+}
+
+impl InheritTimeline {
+    /// An inherit timeline for `bone`, one mode per keyframe time.
+    pub(crate) fn new(bone: usize, times: Vec<f32>, modes: Vec<Inherit>) -> Self {
+        Self { bone, times, modes }
+    }
+}
+
 /// A slot attachment timeline: stepped `(time, name)` pairs selecting which
 /// attachment a slot shows (`None` hides it).
 #[derive(Debug, Clone)]
@@ -180,6 +198,60 @@ impl DrawOrderTimeline {
     }
 }
 
+/// A draw order folder timeline (Spine 4.3): stepped keys that reorder a
+/// subset of the slots, the folder, among the draw order positions those
+/// slots hold. The other slots keep their positions.
+///
+/// Each key stores its moves, as a draw order key does, over positions in
+/// the folder: `(position, offset)` pairs sorted by position. A key with no
+/// moves shows the folder in setup order. The ordering is built when a key
+/// applies, so a file cannot make the loader hold one full ordering per key.
+#[derive(Debug, Clone)]
+pub(crate) struct DrawOrderFolderTimeline {
+    /// The folder's slots, in setup order.
+    slots: Vec<usize>,
+    /// The folder's slots, sorted, to test membership.
+    sorted: Vec<usize>,
+    times: Vec<f32>,
+    moves: Vec<Vec<(usize, i32)>>,
+}
+
+impl DrawOrderFolderTimeline {
+    /// A folder timeline over `slots` (distinct, in setup order), with
+    /// per-key moves that [`sort_draw_order_moves`] accepted.
+    pub(crate) fn new(slots: Vec<usize>, times: Vec<f32>, moves: Vec<Vec<(usize, i32)>>) -> Self {
+        let mut sorted = slots.clone();
+        sorted.sort_unstable();
+        Self {
+            slots,
+            sorted,
+            times,
+            moves,
+        }
+    }
+}
+
+/// Sort a draw order key's moves by position, and check that they form an
+/// ordering of `count` positions: each moves a distinct position in range to
+/// a distinct position in range. Spine never exports other moves.
+pub(crate) fn sort_draw_order_moves(count: usize, moves: &mut [(usize, i32)]) -> bool {
+    moves.sort_unstable_by_key(|&(position, _)| position);
+    let mut targets = Vec::with_capacity(moves.len());
+    for &(position, offset) in moves.iter() {
+        let target = isize::try_from(offset)
+            .ok()
+            .and_then(|offset| position.checked_add_signed(offset))
+            .filter(|&target| target < count && position < count);
+        match target {
+            Some(target) => targets.push(target),
+            None => return false,
+        }
+    }
+    targets.sort_unstable();
+    let distinct = |sorted: &[usize]| sorted.windows(2).all(|pair| pair[0] < pair[1]);
+    distinct(&targets) && moves.windows(2).all(|pair| pair[0].0 < pair[1].0)
+}
+
 /// Compute a draw order from slot offsets, mirroring Spine: each listed slot
 /// moves by its offset, and the rest keep their relative order. Shared by the JSON
 /// and binary loaders.
@@ -189,6 +261,11 @@ impl DrawOrderTimeline {
 /// slot fills keeps `usize::MAX`, which the renderer skips.
 pub(crate) fn compute_draw_order(slot_count: usize, offsets: &mut [(usize, i32)]) -> Vec<usize> {
     offsets.sort_by_key(|(slot, _)| *slot);
+    draw_order_from_sorted(slot_count, offsets)
+}
+
+/// [`compute_draw_order`] for offsets already sorted by slot.
+fn draw_order_from_sorted(slot_count: usize, offsets: &[(usize, i32)]) -> Vec<usize> {
     let mut draw_order = vec![usize::MAX; slot_count];
     let mut unchanged = Vec::with_capacity(slot_count.saturating_sub(offsets.len()));
     let mut original_index = 0;
@@ -232,33 +309,56 @@ impl EventTimeline {
     }
 }
 
+/// The attachment a deform or sequence timeline drives, and the slots it
+/// reaches.
+///
+/// The timeline applies to its own slot and to each timeline slot, wherever
+/// the slot currently shows an attachment that takes its timelines from
+/// `key`: the attachment at `key` itself, or a linked mesh inheriting its
+/// timelines.
+#[derive(Debug, Clone)]
+pub(crate) struct AttachmentTarget {
+    key: AttachmentKey,
+    timeline_slots: Arc<[usize]>,
+}
+
+impl AttachmentTarget {
+    /// A target for the attachment at `key`, also reaching `timeline_slots`.
+    pub(crate) fn new(key: AttachmentKey, timeline_slots: Arc<[usize]>) -> Self {
+        Self {
+            key,
+            timeline_slots,
+        }
+    }
+
+    /// The slots the timeline applies to: its own, then its timeline slots.
+    fn slots(&self) -> impl Iterator<Item = usize> + '_ {
+        std::iter::once(self.key.slot).chain(self.timeline_slots.iter().copied())
+    }
+}
+
 /// A sequence (flipbook) timeline: per keyframe a time, a packed mode-and-index,
 /// and a delay. The shown region index advances from the active keyframe by the
-/// elapsed time over the delay, wrapped per the sequence mode.
+/// elapsed time over the delay, wrapped per the sequence mode over the regions
+/// of the sequence the slot shows.
 #[derive(Debug, Clone)]
 pub(crate) struct SequenceTimeline {
-    slot: usize,
-    attachment: String,
-    count: usize,
+    target: AttachmentTarget,
     times: Vec<f32>,
     mode_and_index: Vec<u32>,
     delays: Vec<f32>,
 }
 
 impl SequenceTimeline {
-    /// A sequence timeline for `slot` / `attachment` over `count` regions.
+    /// A sequence timeline for the attachment `target` names.
     pub(crate) fn new(
-        slot: usize,
-        attachment: String,
-        count: usize,
+        target: AttachmentTarget,
         times: Vec<f32>,
         mode_and_index: Vec<u32>,
         delays: Vec<f32>,
     ) -> Self {
         Self {
-            slot,
-            attachment,
-            count,
+            target,
             times,
             mode_and_index,
             delays,
@@ -266,15 +366,14 @@ impl SequenceTimeline {
     }
 }
 
-/// A mesh deform timeline: per-keyframe vertex offsets. For an unweighted mesh
-/// they add to the setup vertices. For a weighted mesh the setup is zero and the
-/// offsets add per-influence in `compute_vertices`. Only applies while the slot
-/// shows the matching attachment.
+/// A deform timeline: per-keyframe vertex offsets for a mesh, path, bounding
+/// box, or clipping polygon. For unweighted vertices they add to the setup
+/// vertices. For weighted ones the setup is zero and the offsets add
+/// per-influence in `compute_vertices`. Only applies while a slot
+/// shows the attachment `target` names.
 #[derive(Debug, Clone)]
 pub(crate) struct DeformTimeline {
-    slot: usize,
-    attachment: String,
-    skin: Option<String>,
+    target: AttachmentTarget,
     setup: Vec<f32>,
     times: Vec<f32>,
     frames: Vec<Vec<f32>>,
@@ -282,12 +381,11 @@ pub(crate) struct DeformTimeline {
 }
 
 impl DeformTimeline {
-    /// A deform timeline for `slot`/`attachment` with setup vertices, the
-    /// per-keyframe offset frames, and room for `bezier_count` Bezier segments.
+    /// A deform timeline for the attachment `target` names, with setup
+    /// vertices, the per-keyframe offset frames, and room for `bezier_count`
+    /// Bezier segments.
     pub(crate) fn new(
-        slot: usize,
-        attachment: String,
-        skin: Option<String>,
+        target: AttachmentTarget,
         setup: Vec<f32>,
         times: Vec<f32>,
         frames: Vec<Vec<f32>>,
@@ -298,9 +396,7 @@ impl DeformTimeline {
             curve.set_frame1(i, t, 0.0);
         }
         Self {
-            slot,
-            attachment,
-            skin,
+            target,
             setup,
             times,
             frames,
@@ -381,7 +477,7 @@ pub(crate) enum BoneAxis {
 }
 
 /// A keyframed animation channel: one bone property, constraint mix, or slot
-/// property, or the draw order, events, or a mesh deform.
+/// property, or the draw order, events, or a vertex deform.
 #[derive(Debug, Clone)]
 pub(crate) enum Timeline {
     /// Local rotation (degrees).
@@ -394,6 +490,8 @@ pub(crate) enum Timeline {
     Shear(BoneTimeline),
     /// A single bone axis (translateX/Y, scaleX/Y, shearX/Y).
     BoneAxis(BoneTimeline, BoneAxis),
+    /// How a bone inherits its parent's transform (stepped).
+    Inherit(InheritTimeline),
     /// IK constraint mix / softness / bend / compress / stretch.
     Ik(ConstraintTimeline),
     /// Transform constraint mixes (rotate / x / y / scaleX / scaleY / shearY).
@@ -424,18 +522,33 @@ pub(crate) enum Timeline {
     Attachment(AttachmentTimeline),
     /// Slot draw order (stepped permutations).
     DrawOrder(DrawOrderTimeline),
+    /// The draw order of a folder of slots (stepped).
+    DrawOrderFolder(DrawOrderFolderTimeline),
     /// Animation events fired on keyframe crossings.
     Event(EventTimeline),
-    /// Mesh deform (per-vertex offsets).
+    /// Vertex deform (per-vertex offsets).
     Deform(DeformTimeline),
     /// Slot sequence (flipbook) frame index.
     Sequence(SequenceTimeline),
 }
 
 impl Timeline {
+    /// The bone this timeline changes, for a bone timeline.
+    pub(crate) fn bone(&self) -> Option<usize> {
+        match self {
+            Timeline::Rotate(t)
+            | Timeline::Translate(t)
+            | Timeline::Scale(t)
+            | Timeline::Shear(t)
+            | Timeline::BoneAxis(t, _) => Some(t.bone),
+            Timeline::Inherit(t) => Some(t.bone),
+            _ => None,
+        }
+    }
+
     /// Apply this timeline to `skeleton` over the window `(last_time, time]`.
     /// `from`, `add`, and `out` follow Spine's mix semantics. `out` only affects
-    /// scale and IK. `last_time` is used only by the physics reset and event
+    /// scale, IK, and inherit. `last_time` is used only by the physics reset and event
     /// timelines.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn apply(
@@ -456,6 +569,7 @@ impl Timeline {
             Timeline::BoneAxis(t, axis) => {
                 apply_bone_axis(t, *axis, skeleton, time, alpha, from, add, out);
             }
+            Timeline::Inherit(t) => apply_inherit(t, skeleton, time, from, out),
             Timeline::Ik(t) => apply_ik(t, skeleton, time, alpha, from, out),
             Timeline::TransformMix(t) => apply_transform_mix(t, skeleton, time, alpha, from, add),
             Timeline::PathPosition(t) => apply_path_position(t, skeleton, time, alpha, from, add),
@@ -476,6 +590,7 @@ impl Timeline {
             }
             Timeline::Attachment(t) => apply_attachment(t, skeleton, time, from),
             Timeline::DrawOrder(t) => apply_draw_order(t, skeleton, time),
+            Timeline::DrawOrderFolder(t) => apply_draw_order_folder(t, skeleton, time, from),
             Timeline::Event(t) => apply_event(t, skeleton, last_time, time),
             Timeline::Deform(t) => apply_deform(t, skeleton, time, alpha, from),
             Timeline::Sequence(t) => apply_sequence(t, skeleton, time),
@@ -493,7 +608,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::data::{BoneData, SkeletonData};
+    use crate::data::{BoneData, Inherit, SkeletonData};
 
     fn skeleton(setup_rotation: f32) -> Skeleton {
         let data = SkeletonData {
@@ -565,5 +680,59 @@ mod tests {
         Timeline::Scale(t).apply(&mut sk, -1.0, 0.5, 1.0, MixFrom::Setup, false, false);
         let b = sk.bone(0).unwrap();
         assert!((b.scale_x - 1.5).abs() < 1e-4 && (b.scale_y - 1.5).abs() < 1e-4);
+    }
+
+    /// A root rotated 90 degrees and a child that inherits normally.
+    fn rotated_parent() -> Skeleton {
+        let data = SkeletonData {
+            bones: vec![
+                BoneData {
+                    index: 0,
+                    name: "root".into(),
+                    rotation: 90.0,
+                    ..Default::default()
+                },
+                BoneData {
+                    index: 1,
+                    name: "child".into(),
+                    parent: Some(0),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        Skeleton::new(Arc::new(data))
+    }
+
+    #[test]
+    fn inherit_timeline_steps_the_bone_inherit_mode() {
+        let mut sk = rotated_parent();
+        let t = Timeline::Inherit(InheritTimeline::new(
+            1,
+            vec![0.5, 1.0],
+            vec![Inherit::OnlyTranslation, Inherit::NoScale],
+        ));
+        let inherit = |sk: &Skeleton| sk.bone(1).unwrap().inherit();
+
+        // Keys hold until the next one.
+        t.apply(&mut sk, -1.0, 0.75, 1.0, MixFrom::Setup, false, false);
+        assert_eq!(inherit(&sk), Inherit::OnlyTranslation);
+        // The child no longer takes the parent's rotation.
+        sk.update_world_transform();
+        assert!((sk.bone(1).unwrap().a() - 1.0).abs() < 1e-4);
+        t.apply(&mut sk, -1.0, 2.0, 1.0, MixFrom::Setup, false, false);
+        assert_eq!(inherit(&sk), Inherit::NoScale);
+
+        // Before the first key, blending from the current pose keeps the mode,
+        // and blending from the setup pose restores it.
+        t.apply(&mut sk, -1.0, 0.0, 1.0, MixFrom::Current, false, false);
+        assert_eq!(inherit(&sk), Inherit::NoScale);
+        t.apply(&mut sk, -1.0, 0.0, 1.0, MixFrom::Setup, false, false);
+        assert_eq!(inherit(&sk), Inherit::Normal);
+
+        // Resetting the bones restores the setup mode too.
+        t.apply(&mut sk, -1.0, 0.75, 1.0, MixFrom::Setup, false, false);
+        sk.set_bones_to_setup_pose();
+        assert_eq!(inherit(&sk), Inherit::Normal);
     }
 }

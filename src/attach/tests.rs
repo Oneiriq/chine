@@ -199,7 +199,7 @@ fn linked_mesh_borrows_parent_geometry() {
     parent.hull_length = 3;
     let link =
         LinkedMeshAttachment::new("wing-blue", "wing-blue", None, "wing", Color::WHITE, true);
-    let m = link.resolve(&parent);
+    let m = link.resolve(&parent, &AttachmentKey::default());
     // Identity stays the link's own. Geometry is borrowed from the parent.
     assert_eq!(m.name, "wing-blue");
     assert_eq!(m.path, "wing-blue");

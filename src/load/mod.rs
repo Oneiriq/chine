@@ -21,18 +21,19 @@ use crate::attach::Attachment;
 use crate::constraint::ik::IkConstraintData;
 use crate::constraint::path::{PathConstraintData, PositionMode, RotateMode, SpacingMode};
 use crate::constraint::physics::PhysicsConstraintData;
+use crate::constraint::slider::{SliderData, SliderProperty};
 use crate::constraint::transform::{
     FromMapping, FromProp, ToMapping, ToProp, TransformConstraintData,
 };
 use crate::constraint::ScaleYMode;
 use crate::data::{BlendMode, BoneData, Color, Inherit, SkeletonData, SlotData};
 use crate::event::EventData;
-use crate::skin::Skin;
+use crate::skin::{Skin, SkinConstraint};
 
 mod attachments;
 mod timelines;
 
-use attachments::{attachment_cost, mesh_copy_cost, read_attachment};
+use attachments::{attachment_cost, linked_copy_cost, read_attachment};
 use timelines::parse_animation;
 
 /// Bytes of derived data any load may expand to, whatever the input size.
@@ -45,7 +46,7 @@ const MAX_PHYSICS_FPS: f64 = 255.0;
 /// A cap on the data the loader derives from compact records. Some records
 /// are cheap to write but expand to a copy of other data: a deform key to a
 /// full vertex array, a draw order key to a full slot list, an event key to
-/// its setup string, a linked mesh to its parent's geometry, and a sequence
+/// its setup string, a linked mesh to its source's geometry, and a sequence
 /// to per-frame UVs once an atlas is bound. The cap grows with the input
 /// size, so it bounds memory without limiting real exports.
 struct Budget {
@@ -82,6 +83,7 @@ struct Names<'a> {
     transform: HashMap<&'a str, usize>,
     path: HashMap<&'a str, usize>,
     physics: HashMap<&'a str, usize>,
+    sliders: HashMap<&'a str, usize>,
     /// Indices into `SkeletonData::skins`, which excludes the default skin.
     skins: HashMap<&'a str, usize>,
     events: HashMap<&'a str, usize>,
@@ -195,6 +197,7 @@ pub fn from_json(text: &str) -> Result<SkeletonData, LoadError> {
                 scale: Vec2::new(f_or(b, "scaleX", 1.0), f_or(b, "scaleY", 1.0)),
                 shear: Vec2::new(f(b, "shearX"), f(b, "shearY")),
                 inherit: parse_inherit(b.get("inherit").or(b.get("transform"))),
+                skin_required: bool_or(b, "skin", false),
             });
         }
     }
@@ -222,41 +225,6 @@ pub fn from_json(text: &str) -> Result<SkeletonData, LoadError> {
         }
     }
 
-    if let Some(skins) = root.get("skins").and_then(Value::as_array) {
-        for sk in skins {
-            let skin_name = sk.get("name").and_then(Value::as_str).unwrap_or("default");
-            let mut skin = Skin::new(skin_name);
-            if let Some(slot_map) = sk.get("attachments").and_then(Value::as_object) {
-                for (slot_name, atts) in slot_map {
-                    let slot = names.slot(slot_name)?;
-                    if let Some(atts) = atts.as_object() {
-                        for (att_name, att) in atts {
-                            let Some(mut attachment) =
-                                read_attachment(att_name, att, data.bones.len())?
-                            else {
-                                continue;
-                            };
-                            budget
-                                .charge(attachment_cost(&attachment), "an attachment sequence")?;
-                            if let Attachment::Mesh(m) = &mut attachment {
-                                if skin_name != "default" {
-                                    m.deform_skin = Some(skin_name.to_string());
-                                }
-                            }
-                            skin.set(slot, att_name.clone(), attachment);
-                        }
-                    }
-                }
-            }
-            if skin_name == "default" {
-                data.default_skin = skin;
-            } else {
-                add_name(&mut names.skins, skin_name, data.skins.len());
-                data.skins.push(skin);
-            }
-        }
-    }
-
     if let Some(constraints) = root.get("constraints").and_then(Value::as_array) {
         for (order, cm) in constraints.iter().enumerate() {
             match cm.get("type").and_then(Value::as_str) {
@@ -280,7 +248,50 @@ pub fn from_json(text: &str) -> Result<SkeletonData, LoadError> {
                     add_named(&mut names.physics, cm, data.physics_constraints.len());
                     data.physics_constraints.push(c);
                 }
+                Some("slider") => {
+                    let c = parse_slider(cm, order, &names)?;
+                    add_named(&mut names.sliders, cm, data.sliders.len());
+                    data.sliders.push(c);
+                }
                 _ => {}
+            }
+        }
+    }
+
+    if let Some(skins) = root.get("skins").and_then(Value::as_array) {
+        for sk in skins {
+            let skin_name = sk.get("name").and_then(Value::as_str).unwrap_or("default");
+            let mut skin = Skin::new(skin_name);
+            read_skin_requirements(sk, &names, &mut skin)?;
+            if let Some(slot_map) = sk.get("attachments").and_then(Value::as_object) {
+                for (slot_name, atts) in slot_map {
+                    let slot = names.slot(slot_name)?;
+                    if let Some(atts) = atts.as_object() {
+                        for (att_name, att) in atts {
+                            let Some(mut attachment) =
+                                read_attachment(att_name, att, data.bones.len())?
+                            else {
+                                continue;
+                            };
+                            budget
+                                .charge(attachment_cost(&attachment), "an attachment sequence")?;
+                            // A linked mesh names its source's slot, if it is
+                            // not the link's own.
+                            if let Attachment::LinkedMesh(link) = &mut attachment {
+                                if let Some(source) = att.get("slot").and_then(Value::as_str) {
+                                    link.source_slot = Some(names.slot(source)?);
+                                }
+                            }
+                            skin.set(slot, att_name.clone(), attachment);
+                        }
+                    }
+                }
+            }
+            if skin_name == "default" {
+                data.default_skin = skin;
+            } else {
+                add_name(&mut names.skins, skin_name, data.skins.len());
+                data.skins.push(skin);
             }
         }
     }
@@ -304,8 +315,8 @@ pub fn from_json(text: &str) -> Result<SkeletonData, LoadError> {
         }
     }
 
-    // Resolve linked meshes before animations so deform timelines bind to the
-    // resolved (parent-shared) geometry rather than unresolved links.
+    // Resolve linked meshes before animations, so deform timelines bind to
+    // the geometry each link shares with its source.
     charge_linked_meshes(&data, &mut budget)?;
     crate::link::resolve_linked_meshes(&mut data);
 
@@ -315,34 +326,71 @@ pub fn from_json(text: &str) -> Result<SkeletonData, LoadError> {
             data.animations.push(Arc::new(animation));
         }
     }
+    resolve_slider_animations(&root, &mut data)?;
     Ok(data)
 }
 
-/// Charge the copies linked-mesh resolution makes: each linked mesh becomes a
-/// full copy of its parent mesh. The charge is the largest mesh with the
-/// link's slot and parent name in any skin, which covers whichever one the
-/// link resolves to.
-fn charge_linked_meshes(data: &SkeletonData, budget: &mut Budget) -> Result<(), LoadError> {
-    let skins = || std::iter::once(&data.default_skin).chain(&data.skins);
-    let mut sizes: HashMap<(usize, &str), usize> = HashMap::new();
-    for skin in skins() {
-        for (slot, name, attachment) in skin.iter() {
-            if let Attachment::Mesh(m) = attachment {
-                let size = sizes.entry((slot, name)).or_default();
-                *size = (*size).max(mesh_copy_cost(m));
-            }
-        }
+/// Read the skin-required bones (`bones`) and constraints (`ik`, `transform`,
+/// `path`, `physics`, and `slider`) a skin lists by name.
+///
+/// # Errors
+/// Returns [`LoadError::BadReference`] for a name that names no bone or no
+/// constraint of its type.
+fn read_skin_requirements(sk: &Value, names: &Names, skin: &mut Skin) -> Result<(), LoadError> {
+    let entries = |key: &str| {
+        sk.get(key)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+    };
+    for bone in entries("bones") {
+        skin.bones.push(names.bone(bone)?);
     }
-    for skin in skins() {
-        for (slot, _, attachment) in skin.iter() {
-            if let Attachment::LinkedMesh(link) = attachment {
-                if let Some(&size) = sizes.get(&(slot, link.parent.as_str())) {
-                    budget.charge(size, "a linked mesh")?;
-                }
+    let mut add =
+        |key: &str, map: &HashMap<&str, usize>, constraint: fn(usize) -> SkinConstraint| {
+            for name in entries(key) {
+                skin.constraints.push(constraint(lookup(map, name)?));
             }
+            Ok::<(), LoadError>(())
+        };
+    add("ik", &names.ik, SkinConstraint::Ik)?;
+    add("transform", &names.transform, SkinConstraint::Transform)?;
+    add("path", &names.path, SkinConstraint::Path)?;
+    add("physics", &names.physics, SkinConstraint::Physics)?;
+    add("slider", &names.sliders, SkinConstraint::Slider)
+}
+
+/// Resolve the animation each slider scrubs, named in its `animation` field,
+/// once every animation is loaded. Sliders are in the order of the
+/// `constraints` entries.
+fn resolve_slider_animations(root: &Value, data: &mut SkeletonData) -> Result<(), LoadError> {
+    let Some(constraints) = root.get("constraints").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    let sliders = constraints
+        .iter()
+        .filter(|cm| cm.get("type").and_then(Value::as_str) == Some("slider"));
+    for (slider, cm) in data.sliders.iter_mut().zip(sliders) {
+        if let Some(name) = cm.get("animation").and_then(Value::as_str) {
+            let index = data.animations.iter().position(|a| a.name() == name);
+            slider.animation_index =
+                Some(index.ok_or_else(|| LoadError::BadReference(name.to_string()))?);
         }
     }
     Ok(())
+}
+
+/// Charge the copies linked-mesh resolution makes: each linked mesh becomes a
+/// full copy of its source mesh, with its own sequence.
+fn charge_linked_meshes(data: &SkeletonData, budget: &mut Budget) -> Result<(), LoadError> {
+    let mut charged = Ok(());
+    crate::link::for_each_link_source(data, |link, source| {
+        if charged.is_ok() {
+            charged = budget.charge(linked_copy_cost(link, source), "a linked mesh");
+        }
+    });
+    charged
 }
 
 /// Resolve a constraint's named constrained bones to indices.
@@ -372,6 +420,7 @@ fn parse_ik(cm: &Value, order: usize, names: &Names) -> Result<IkConstraintData,
     Ok(IkConstraintData {
         name,
         order,
+        skin_required: bool_or(cm, "skin", false),
         bones,
         target,
         scale_y_mode,
@@ -438,6 +487,7 @@ fn parse_transform(
     Ok(TransformConstraintData {
         name,
         order,
+        skin_required: bool_or(cm, "skin", false),
         bones,
         source,
         offsets,
@@ -479,6 +529,7 @@ fn parse_path(cm: &Value, order: usize, names: &Names) -> Result<PathConstraintD
     Ok(PathConstraintData {
         name,
         order,
+        skin_required: bool_or(cm, "skin", false),
         bones,
         slot,
         position_mode,
@@ -490,6 +541,49 @@ fn parse_path(cm: &Value, order: usize, names: &Names) -> Result<PathConstraintD
         mix_rotate: f_or(cm, "mixRotate", 1.0),
         mix_x,
         mix_y: f_or(cm, "mixY", mix_x),
+    })
+}
+
+/// Parse a `slider` constraint entry. A slider driven by a bone maps the
+/// bone's `property` to a scrub time, and one without a bone keeps a setup
+/// `time`. Its animation is resolved once the animations are loaded.
+fn parse_slider(cm: &Value, order: usize, names: &Names) -> Result<SliderData, LoadError> {
+    let mut slider = SliderData {
+        name: str_field(cm, "name")?,
+        order,
+        skin_required: bool_or(cm, "skin", false),
+        looping: bool_or(cm, "loop", false),
+        additive: bool_or(cm, "additive", false),
+        mix: f_or(cm, "mix", 1.0),
+        ..SliderData::default()
+    };
+    match cm.get("bone").and_then(Value::as_str) {
+        Some(bone) => {
+            slider.bone = Some(names.bone(bone)?);
+            let property = str_ref(cm, "property")?;
+            slider.property = Some(slider_property(property).ok_or_else(|| {
+                LoadError::Schema(format!("unknown slider property '{property}'"))
+            })?);
+            slider.property_offset = f(cm, "from");
+            slider.offset = f(cm, "to");
+            slider.scale = f_or(cm, "scale", 1.0);
+            slider.max = f(cm, "max");
+            slider.local = bool_or(cm, "local", false);
+        }
+        None => slider.time = f(cm, "time"),
+    }
+    Ok(slider)
+}
+
+fn slider_property(name: &str) -> Option<SliderProperty> {
+    Some(match name {
+        "rotate" => SliderProperty::Rotate,
+        "x" => SliderProperty::X,
+        "y" => SliderProperty::Y,
+        "scaleX" => SliderProperty::ScaleX,
+        "scaleY" => SliderProperty::ScaleY,
+        "shearY" => SliderProperty::ShearY,
+        _ => return None,
     })
 }
 
@@ -519,6 +613,7 @@ fn parse_physics(
     Ok(PhysicsConstraintData {
         name,
         order,
+        skin_required: bool_or(cm, "skin", false),
         bone,
         x: f(cm, "x"),
         y: f(cm, "y"),
@@ -650,6 +745,8 @@ fn parse_attachment(name: &str, v: &Value) -> Option<Attachment> {
     read_attachment(name, v, 0).ok().flatten()
 }
 
+#[cfg(test)]
+mod layout;
 #[cfg(test)]
 mod robustness;
 #[cfg(test)]

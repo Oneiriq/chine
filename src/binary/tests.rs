@@ -49,11 +49,12 @@ fn parses_header_and_bones() {
     b.push(0); // string table count = 0
     b.push(1); // bone count = 1
     enc_str(&mut b, "root");
-    // rotation, x, y, scaleX, scaleY, shearX, shearY, length
-    for v in [0.0_f32, 10.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0] {
+    // rotation, x, y, scaleX, scaleY, shearX, shearY
+    for v in [0.0_f32, 10.0, 0.0, 1.0, 1.0, 0.0, 0.0] {
         b.extend_from_slice(&v.to_be_bytes());
     }
     b.push(3); // inherit = NoScale
+    b.extend_from_slice(&12.5_f32.to_be_bytes()); // length
     b.push(0); // skinRequired = false
     b.push(0); // slot count = 0
     b.push(0); // constraint count = 0
@@ -65,6 +66,7 @@ fn parses_header_and_bones() {
     let data = from_binary(&b).unwrap();
     assert_eq!(data.spine_version.as_deref(), Some("4.3.00"));
     assert!((data.reference_scale - 1.0).abs() < 1e-6);
+    assert_eq!(data.size, Vec2::new(200.0, 300.0));
     assert_eq!(data.bones.len(), 1);
     let root = &data.bones[0];
     assert_eq!(root.name, "root");
@@ -72,6 +74,7 @@ fn parses_header_and_bones() {
     assert!((root.position.x - 10.0).abs() < 1e-6);
     assert!((root.scale.x - 1.0).abs() < 1e-6);
     assert_eq!(root.inherit, Inherit::NoScale);
+    assert_eq!(root.length, 12.5);
 }
 
 // Validates the parser against a real Spine 4.3 `.skel` when the local
@@ -454,6 +457,7 @@ fn reads_an_ik_constraint_timeline() {
         ik_constraints: vec![IkConstraintData {
             name: "aim-ik".into(),
             order: 0,
+            skin_required: false,
             bones: vec![1],
             target: 2,
             scale_y_mode: ScaleYMode::None,
@@ -540,7 +544,7 @@ fn parses_a_physics_constraint() {
 
 #[test]
 fn parses_a_transform_constraint() {
-    // 1 bone, source 0, no property mappings, no offsets, default mixes.
+    // 1 bone, source 0, no property mappings, no offsets, no mixes (0).
     let b = vec![1_u8, 0, 0, 0, 0, 0];
     let mut r = BinaryReader::new(&b);
     let tc = parse_transform(&mut r, "tf".into(), 2);
@@ -548,7 +552,7 @@ fn parses_a_transform_constraint() {
     assert_eq!(tc.bones, vec![0]);
     assert_eq!(tc.source, 0);
     assert!(tc.properties.is_empty());
-    assert!((tc.mix_rotate - 1.0).abs() < 1e-6);
+    assert_eq!(tc.mix_rotate, 0.0);
     assert!(tc.offsets[0].abs() < 1e-6);
 }
 
@@ -687,11 +691,12 @@ fn from_binary_round_trips_a_minimal_skeleton() {
     // One root bone.
     b.push(1); // bone count
     put_string(&mut b, "root");
-    // rotation, x, y, scaleX, scaleY, shearX, shearY, length.
-    for v in [0.0_f32, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0] {
+    // rotation, x, y, scaleX, scaleY, shearX, shearY.
+    for v in [0.0_f32, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0] {
         put_f32(&mut b, v);
     }
     b.push(0); // inherit = Normal
+    put_f32(&mut b, 0.0); // length
     b.push(0); // skin required = false
 
     // One slot on the root bone: white, no dark tint, no setup attachment.
@@ -937,6 +942,10 @@ fn applies_a_sequence_timeline() {
     // A slot showing a four-region sequence "seq". One looping keyframe at
     // time 0 (mode loop = 2, index 0) with a 0.1s delay: at 0.25s the index
     // advances by floor(0.25 / 0.1) = 2.
+    let mut region = RegionAttachment::new("seq", "seq");
+    region.sequence = Some(Sequence::new(4, 0, 0, 0));
+    let mut skin = Skin::new("default");
+    skin.set(0, "seq", Attachment::Region(region));
     let data = SkeletonData {
         bones: vec![BoneData {
             index: 0,
@@ -952,9 +961,16 @@ fn applies_a_sequence_timeline() {
             attachment: Some("seq".into()),
             blend: BlendMode::Normal,
         }],
+        default_skin: skin,
         ..Default::default()
     };
-    let tl = SequenceTimeline::new(0, "seq".into(), 4, vec![0.0], vec![2_u32], vec![0.1]);
+    let key = AttachmentKey {
+        skin: None,
+        slot: 0,
+        name: "seq".into(),
+    };
+    let target = AttachmentTarget::new(key, Vec::new().into());
+    let tl = SequenceTimeline::new(target, vec![0.0], vec![2_u32], vec![0.1]);
     let anim = Animation::new("flip", 1.0, vec![Timeline::Sequence(tl)]);
     let mut sk = crate::skel::Skeleton::new(std::sync::Arc::new(data));
     let mut state = crate::anim::AnimationState::new();
