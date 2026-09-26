@@ -28,7 +28,7 @@ use crate::constraint::transform::{
 use crate::constraint::ScaleYMode;
 use crate::data::{BlendMode, BoneData, Color, Inherit, SkeletonData, SlotData};
 use crate::event::EventData;
-use crate::skin::Skin;
+use crate::skin::{Skin, SkinConstraint};
 
 mod attachments;
 mod timelines;
@@ -197,6 +197,7 @@ pub fn from_json(text: &str) -> Result<SkeletonData, LoadError> {
                 scale: Vec2::new(f_or(b, "scaleX", 1.0), f_or(b, "scaleY", 1.0)),
                 shear: Vec2::new(f(b, "shearX"), f(b, "shearY")),
                 inherit: parse_inherit(b.get("inherit").or(b.get("transform"))),
+                skin_required: bool_or(b, "skin", false),
             });
         }
     }
@@ -221,43 +222,6 @@ pub fn from_json(text: &str) -> Result<SkeletonData, LoadError> {
                     .map(String::from),
                 blend: parse_blend(s.get("blend").and_then(Value::as_str)),
             });
-        }
-    }
-
-    if let Some(skins) = root.get("skins").and_then(Value::as_array) {
-        for sk in skins {
-            let skin_name = sk.get("name").and_then(Value::as_str).unwrap_or("default");
-            let mut skin = Skin::new(skin_name);
-            if let Some(slot_map) = sk.get("attachments").and_then(Value::as_object) {
-                for (slot_name, atts) in slot_map {
-                    let slot = names.slot(slot_name)?;
-                    if let Some(atts) = atts.as_object() {
-                        for (att_name, att) in atts {
-                            let Some(mut attachment) =
-                                read_attachment(att_name, att, data.bones.len())?
-                            else {
-                                continue;
-                            };
-                            budget
-                                .charge(attachment_cost(&attachment), "an attachment sequence")?;
-                            // A linked mesh names its source's slot, if it is
-                            // not the link's own.
-                            if let Attachment::LinkedMesh(link) = &mut attachment {
-                                if let Some(source) = att.get("slot").and_then(Value::as_str) {
-                                    link.source_slot = Some(names.slot(source)?);
-                                }
-                            }
-                            skin.set(slot, att_name.clone(), attachment);
-                        }
-                    }
-                }
-            }
-            if skin_name == "default" {
-                data.default_skin = skin;
-            } else {
-                add_name(&mut names.skins, skin_name, data.skins.len());
-                data.skins.push(skin);
-            }
         }
     }
 
@@ -294,6 +258,44 @@ pub fn from_json(text: &str) -> Result<SkeletonData, LoadError> {
         }
     }
 
+    if let Some(skins) = root.get("skins").and_then(Value::as_array) {
+        for sk in skins {
+            let skin_name = sk.get("name").and_then(Value::as_str).unwrap_or("default");
+            let mut skin = Skin::new(skin_name);
+            read_skin_requirements(sk, &names, &mut skin)?;
+            if let Some(slot_map) = sk.get("attachments").and_then(Value::as_object) {
+                for (slot_name, atts) in slot_map {
+                    let slot = names.slot(slot_name)?;
+                    if let Some(atts) = atts.as_object() {
+                        for (att_name, att) in atts {
+                            let Some(mut attachment) =
+                                read_attachment(att_name, att, data.bones.len())?
+                            else {
+                                continue;
+                            };
+                            budget
+                                .charge(attachment_cost(&attachment), "an attachment sequence")?;
+                            // A linked mesh names its source's slot, if it is
+                            // not the link's own.
+                            if let Attachment::LinkedMesh(link) = &mut attachment {
+                                if let Some(source) = att.get("slot").and_then(Value::as_str) {
+                                    link.source_slot = Some(names.slot(source)?);
+                                }
+                            }
+                            skin.set(slot, att_name.clone(), attachment);
+                        }
+                    }
+                }
+            }
+            if skin_name == "default" {
+                data.default_skin = skin;
+            } else {
+                add_name(&mut names.skins, skin_name, data.skins.len());
+                data.skins.push(skin);
+            }
+        }
+    }
+
     if let Some(events) = root.get("events").and_then(Value::as_object) {
         for (name, e) in events {
             add_name(&mut names.events, name, data.events.len());
@@ -326,6 +328,37 @@ pub fn from_json(text: &str) -> Result<SkeletonData, LoadError> {
     }
     resolve_slider_animations(&root, &mut data)?;
     Ok(data)
+}
+
+/// Read the skin-required bones (`bones`) and constraints (`ik`, `transform`,
+/// `path`, `physics`, and `slider`) a skin lists by name.
+///
+/// # Errors
+/// Returns [`LoadError::BadReference`] for a name that names no bone or no
+/// constraint of its type.
+fn read_skin_requirements(sk: &Value, names: &Names, skin: &mut Skin) -> Result<(), LoadError> {
+    let entries = |key: &str| {
+        sk.get(key)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+    };
+    for bone in entries("bones") {
+        skin.bones.push(names.bone(bone)?);
+    }
+    let mut add =
+        |key: &str, map: &HashMap<&str, usize>, constraint: fn(usize) -> SkinConstraint| {
+            for name in entries(key) {
+                skin.constraints.push(constraint(lookup(map, name)?));
+            }
+            Ok::<(), LoadError>(())
+        };
+    add("ik", &names.ik, SkinConstraint::Ik)?;
+    add("transform", &names.transform, SkinConstraint::Transform)?;
+    add("path", &names.path, SkinConstraint::Path)?;
+    add("physics", &names.physics, SkinConstraint::Physics)?;
+    add("slider", &names.sliders, SkinConstraint::Slider)
 }
 
 /// Resolve the animation each slider scrubs, named in its `animation` field,
@@ -387,6 +420,7 @@ fn parse_ik(cm: &Value, order: usize, names: &Names) -> Result<IkConstraintData,
     Ok(IkConstraintData {
         name,
         order,
+        skin_required: bool_or(cm, "skin", false),
         bones,
         target,
         scale_y_mode,
@@ -453,6 +487,7 @@ fn parse_transform(
     Ok(TransformConstraintData {
         name,
         order,
+        skin_required: bool_or(cm, "skin", false),
         bones,
         source,
         offsets,
@@ -494,6 +529,7 @@ fn parse_path(cm: &Value, order: usize, names: &Names) -> Result<PathConstraintD
     Ok(PathConstraintData {
         name,
         order,
+        skin_required: bool_or(cm, "skin", false),
         bones,
         slot,
         position_mode,
@@ -577,6 +613,7 @@ fn parse_physics(
     Ok(PhysicsConstraintData {
         name,
         order,
+        skin_required: bool_or(cm, "skin", false),
         bone,
         x: f(cm, "x"),
         y: f(cm, "y"),

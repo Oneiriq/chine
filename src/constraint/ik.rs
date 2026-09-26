@@ -21,6 +21,8 @@ pub struct IkConstraintData {
     pub name: String,
     /// Global constraint order (lower applies first).
     pub order: usize,
+    /// Whether the constraint applies only while the active skin lists it.
+    pub skin_required: bool,
     /// The 1 or 2 constrained bone indices (parent first).
     pub bones: Vec<usize>,
     /// Target bone index.
@@ -513,6 +515,7 @@ mod tests {
         IkConstraintData {
             name: name.into(),
             order: 0,
+            skin_required: false,
             bones,
             target,
             scale_y_mode: ScaleYMode::None,

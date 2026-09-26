@@ -52,6 +52,7 @@ fn bone_positioned_at_path_midpoint() {
         path_constraints: vec![PathConstraintData {
             name: "follow-path".into(),
             order: 0,
+            skin_required: false,
             bones: vec![1],
             slot: 0,
             position_mode: PositionMode::Percent,
@@ -79,6 +80,7 @@ fn follow(bones: Vec<usize>, rotate_mode: RotateMode) -> PathConstraintData {
     PathConstraintData {
         name: "follow-path".into(),
         order: 0,
+        skin_required: false,
         bones,
         slot: 0,
         position_mode: PositionMode::Percent,

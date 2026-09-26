@@ -1,6 +1,7 @@
 use super::*;
 use crate::constraint::ScaleYMode;
 use crate::data::BoneData;
+use crate::skin::SkinConstraint;
 use glam::Vec2;
 
 const EPS: f32 = 1e-4;
@@ -116,6 +117,7 @@ fn physics_skel(gravity: f32) -> Skeleton {
         physics_constraints: vec![PhysicsConstraintData {
             name: "phys".into(),
             order: 0,
+            skin_required: false,
             bone: 1,
             x: 0.0,
             y: 1.0,
@@ -203,6 +205,7 @@ fn ik(order: usize, bones: Vec<usize>, target: usize) -> IkConstraintData {
     IkConstraintData {
         name: "ik".into(),
         order,
+        skin_required: false,
         bones,
         target,
         scale_y_mode: ScaleYMode::None,
@@ -223,6 +226,7 @@ fn transform(
     TransformConstraintData {
         name: "tc".into(),
         order,
+        skin_required: false,
         bones,
         source,
         offsets: [0.0; 6],
@@ -244,6 +248,7 @@ fn path(order: usize, slot: usize, bones: Vec<usize>) -> PathConstraintData {
     PathConstraintData {
         name: "path".into(),
         order,
+        skin_required: false,
         bones,
         slot,
         position_mode: Default::default(),
@@ -439,4 +444,134 @@ fn update_cache_growth_is_bounded() {
         sk.update_cache.len()
     );
     assert!(constraint_entries(&sk) < 2 * pairs);
+}
+
+/// A root, a skin-required bone 1 with a skin-required child 2 (each 5 along
+/// x), and a bone 3 that is not skin-required. Slot 0 on bone 2 shows the
+/// region "r". Skin "s" lists bone 2, and `constraints` adds to it and to the
+/// rig.
+fn skin_required_rig(constraints: impl FnOnce(&mut SkeletonData, &mut Skin)) -> Skeleton {
+    use crate::attach::{Attachment, RegionAttachment};
+    use crate::data::{BlendMode, SlotData};
+
+    let required = |i, parent| BoneData {
+        skin_required: true,
+        ..bone(i, parent)
+    };
+    let mut default = Skin::new("default");
+    let mut region = RegionAttachment::new("r", "r");
+    region.width = 2.0;
+    region.height = 2.0;
+    default.set(0, "r", crate::attach::Attachment::Region(region));
+    let _: &Attachment = default.attachment(0, "r").unwrap();
+    let mut skin = Skin::new("s");
+    skin.bones.push(2);
+    let mut data = SkeletonData {
+        bones: vec![
+            bone(0, None),
+            required(1, Some(0)),
+            required(2, Some(1)),
+            bone(3, Some(0)),
+        ],
+        slots: vec![SlotData {
+            index: 0,
+            name: "slot".into(),
+            bone: 2,
+            color: Color::WHITE,
+            dark_color: None,
+            attachment: Some("r".into()),
+            blend: BlendMode::Normal,
+        }],
+        default_skin: default,
+        ..Default::default()
+    };
+    constraints(&mut data, &mut skin);
+    data.skins.push(skin);
+    Skeleton::new(Arc::new(data))
+}
+
+// Spine poses a skin-required bone, and draws the slots on it, only while the
+// active skin lists it or a descendant. chine read the flag and the skin's
+// bone list and dropped both, so every bone always applied.
+#[test]
+fn skin_required_bones_apply_only_with_their_skin() {
+    let mut sk = skin_required_rig(|_, _| {});
+    let active = |sk: &Skeleton| sk.bones().iter().map(Bone::active).collect::<Vec<_>>();
+    assert_eq!(active(&sk), [true, false, false, true]);
+    sk.update_world_transform();
+    assert_eq!(sk.bone(2).unwrap().world_x(), 0.0);
+    assert!(crate::render::render(&sk).is_empty());
+
+    // The skin lists bone 2, which activates its ancestor bone 1 too.
+    sk.set_skin("s");
+    assert_eq!(active(&sk), [true, true, true, true]);
+    sk.update_world_transform();
+    assert!(close(sk.bone(2).unwrap().world_x(), 15.0));
+    assert_eq!(crate::render::render(&sk).len(), 1);
+
+    sk.clear_skin();
+    assert_eq!(active(&sk), [true, false, false, true]);
+    assert!(crate::render::render(&sk).is_empty());
+}
+
+// Timelines leave an inactive bone alone.
+#[test]
+fn timelines_leave_inactive_bones_alone() {
+    use crate::anim::{BoneTimeline, MixFrom, Timeline};
+
+    let mut rotate = BoneTimeline::one_value(1, 1, 0);
+    rotate.set_frame1(0, 0.0, 45.0);
+    let rotate = Timeline::Rotate(rotate);
+    let mut sk = skin_required_rig(|_, _| {});
+    rotate.apply(&mut sk, 0.0, 0.0, 1.0, MixFrom::Setup, false, false);
+    assert_eq!(sk.bone(1).unwrap().rotation, 0.0);
+    sk.set_skin("s");
+    rotate.apply(&mut sk, 0.0, 0.0, 1.0, MixFrom::Setup, false, false);
+    assert_eq!(sk.bone(1).unwrap().rotation, 45.0);
+}
+
+// A skin-required constraint applies only while the active skin lists it,
+// and a constraint whose source bone is inactive does not apply at all.
+#[test]
+fn skin_required_constraints_apply_only_with_their_skin() {
+    use crate::constraint::transform::{FromMapping, FromProp, ToMapping, ToProp};
+
+    let mapped = |source| TransformConstraintData {
+        properties: vec![FromMapping {
+            property: FromProp::X,
+            offset: 0.0,
+            to: vec![ToMapping {
+                property: ToProp::X,
+                offset: 0.0,
+                max: 0.0,
+                scale: 1.0,
+            }],
+        }],
+        ..transform(0, source, vec![3], false)
+    };
+    // A transform constraint that maps bone 0's x onto bone 3 moves bone 3
+    // off x 10.
+    let moved = |sk: &mut Skeleton| {
+        sk.update_world_transform();
+        !close(sk.bone(3).unwrap().world_x(), 10.0)
+    };
+
+    let mut sk = skin_required_rig(|data, skin| {
+        data.transform_constraints.push(TransformConstraintData {
+            skin_required: true,
+            ..mapped(0)
+        });
+        skin.constraints.push(SkinConstraint::Transform(0));
+    });
+    assert!(!moved(&mut sk));
+    sk.set_skin("s");
+    assert!(moved(&mut sk));
+
+    // Its source, bone 2, is active only with the skin.
+    let mut sk = skin_required_rig(|data, _| {
+        data.transform_constraints.push(mapped(2));
+    });
+    assert!(!moved(&mut sk));
+    sk.set_skin("s");
+    assert!(moved(&mut sk));
 }

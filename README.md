@@ -87,9 +87,10 @@ animating, and emitting draw data:
 
 - **Loaders**: JSON (`.json`) and binary (`.skel`) skeleton exports, and
   texture atlas (`.atlas`) parsing (the 4.1+ format plus common legacy keys).
-- **Skeleton**: bones, slots, and skins. Region, mesh (including weighted),
-  path, bounding-box, point, clipping, and linked-mesh attachments. Animated
-  (flipbook) sequences.
+- **Skeleton**: bones, slots, and skins, with skin-required bones and
+  constraints that apply only while a skin lists them. Region, mesh
+  (including weighted), path, bounding-box, point, clipping, and linked-mesh
+  attachments. Animated (flipbook) sequences.
 - **Forward kinematics** with all five inherit modes.
 - **Constraints**, ordered by a topological update cache:
   - **IK**: 1- and 2-bone solvers with softness, stretch, compress, and scale.

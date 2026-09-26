@@ -78,13 +78,15 @@ pub(super) fn name_link_skins(
 
 /// Read a skin: the default skin (`is_default`, a slot count then attachments)
 /// or a named skin (name, bone/constraint index lists, then attachments).
-/// `data` holds the bones, slots, constraints, and skins read so far. The
-/// default skin reads as `None` when it lists no slots, and Spine's skin list
-/// then leaves it out. Each linked mesh read is added to `links`.
+/// `data` holds the bones, slots, constraints, and skins read so far, and
+/// `constraints` is Spine's single constraint list (see [`constraint_list`]).
+/// The default skin reads as `None` when it lists no slots, and Spine's skin
+/// list then leaves it out. Each linked mesh read is added to `links`.
 pub(super) fn read_skin(
     r: &mut BinaryReader,
     strings: &[String],
     data: &SkeletonData,
+    constraints: &[Option<(ConstraintKind, usize)>],
     is_default: bool,
     nonessential: bool,
     links: &mut Vec<PendingLink>,
@@ -103,19 +105,28 @@ pub(super) fn read_skin(
         if nonessential {
             let _ = r.u32();
         }
-        // The skin's bone and constraint lists are not kept, but they are
-        // still indices into those tables.
-        let bones = r.count();
-        for _ in 0..bones {
-            if r.var_usize() >= data.bones.len() {
+        // The skin-required bones and constraints the skin activates. The
+        // constraints are indexed in Spine's single constraint list.
+        let bone_count = r.count();
+        for _ in 0..bone_count {
+            let bone = r.var_usize();
+            if bone >= data.bones.len() {
                 corrupt(r);
             }
+            skin.bones.push(bone);
         }
-        let constraints = constraint_count(data);
-        let listed = r.count();
-        for _ in 0..listed {
-            if r.var_usize() >= constraints {
-                corrupt(r);
+        let constraint_count = r.count();
+        for _ in 0..constraint_count {
+            let listed = constraints.get(r.var_usize()).copied().flatten();
+            match listed {
+                Some((kind, i)) => skin.constraints.push(match kind {
+                    ConstraintKind::Ik => SkinConstraint::Ik(i),
+                    ConstraintKind::Path => SkinConstraint::Path(i),
+                    ConstraintKind::Transform => SkinConstraint::Transform(i),
+                    ConstraintKind::Physics => SkinConstraint::Physics(i),
+                    ConstraintKind::Slider => SkinConstraint::Slider(i),
+                }),
+                None => corrupt(r),
             }
         }
         slot_count = r.count();

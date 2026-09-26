@@ -474,3 +474,52 @@ fn clipping_convex_and_inverse_flags_load() {
         assert_eq!((clip.convex, clip.inverse), (convex, inverse), "{flags}");
     }
 }
+
+// A bone's and a constraint's skin-required flags, and the bones and
+// constraints a named skin lists, were read and dropped.
+#[test]
+fn skin_required_bones_and_constraints_load() {
+    let mut o = Out::default();
+    o.header();
+    o.var(2);
+    o.bone("root", None);
+    o.str("hat");
+    o.var(0); // parent
+    o.floats(&[0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0]);
+    o.byte(0); // inherit
+    o.floats(&[0.0]); // length
+    o.byte(1); // skin required
+    o.var(0); // slots
+    o.var(2); // constraints
+    o.str("ik");
+    o.byte(0); // IK
+    o.var(1);
+    o.var(1); // bone
+    o.var(0); // target
+    o.byte(0); // flags
+    o.str("t");
+    o.byte(2); // transform
+    o.var(1);
+    o.var(1); // bone
+    o.var(0); // source
+    o.byte(1); // flags: skin required
+    o.byte(0); // offsets
+    o.byte(0); // mixes
+    o.var(0); // default skin
+    o.var(1); // named skins
+    o.str("hatted");
+    o.var(1);
+    o.var(1); // bone "hat"
+    o.var(1);
+    o.var(1); // constraint "t"
+    o.var(0); // slots
+    o.var(0); // events
+    o.var(0); // animations
+    let data = from_binary(&o.0).expect("the rig loads");
+    assert!(!data.bones[0].skin_required);
+    assert!(data.bones[1].skin_required);
+    assert!(!data.ik_constraints[0].skin_required);
+    assert!(data.transform_constraints[0].skin_required);
+    assert_eq!(data.skins[0].bones, [1]);
+    assert_eq!(data.skins[0].constraints, [SkinConstraint::Transform(0)]);
+}

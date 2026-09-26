@@ -35,7 +35,7 @@ use crate::constraint::transform::{
 use crate::constraint::ScaleYMode;
 use crate::data::{BlendMode, BoneData, Color, Inherit, SkeletonData, SlotData};
 use crate::event::{Event, EventData};
-use crate::skin::Skin;
+use crate::skin::{Skin, SkinConstraint};
 
 /// The Spine `major.minor` release whose binary layout this loader reads.
 ///
@@ -232,7 +232,7 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
         // Spine 4.3 writes the inherit mode before the length.
         let inherit = inherit_from(r.byte() as usize);
         let length = r.float();
-        let _skin_required = r.bool();
+        let skin_required = r.bool();
         if nonessential {
             let _color = r.u32();
             let _icon = r.string();
@@ -251,6 +251,7 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
             scale: Vec2::new(scale_x, scale_y),
             shear: Vec2::new(shear_x, shear_y),
             inherit,
+            skin_required,
         });
     }
     // Spine writes every parent before its children, so a parent at or after
@@ -327,16 +328,33 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
     status(&r)?;
 
     // Skins: the default skin, then named skins. Attachments resolve their
-    // names and paths through the string table.
+    // names and paths through the string table, and skins and constraint
+    // timelines index the single constraint list.
+    let constraints = constraint_list(&data);
     let mut links = Vec::new();
-    let default_skin = read_skin(&mut r, &strings, &data, true, nonessential, &mut links);
+    let default_skin = read_skin(
+        &mut r,
+        &strings,
+        &data,
+        &constraints,
+        true,
+        nonessential,
+        &mut links,
+    );
     let has_default = default_skin.is_some();
     data.default_skin = default_skin.unwrap_or_else(|| Skin::new("default"));
     let skin_count = r.count();
     for _ in 0..skin_count {
-        if let Some(skin) = read_skin(&mut r, &strings, &data, false, nonessential, &mut links) {
-            data.skins.push(skin);
-        }
+        let skin = read_skin(
+            &mut r,
+            &strings,
+            &data,
+            &constraints,
+            false,
+            nonessential,
+            &mut links,
+        );
+        data.skins.extend(skin);
     }
     let skins = SkinList {
         has_default,
@@ -374,7 +392,6 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
     }
 
     // Animations. Their constraint timelines index the single constraint list.
-    let constraints = constraint_list(&data);
     let animation_count = r.count();
     for _ in 0..animation_count {
         let aname = r.string().unwrap_or_default();
@@ -462,6 +479,7 @@ fn parse_ik(r: &mut BinaryReader, name: String, order: usize) -> IkConstraintDat
     IkConstraintData {
         name,
         order,
+        skin_required: flags & 1 != 0,
         bones,
         target,
         scale_y_mode,
@@ -561,6 +579,7 @@ fn parse_path(r: &mut BinaryReader, name: String, order: usize) -> PathConstrain
     PathConstraintData {
         name,
         order,
+        skin_required: flags & 1 != 0,
         bones,
         slot,
         position_mode,
@@ -609,6 +628,7 @@ fn parse_physics(r: &mut BinaryReader, name: String, order: usize) -> PhysicsCon
     PhysicsConstraintData {
         name,
         order,
+        skin_required: flags & 1 != 0,
         bone,
         x,
         y,
@@ -714,6 +734,7 @@ fn parse_transform(r: &mut BinaryReader, name: String, order: usize) -> Transfor
     TransformConstraintData {
         name,
         order,
+        skin_required: flags & 1 != 0,
         bones,
         source,
         offsets,
@@ -779,7 +800,7 @@ mod skins;
 use skins::{name_link_skins, read_skin, SkinList};
 
 mod timelines;
-use timelines::{constraint_list, read_animation};
+use timelines::{constraint_list, read_animation, ConstraintKind};
 
 #[cfg(all(test, feature = "json"))]
 mod examples;

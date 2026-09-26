@@ -4,16 +4,40 @@
 //! skeleton's *default* skin holds its base attachments. *Named* skins (e.g.
 //! character variants) override or add to it. Resolving an attachment checks
 //! the active skin first, then the default.
+//!
+//! A named skin also lists the skin-required bones and constraints it
+//! activates: while it is the active skin, those bones and constraints apply.
 
 use std::collections::HashMap;
 
 use crate::attach::Attachment;
+
+/// A constraint named by its type and its index in that type's list in
+/// [`crate::data::SkeletonData`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SkinConstraint {
+    /// An IK constraint.
+    Ik(usize),
+    /// A transform constraint.
+    Transform(usize),
+    /// A path constraint.
+    Path(usize),
+    /// A physics constraint.
+    Physics(usize),
+    /// A slider.
+    Slider(usize),
+}
 
 /// A named set of attachments keyed by `(slot index, attachment name)`.
 #[derive(Debug, Clone, Default)]
 pub struct Skin {
     /// Skin name (`"default"` for the base skin).
     pub name: String,
+    /// The skin-required bones (indices into the skeleton's bones) this skin
+    /// activates. Their ancestors are activated too.
+    pub bones: Vec<usize>,
+    /// The skin-required constraints this skin activates.
+    pub constraints: Vec<SkinConstraint>,
     // slot index -> (attachment name -> attachment)
     attachments: HashMap<usize, HashMap<String, Attachment>>,
 }
@@ -24,6 +48,8 @@ impl Skin {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
+            bones: Vec::new(),
+            constraints: Vec::new(),
             attachments: HashMap::new(),
         }
     }

@@ -345,3 +345,35 @@ fn clipping_convex_and_inverse_flags_load() {
     assert_eq!(flags("plain"), (false, false));
     assert_eq!(flags("flagged"), (true, true));
 }
+
+// A bone's and a constraint's "skin" flag, and the bones and constraints a
+// skin lists, were not read.
+#[test]
+fn skin_required_bones_and_constraints_load() {
+    let json = r#"{
+        "bones": [ { "name": "root" }, { "name": "hat", "parent": "root", "skin": true } ],
+        "constraints": [
+            { "type": "ik", "name": "k", "bones": [ "hat" ], "target": "root" },
+            { "type": "transform", "name": "t", "bones": [ "hat" ], "source": "root", "skin": true }
+        ],
+        "skins": [ { "name": "hatted", "bones": [ "hat" ], "transform": [ "t" ], "ik": [ "k" ] } ]
+    }"#;
+    let data = from_json(json).unwrap();
+    assert!(!data.bones[0].skin_required);
+    assert!(data.bones[1].skin_required);
+    assert!(!data.ik_constraints[0].skin_required);
+    assert!(data.transform_constraints[0].skin_required);
+    let skin = &data.skins[0];
+    assert_eq!(skin.bones, [1]);
+    assert_eq!(
+        skin.constraints,
+        [SkinConstraint::Ik(0), SkinConstraint::Transform(0)]
+    );
+
+    // A skin that lists an unknown bone is rejected.
+    let json = json.replace(
+        r#""bones": [ "hat" ], "transform""#,
+        r#""bones": [ "cap" ], "transform""#,
+    );
+    assert!(matches!(from_json(&json), Err(LoadError::BadReference(_))));
+}

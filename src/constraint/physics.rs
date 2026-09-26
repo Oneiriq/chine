@@ -47,6 +47,8 @@ pub struct PhysicsConstraintData {
     pub name: String,
     /// Global constraint order (lower applies first).
     pub order: usize,
+    /// Whether the constraint applies only while the active skin lists it.
+    pub skin_required: bool,
     /// Constrained bone index.
     pub bone: usize,
     /// Strength of the effect on the bone's world x position (`0` disables).
@@ -464,6 +466,7 @@ mod tests {
         PhysicsConstraintData {
             name: "jiggle".into(),
             order: 0,
+            skin_required: false,
             bone,
             x: 1.0,
             y: 1.0,

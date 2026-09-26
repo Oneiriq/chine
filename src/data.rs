@@ -108,6 +108,9 @@ pub struct BoneData {
     pub shear: Vec2,
     /// How this bone inherits the parent's world transform.
     pub inherit: Inherit,
+    /// Whether the bone is active only while the active skin lists it (or
+    /// one of its descendants).
+    pub skin_required: bool,
 }
 
 impl Default for BoneData {
@@ -122,6 +125,7 @@ impl Default for BoneData {
             scale: Vec2::ONE,
             shear: Vec2::ZERO,
             inherit: Inherit::Normal,
+            skin_required: false,
         }
     }
 }

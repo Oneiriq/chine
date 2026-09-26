@@ -42,6 +42,8 @@ pub struct Bone {
     // How the bone inherits its parent's transform. Starts at the setup
     // mode, and a bone inherit timeline can change it.
     pub(crate) inherit: Inherit,
+    // Whether the bone applies with the active skin (see `Self::active`).
+    pub(crate) active: bool,
     /// Local x relative to the parent.
     pub x: f32,
     /// Local y relative to the parent.
@@ -71,6 +73,7 @@ impl Bone {
         let mut bone = Self {
             parent: valid_parent(data.parent, bone_count),
             inherit: data.inherit,
+            active: true,
             x: 0.0,
             y: 0.0,
             rotation: 0.0,
@@ -113,6 +116,15 @@ impl Bone {
     #[must_use]
     pub fn inherit(&self) -> Inherit {
         self.inherit
+    }
+
+    /// Whether the bone applies with the active skin: it is not
+    /// skin-required, or the active skin lists it or one of its descendants.
+    /// Timelines do not change an inactive bone, its world transform is not
+    /// updated, and the slots on it are not drawn.
+    #[must_use]
+    pub fn active(&self) -> bool {
+        self.active
     }
 
     /// World matrix component `a` (world x-axis x).
@@ -290,8 +302,7 @@ impl Skeleton {
         let sliders = data.sliders.iter().map(SliderPose::from_data).collect();
         let slots = data.slots.iter().map(Slot::from_data).collect();
         let draw_order: Vec<usize> = (0..data.slots.len()).collect();
-        let update_cache = build_update_cache(&data);
-        Self {
+        let mut skeleton = Self {
             data,
             bones,
             ik_constraints,
@@ -303,12 +314,26 @@ impl Skeleton {
             draw_order,
             skin: None,
             events: Vec::new(),
-            update_cache,
+            update_cache: Vec::new(),
             time: 0.0,
             x: 0.0,
             y: 0.0,
             scale_x: 1.0,
             scale_y: 1.0,
+        };
+        skeleton.rebuild_cache();
+        skeleton
+    }
+
+    /// Rebuild the update cache for the active skin, and mark which bones are
+    /// active: a skin-required bone or constraint applies only while the
+    /// active skin lists it.
+    fn rebuild_cache(&mut self) {
+        let skin = self.skin.and_then(|i| self.data.skins.get(i));
+        let (cache, active) = build_update_cache(&self.data, skin);
+        self.update_cache = cache;
+        for (bone, active) in self.bones.iter_mut().zip(active) {
+            bone.active = active;
         }
     }
 
@@ -325,15 +350,19 @@ impl Skeleton {
     }
 
     /// Set the active skin by name: it overrides the default skin for attachment
-    /// lookups (so linked meshes and other variants in that skin are shown). An
+    /// lookups (so linked meshes and other variants in that skin are shown),
+    /// and activates the skin-required bones and constraints it lists. An
     /// unknown name (or `"default"`) clears the active skin.
     pub fn set_skin(&mut self, name: &str) {
         self.skin = self.data.skins.iter().position(|s| s.name == name);
+        self.rebuild_cache();
     }
 
-    /// Clear the active skin, using only the default skin.
+    /// Clear the active skin, using only the default skin. Skin-required
+    /// bones and constraints no longer apply.
     pub fn clear_skin(&mut self) {
         self.skin = None;
+        self.rebuild_cache();
     }
 
     /// The active named skin, if one is set.
@@ -443,17 +472,22 @@ impl Skeleton {
     }
 
     /// Split borrow for the animation system: a bone's mutable local pose paired
-    /// with its immutable setup data. `None` if `index` is out of range.
+    /// with its immutable setup data. `None` if `index` is out of range or the
+    /// bone is inactive, which timelines leave alone.
     pub(crate) fn bone_and_setup(&mut self, index: usize) -> Option<(&mut Bone, &BoneData)> {
         let setup = self.data.bones.get(index)?;
-        let bone = self.bones.get_mut(index)?;
+        let bone = self.bones.get_mut(index).filter(|bone| bone.active)?;
         Some((bone, setup))
     }
 
     /// A slot's mutable runtime pose paired with its setup data, for slot
-    /// timelines.
+    /// timelines. `None` if `i` is out of range or the slot's bone is
+    /// inactive, which timelines leave alone.
     pub(crate) fn slot_pose_and_setup(&mut self, i: usize) -> Option<(&mut Slot, &SlotData)> {
         let setup = self.data.slots.get(i)?;
+        if self.bones.get(setup.bone).is_some_and(|bone| !bone.active) {
+            return None;
+        }
         let slot = self.slots.get_mut(i)?;
         Some((slot, setup))
     }

@@ -66,6 +66,8 @@ pub struct PathConstraintData {
     pub name: String,
     /// Global constraint order (lower applies first).
     pub order: usize,
+    /// Whether the constraint applies only while the active skin lists it.
+    pub skin_required: bool,
     /// Constrained bone indices, in chain order.
     pub bones: Vec<usize>,
     /// Slot index whose path attachment is followed.

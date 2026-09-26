@@ -1,11 +1,16 @@
 //! The update cache: the order in which a [`super::Skeleton`] computes bone
 //! world transforms and applies its constraints.
 //!
-//! The cache is built once from the rig data. The data may be malformed (a
-//! binary export stores bone parents and constraint targets as raw indices, and
-//! a host can build a `SkeletonData` by hand), so every walk here tolerates
-//! out-of-range indices and cyclic parents: a bad reference is skipped, a
-//! parent cycle is cut where it closes, and no walk recurses.
+//! The cache is built from the rig data and the active skin, and rebuilt when
+//! the skin changes. A skin-required bone or constraint applies only while
+//! the active skin lists it, so the cache leaves out the ones the skin does
+//! not activate. The data may be malformed (a binary export stores bone
+//! parents and constraint targets as raw indices, and a host can build a
+//! `SkeletonData` by hand), so every walk here tolerates out-of-range indices
+//! and cyclic parents: a bad reference is skipped, a parent cycle is cut
+//! where it closes, and no walk recurses.
+
+use std::collections::HashSet;
 
 use crate::constraint::ik::IkConstraintData;
 use crate::constraint::path::PathConstraintData;
@@ -13,6 +18,7 @@ use crate::constraint::physics::PhysicsConstraintData;
 use crate::constraint::slider::SliderData;
 use crate::constraint::transform::TransformConstraintData;
 use crate::data::SkeletonData;
+use crate::skin::{Skin, SkinConstraint};
 
 /// The cache length past which no further constraint is sorted in.
 ///
@@ -50,8 +56,23 @@ pub(super) enum Updatable {
 /// bone or slot references fall outside the rig is left out, so those solvers
 /// only see valid indices. A slider is kept either way: it reads its bone
 /// through a checked lookup and does nothing when the bone is missing.
-pub(super) fn build_update_cache(data: &SkeletonData) -> Vec<Updatable> {
+///
+/// Only the bones and constraints that apply with `skin` active are sorted
+/// in (see [`active_bones`]). A constraint applies when the bone or slot it
+/// reads from is active and, if it is skin-required, the skin lists it.
+/// Returns the cache and which bones are active.
+pub(super) fn build_update_cache(
+    data: &SkeletonData,
+    skin: Option<&Skin>,
+) -> (Vec<Updatable>, Vec<bool>) {
     let n = data.bones.len();
+    let active = active_bones(data, skin);
+    let is_active = |bone: usize| active.get(bone).copied().unwrap_or(false);
+    let listed: HashSet<SkinConstraint> = skin
+        .map(|skin| skin.constraints.iter().copied().collect())
+        .unwrap_or_default();
+    let applies =
+        |required: bool, constraint: SkinConstraint| !required || listed.contains(&constraint);
     let parents: Vec<Option<usize>> = data
         .bones
         .iter()
@@ -83,11 +104,13 @@ pub(super) fn build_update_cache(data: &SkeletonData) -> Vec<Updatable> {
     }
     ordered.sort_by_key(|(order, _)| *order);
 
-    let mut sorted = vec![false; n];
+    // An inactive bone counts as sorted from the start, so no walk adds it.
+    let mut sorted: Vec<bool> = active.iter().map(|&a| !a).collect();
     let mut cache = Vec::new();
     let mut walk = Walk {
         parents: &parents,
         children: &children,
+        active: &active,
         sorted: &mut sorted,
         cache: &mut cache,
     };
@@ -98,14 +121,22 @@ pub(super) fn build_update_cache(data: &SkeletonData) -> Vec<Updatable> {
         match kind {
             Updatable::Ik(i) => {
                 if let Some(ik) = data.ik_constraints.get(i) {
-                    if ik.target < n && all_in_range(&ik.bones, n) {
+                    if ik.target < n
+                        && all_in_range(&ik.bones, n)
+                        && is_active(ik.target)
+                        && applies(ik.skin_required, SkinConstraint::Ik(i))
+                    {
                         walk.sort_ik(ik, i);
                     }
                 }
             }
             Updatable::Transform(i) => {
                 if let Some(tc) = data.transform_constraints.get(i) {
-                    if tc.source < n && all_in_range(&tc.bones, n) {
+                    if tc.source < n
+                        && all_in_range(&tc.bones, n)
+                        && is_active(tc.source)
+                        && applies(tc.skin_required, SkinConstraint::Transform(i))
+                    {
                         walk.sort_transform(tc, i);
                     }
                 }
@@ -114,7 +145,10 @@ pub(super) fn build_update_cache(data: &SkeletonData) -> Vec<Updatable> {
                 if let Some(pc) = data.path_constraints.get(i) {
                     let slot_bone = data.slots.get(pc.slot).map(|s| s.bone);
                     if let Some(slot_bone) = slot_bone.filter(|&b| b < n) {
-                        if all_in_range(&pc.bones, n) {
+                        if all_in_range(&pc.bones, n)
+                            && is_active(slot_bone)
+                            && applies(pc.skin_required, SkinConstraint::Path(i))
+                        {
                             walk.sort_path(pc, i, slot_bone);
                         }
                     }
@@ -122,14 +156,24 @@ pub(super) fn build_update_cache(data: &SkeletonData) -> Vec<Updatable> {
             }
             Updatable::Physics(i) => {
                 if let Some(pd) = data.physics_constraints.get(i) {
-                    if pd.bone < n {
+                    if pd.bone < n
+                        && is_active(pd.bone)
+                        && applies(pd.skin_required, SkinConstraint::Physics(i))
+                    {
                         walk.sort_physics(pd, i);
                     }
                 }
             }
             Updatable::Slider(i) => {
                 if let Some(slider) = data.sliders.get(i) {
-                    walk.sort_slider(slider, i);
+                    // A bone past the rig does not stop the slider.
+                    let bone_active = match slider.bone {
+                        Some(b) => active.get(b).copied().unwrap_or(true),
+                        None => true,
+                    };
+                    if bone_active && applies(slider.skin_required, SkinConstraint::Slider(i)) {
+                        walk.sort_slider(slider, i);
+                    }
                 }
             }
             Updatable::Bone(_) => {}
@@ -138,7 +182,31 @@ pub(super) fn build_update_cache(data: &SkeletonData) -> Vec<Updatable> {
     for i in 0..n {
         walk.sort_bone(i);
     }
-    cache
+    (cache, active)
+}
+
+/// Which bones apply with `skin` active: every bone that is not
+/// skin-required, and each bone the skin lists together with its ancestors.
+pub(super) fn active_bones(data: &SkeletonData, skin: Option<&Skin>) -> Vec<bool> {
+    let n = data.bones.len();
+    let mut active: Vec<bool> = data.bones.iter().map(|b| !b.skin_required).collect();
+    let Some(skin) = skin else {
+        return active;
+    };
+    // Each bone is climbed from once, which also ends a parent cycle.
+    let mut climbed = vec![false; n];
+    for &bone in &skin.bones {
+        let mut current = Some(bone);
+        while let Some(b) = current {
+            match climbed.get_mut(b) {
+                Some(seen) if !*seen => *seen = true,
+                _ => break,
+            }
+            active[b] = true;
+            current = data.bones.get(b).and_then(|d| valid_parent(d.parent, n));
+        }
+    }
+    active
 }
 
 /// `parent` if it names a bone of a rig with `bone_count` bones, else `None`
@@ -157,13 +225,20 @@ fn all_in_range(indices: &[usize], len: usize) -> bool {
 struct Walk<'a> {
     parents: &'a [Option<usize>],
     children: &'a [Vec<usize>],
+    /// Which bones are active. An inactive bone stays sorted, so it is
+    /// never added.
+    active: &'a [bool],
     sorted: &'a mut [bool],
     cache: &'a mut Vec<Updatable>,
 }
 
 impl Walk<'_> {
-    /// Set a bone's sorted flag, ignoring an out-of-range index.
+    /// Set an active bone's sorted flag, ignoring an inactive bone and an
+    /// out-of-range index.
     fn set_sorted(&mut self, bone: usize, value: bool) {
+        if !self.active.get(bone).copied().unwrap_or(false) {
+            return;
+        }
         if let Some(flag) = self.sorted.get_mut(bone) {
             *flag = value;
         }
@@ -278,6 +353,10 @@ impl Walk<'_> {
                 continue;
             };
             for &child in kids {
+                // An inactive child and its subtree stay as they are.
+                if !self.active.get(child).copied().unwrap_or(false) {
+                    continue;
+                }
                 if let Some(flag) = self.sorted.get_mut(child) {
                     if *flag {
                         stack.push(child);

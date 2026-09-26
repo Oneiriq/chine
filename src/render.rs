@@ -407,13 +407,17 @@ pub fn render_with<'a>(skeleton: &Skeleton, scratch: &'a mut RenderScratch) -> &
 }
 
 /// Resolve a slot's drawable state: its setup data, runtime state, and current
-/// attachment. `None` if the slot shows nothing or a reference is dangling.
+/// attachment. `None` if the slot shows nothing, its bone is inactive (see
+/// [`crate::skel::Bone::active`]), or a reference is dangling.
 fn resolve_attachment(
     skeleton: &Skeleton,
     slot_index: usize,
 ) -> Option<(&SlotData, &Slot, &Attachment)> {
     let data = skeleton.data();
     let setup = data.slots.get(slot_index)?;
+    if skeleton.bone(setup.bone).is_some_and(|bone| !bone.active()) {
+        return None;
+    }
     let slot = skeleton.slot(slot_index)?;
     let name = slot.attachment.as_deref()?;
     let att = data.attachment(slot_index, name, skeleton.active_skin())?;

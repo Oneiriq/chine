@@ -143,3 +143,40 @@ fn every_skin_renders_the_same_from_both_exports() {
         assert!(commands > 0, "{name} draws nothing");
     }
 }
+
+// Skin-required bones and constraints, and the bones and constraints each
+// skin lists, load the same from both exports.
+#[cfg_attr(
+    not(spine_examples),
+    ignore = "requires the official Spine examples in data/examples/"
+)]
+#[test]
+fn skin_requirements_match_json() {
+    use std::collections::HashSet;
+
+    let mut listed = 0;
+    for name in EXAMPLES {
+        let (json, skel) = load(name);
+        let required = |data: &SkeletonData| {
+            let bones: Vec<bool> = data.bones.iter().map(|b| b.skin_required).collect();
+            let constraints: Vec<bool> = (data.ik_constraints.iter().map(|c| c.skin_required))
+                .chain(data.transform_constraints.iter().map(|c| c.skin_required))
+                .chain(data.path_constraints.iter().map(|c| c.skin_required))
+                .chain(data.physics_constraints.iter().map(|c| c.skin_required))
+                .chain(data.sliders.iter().map(|c| c.skin_required))
+                .collect();
+            (bones, constraints)
+        };
+        assert_eq!(required(&json), required(&skel), "{name}");
+        for (j, b) in json.skins.iter().zip(&skel.skins) {
+            let bones = |skin: &Skin| skin.bones.iter().copied().collect::<HashSet<_>>();
+            let constraints =
+                |skin: &Skin| skin.constraints.iter().copied().collect::<HashSet<_>>();
+            assert_eq!(bones(j), bones(b), "{name} {}", j.name);
+            assert_eq!(constraints(j), constraints(b), "{name} {}", j.name);
+            listed += j.bones.len() + j.constraints.len();
+        }
+    }
+    // mix-and-match-pro's skins list skin-required bones and constraints.
+    assert!(listed > 0);
+}

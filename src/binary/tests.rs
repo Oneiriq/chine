@@ -493,6 +493,7 @@ fn reads_an_ik_constraint_timeline() {
         ik_constraints: vec![IkConstraintData {
             name: "aim-ik".into(),
             order: 0,
+            skin_required: false,
             bones: vec![1],
             target: 2,
             scale_y_mode: ScaleYMode::None,
