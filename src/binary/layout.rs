@@ -1,5 +1,7 @@
 //! Tests for Spine 4.3 binary layout details that the older section tests do
-//! not cover: flag-coded constraint defaults and bone inherit timelines.
+//! not cover: bone field order, flag-coded constraint defaults, bone inherit
+//! timelines, linked meshes, skin lists, draw order folders, and clipping
+//! flags.
 
 use std::sync::Arc;
 
@@ -522,4 +524,33 @@ fn skin_required_bones_and_constraints_load() {
     assert!(data.transform_constraints[0].skin_required);
     assert_eq!(data.skins[0].bones, [1]);
     assert_eq!(data.skins[0].constraints, [SkinConstraint::Transform(0)]);
+}
+
+// Spine 4.3 writes a bone's inherit byte before its length. The loader read
+// the length first, so every bone took its length from the inherit byte and
+// the first three length bytes, and its inherit mode from the last one.
+#[test]
+fn reads_bone_inherit_before_length() {
+    let mut o = Out::default();
+    o.header();
+    o.var(2);
+    for (name, parent, inherit, length) in [("root", None, 0, 0.0), ("arm", Some(0), 4, 85.5)] {
+        o.str(name);
+        if let Some(parent) = parent {
+            o.var(parent);
+        }
+        // rotation, x, y, scaleX, scaleY, shearX, shearY.
+        o.floats(&[0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0]);
+        o.byte(inherit);
+        o.floats(&[length]);
+        o.byte(0); // skin required
+    }
+    for _ in 0..6 {
+        o.var(0); // slots, constraints, both skin lists, events, animations
+    }
+    let data = from_binary(&o.0).expect("the rig loads");
+    assert_eq!(data.bones[1].inherit, Inherit::NoScaleOrReflection);
+    assert_eq!(data.bones[1].length, 85.5);
+    assert_eq!(data.bones[0].inherit, Inherit::Normal);
+    assert_eq!(data.bones[0].length, 0.0);
 }
