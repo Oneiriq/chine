@@ -328,7 +328,7 @@ fn driven_attachment<'s>(
     driven.then_some(attachment)
 }
 
-/// Mesh deform timeline: set the deform buffer of each slot the timeline
+/// Deform timeline: set the deform buffer of each slot the timeline
 /// reaches to the setup vertices plus the interpolated keyframe offsets
 /// (scaled by `alpha`). A slot is changed only while it shows the timeline's
 /// attachment, or a linked mesh inheriting its timelines. The buffer takes

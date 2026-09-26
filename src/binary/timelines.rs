@@ -4,8 +4,7 @@ use crate::anim::GLOBAL_PHYSICS;
 
 mod deform;
 use deform::{
-    deform_mesh_info, read_deform_timeline, read_sequence_keys, skip_deform_timeline,
-    timeline_target,
+    deform_setup, read_deform_timeline, read_sequence_keys, skip_deform_timeline, timeline_target,
 };
 
 mod draw_order;
@@ -372,7 +371,7 @@ pub(super) fn read_animation(
         }
     }
 
-    // Attachment timelines, nested skins -> slots -> attachments. Mesh deforms
+    // Attachment timelines, nested skins -> slots -> attachments. Vertex deforms
     // and sequence (animated attachment) timelines are both built and applied.
     // Skins are indexed in Spine's skin list (see `SkinList`).
     let deform_skins = r.count();
@@ -396,7 +395,7 @@ pub(super) fn read_animation(
                 // The attachment the timeline drives, in the skin it names.
                 let target = skin.and_then(|skin| timeline_target(data, skin, slot, &att_name));
                 match kind {
-                    0 => match target.and_then(deform_mesh_info) {
+                    0 => match target.and_then(deform_setup) {
                         Some((target, frame_len, setup)) => {
                             let (tl, d) = read_deform_timeline(r, target, setup, frame_len, frames);
                             duration = duration.max(d);

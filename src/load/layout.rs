@@ -398,3 +398,21 @@ fn sequence_keys_without_a_delay_keep_the_previous_one() {
     }"#;
     assert_eq!(posed(json, "a", 1.25).slot(0).unwrap().sequence_index, 2);
 }
+
+// Deform timelines on a path (and other vertex attachments) were dropped: the
+// loader only built them for meshes.
+#[test]
+fn deform_timelines_on_paths_apply() {
+    let json = r#"{
+        "bones": [ { "name": "root" } ],
+        "slots": [ { "name": "s", "bone": "root", "attachment": "p" } ],
+        "skins": [ { "name": "default", "attachments": { "s": {
+            "p": { "type": "path", "vertexCount": 3, "vertices": [0,0, 10,0, 20,0], "lengths": [20] }
+        } } } ],
+        "animations": { "a": { "attachments": { "default": { "s": { "p": {
+            "deform": [ { "time": 0 }, { "time": 1, "offset": 3, "vertices": [5] } ]
+        } } } } } }
+    }"#;
+    let sk = posed(json, "a", 1.0);
+    assert_eq!(sk.slot(0).unwrap().deform, [0.0, 0.0, 10.0, 5.0, 20.0, 0.0]);
+}

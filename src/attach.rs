@@ -306,6 +306,40 @@ pub enum MeshVertices {
     },
 }
 
+impl MeshVertices {
+    /// The length of a deform vertex array for these vertices: `2 *` the vertex
+    /// count when unweighted, or `2 *` the total influence count when weighted.
+    pub(crate) fn deform_len(&self) -> usize {
+        match self {
+            MeshVertices::Unweighted(v) => v.len(),
+            MeshVertices::Weighted { vertices, .. } => (vertices.len() / 3) * 2,
+        }
+    }
+
+    /// The unweighted setup positions, or `None` when weighted.
+    pub(crate) fn unweighted(&self) -> Option<&[f32]> {
+        match self {
+            MeshVertices::Unweighted(v) => Some(v),
+            MeshVertices::Weighted { .. } => None,
+        }
+    }
+}
+
+impl Attachment {
+    /// The bind-pose vertices of a vertex attachment (a mesh, path, bounding
+    /// box, or clipping polygon), which deform timelines offset. `None` for
+    /// the other kinds.
+    pub(crate) fn deform_vertices(&self) -> Option<&MeshVertices> {
+        match self {
+            Attachment::Mesh(m) => Some(&m.vertices),
+            Attachment::Path(p) => Some(&p.vertices),
+            Attachment::BoundingBox(b) => Some(&b.vertices),
+            Attachment::Clipping(c) => Some(&c.vertices),
+            Attachment::Region(_) | Attachment::Point(_) | Attachment::LinkedMesh(_) => None,
+        }
+    }
+}
+
 /// Where an attachment lives: the skin that holds it (`None` for the default
 /// skin), its slot, and its name in that slot. Deform and sequence timelines
 /// name the attachment they drive this way.
@@ -419,10 +453,7 @@ impl MeshAttachment {
     /// a weighted mesh. Used to build deform timelines.
     #[must_use]
     pub fn setup_vertices(&self) -> Option<&[f32]> {
-        match &self.vertices {
-            MeshVertices::Unweighted(v) => Some(v),
-            MeshVertices::Weighted { .. } => None,
-        }
+        self.vertices.unweighted()
     }
 
     /// The number of values in this mesh's geometry arrays (UVs, triangles, and
@@ -444,10 +475,7 @@ impl MeshAttachment {
     /// an unweighted mesh, or `2 *` the total influence count for a weighted one.
     #[must_use]
     pub fn deform_len(&self) -> usize {
-        match &self.vertices {
-            MeshVertices::Unweighted(v) => v.len(),
-            MeshVertices::Weighted { vertices, .. } => (vertices.len() / 3) * 2,
-        }
+        self.vertices.deform_len()
     }
 
     /// Remap the mesh's `[0, 1]` region-relative UVs into page space using the
@@ -618,7 +646,24 @@ impl PathAttachment {
     /// Compute world-space positions for every control point.
     #[must_use]
     pub fn compute_world_vertices(&self, skeleton: &Skeleton, slot_bone: usize) -> Vec<Vec2> {
-        compute_vertices(&self.vertices, self.vertex_count, skeleton, slot_bone, &[])
+        self.compute_deformed_vertices(skeleton, slot_bone, &[])
+    }
+
+    /// [`Self::compute_world_vertices`] with a deform timeline's `deform`
+    /// applied, as a mesh applies one (empty for none).
+    pub(crate) fn compute_deformed_vertices(
+        &self,
+        skeleton: &Skeleton,
+        slot_bone: usize,
+        deform: &[f32],
+    ) -> Vec<Vec2> {
+        compute_vertices(
+            &self.vertices,
+            self.vertex_count,
+            skeleton,
+            slot_bone,
+            deform,
+        )
     }
 }
 
@@ -840,12 +885,24 @@ impl ClippingAttachment {
         slot_bone: usize,
         out: &mut Vec<Vec2>,
     ) {
+        self.compute_deformed_vertices_into(skeleton, slot_bone, &[], out);
+    }
+
+    /// [`Self::compute_world_vertices_into`] with a deform timeline's
+    /// `deform` applied, as a mesh applies one (empty for none).
+    pub(crate) fn compute_deformed_vertices_into(
+        &self,
+        skeleton: &Skeleton,
+        slot_bone: usize,
+        deform: &[f32],
+        out: &mut Vec<Vec2>,
+    ) {
         compute_vertices_into(
             &self.vertices,
             self.vertex_count,
             skeleton,
             slot_bone,
-            &[],
+            deform,
             out,
         );
     }

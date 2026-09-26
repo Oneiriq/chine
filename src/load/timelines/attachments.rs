@@ -1,4 +1,4 @@
-//! Attachment timelines for the JSON loader: mesh deform and sequence
+//! Attachment timelines for the JSON loader: vertex deform and sequence
 //! (flipbook) keys, each keyed by skin, slot, and attachment.
 
 use super::*;
@@ -74,8 +74,9 @@ fn entry_target<'d>(
     Some((AttachmentTarget::new(key, timeline_slots), attachment))
 }
 
-/// Read one mesh's deform timeline from its key list. `None` when there are no
-/// keys or the entry names no mesh.
+/// Read one vertex attachment's deform timeline from its key list. `None`
+/// when there are no keys or the entry names no mesh, path, bounding box, or
+/// clipping polygon.
 pub(super) fn read_deform(
     entry: &AttachmentEntry,
     keys: &Value,
@@ -86,10 +87,14 @@ pub(super) fn read_deform(
     let Some(keys) = keys.as_array().filter(|keys| !keys.is_empty()) else {
         return Ok(None);
     };
-    let Some((target, Attachment::Mesh(mesh))) = entry_target(entry, data, names) else {
+    let Some((target, attachment)) = entry_target(entry, data, names) else {
         return Ok(None);
     };
-    let frame_len = mesh.deform_len();
+    // A mesh, path, bounding box, or clipping polygon.
+    let Some(vertices) = attachment.deform_vertices() else {
+        return Ok(None);
+    };
+    let frame_len = vertices.deform_len();
     let n = keys.len();
     // The setup vertices plus one full frame per key.
     budget.charge(
@@ -101,7 +106,7 @@ pub(super) fn read_deform(
     // Unweighted: setup = the bind vertices (offsets add to them). Weighted:
     // setup = zeros (offsets are added per-influence to the bind positions in
     // compute_vertices).
-    let setup = match mesh.setup_vertices() {
+    let setup = match vertices.unweighted() {
         Some(v) => v.to_vec(),
         None => vec![0.0; frame_len],
     };

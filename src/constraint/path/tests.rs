@@ -421,3 +421,28 @@ fn constraint_follows_the_slots_current_path() {
     sk.update_world_transform();
     assert_eq!(follower(&sk), (0.0, 0.0));
 }
+
+// Spine offsets a path's control points by its slot's deform, as it does a
+// mesh's vertices. The constraint read the bind-pose control points, and the
+// loaders dropped deform timelines on paths, so a deformed path was ignored.
+#[test]
+fn constraint_follows_a_deformed_path() {
+    let mut data = rig(diagonal(), 6, false, 0);
+    let mut pc = follow(vec![1], RotateMode::Chain);
+    pc.mix_rotate = 0.0;
+    data.path_constraints.push(pc);
+    let mut sk = Skeleton::new(Arc::new(data));
+    // The deform moves the diagonal 10 up.
+    let deform: Vec<f32> = [
+        -10.0, -10.0, 0.0, 0.0, 10.0, 10.0, 20.0, 20.0, 30.0, 30.0, 40.0, 40.0,
+    ]
+    .iter()
+    .enumerate()
+    .map(|(i, v)| if i % 2 == 1 { v + 10.0 } else { *v })
+    .collect();
+    sk.slot_pose_and_setup(0).unwrap().0.deform = deform;
+    sk.update_world_transform();
+    let f = sk.bone(1).unwrap();
+    assert!((f.world_x() - 15.0).abs() < 1e-3, "x={}", f.world_x());
+    assert!((f.world_y() - 25.0).abs() < 1e-3, "y={}", f.world_y());
+}

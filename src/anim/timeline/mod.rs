@@ -366,9 +366,10 @@ impl SequenceTimeline {
     }
 }
 
-/// A mesh deform timeline: per-keyframe vertex offsets. For an unweighted mesh
-/// they add to the setup vertices. For a weighted mesh the setup is zero and the
-/// offsets add per-influence in `compute_vertices`. Only applies while a slot
+/// A deform timeline: per-keyframe vertex offsets for a mesh, path, bounding
+/// box, or clipping polygon. For unweighted vertices they add to the setup
+/// vertices. For weighted ones the setup is zero and the offsets add
+/// per-influence in `compute_vertices`. Only applies while a slot
 /// shows the attachment `target` names.
 #[derive(Debug, Clone)]
 pub(crate) struct DeformTimeline {
@@ -476,7 +477,7 @@ pub(crate) enum BoneAxis {
 }
 
 /// A keyframed animation channel: one bone property, constraint mix, or slot
-/// property, or the draw order, events, or a mesh deform.
+/// property, or the draw order, events, or a vertex deform.
 #[derive(Debug, Clone)]
 pub(crate) enum Timeline {
     /// Local rotation (degrees).
@@ -525,7 +526,7 @@ pub(crate) enum Timeline {
     DrawOrderFolder(DrawOrderFolderTimeline),
     /// Animation events fired on keyframe crossings.
     Event(EventTimeline),
-    /// Mesh deform (per-vertex offsets).
+    /// Vertex deform (per-vertex offsets).
     Deform(DeformTimeline),
     /// Slot sequence (flipbook) frame index.
     Sequence(SequenceTimeline),

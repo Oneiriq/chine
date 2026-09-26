@@ -280,3 +280,28 @@ fn animations_pose_the_same_from_both_exports() {
         }
     }
 }
+
+// stretchyman-pro's sneak deforms its leg paths. Deform timelines on paths
+// were dropped by both loaders, so its legs followed the bind-pose paths.
+#[cfg_attr(
+    not(spine_examples),
+    ignore = "requires the official Spine examples in data/examples/"
+)]
+#[test]
+fn path_deforms_load_from_both_exports() {
+    let (json, skel) = load("stretchyman-pro");
+    for data in [json, skel] {
+        let slot = data.find_slot("back-leg-path").expect("the path slot");
+        let anim = Arc::clone(data.find_animation("sneak").expect("sneak"));
+        let mut sk = Skeleton::new(Arc::new(data));
+        anim.apply(
+            &mut sk,
+            -1.0,
+            anim.duration() / 3.0,
+            1.0,
+            crate::anim::MixFrom::Setup,
+            false,
+        );
+        assert!(!sk.slot(slot).unwrap().deform.is_empty());
+    }
+}

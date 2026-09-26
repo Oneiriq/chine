@@ -1,4 +1,4 @@
-//! Attachment timelines: mesh deform and sequence (flipbook) keys, read from
+//! Attachment timelines: vertex deform and sequence (flipbook) keys, read from
 //! the nested skin, slot, and attachment groups of an animation.
 
 use super::*;
@@ -90,19 +90,18 @@ pub(super) fn read_sequence_keys(r: &mut BinaryReader, frames: usize) -> (Sequen
     ((times, mode_and_index, delays), duration)
 }
 
-/// Resolve a deform timeline's mesh: the target, the setup-pose deform
-/// length, and the setup vertices to add at apply time (zeros for a weighted
-/// mesh). Returns `None` when the target is not a mesh, so the caller
-/// consumes the bytes instead.
-pub(super) fn deform_mesh_info(
+/// Resolve a deform timeline's target, a mesh, path, bounding box, or
+/// clipping polygon: the target, the setup-pose deform length, and the setup
+/// vertices to add at apply time (zeros for weighted vertices). Returns
+/// `None` for any other attachment, so the caller consumes the bytes
+/// instead.
+pub(super) fn deform_setup(
     (target, attachment): (AttachmentTarget, &Attachment),
 ) -> Option<(AttachmentTarget, usize, Vec<f32>)> {
-    let Attachment::Mesh(mesh) = attachment else {
-        return None;
-    };
-    let frame_len = mesh.deform_len();
-    let setup = mesh
-        .setup_vertices()
+    let vertices = attachment.deform_vertices()?;
+    let frame_len = vertices.deform_len();
+    let setup = vertices
+        .unweighted()
         .map_or_else(|| vec![0.0; frame_len], <[f32]>::to_vec);
     Some((target, frame_len, setup))
 }

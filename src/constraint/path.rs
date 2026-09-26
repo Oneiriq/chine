@@ -256,7 +256,9 @@ fn apply(
         }
     }
 
-    let world_pts = path.compute_world_vertices(skeleton, slot_bone);
+    // A deform timeline can move the path's control points.
+    let deform = skeleton.slot(slot).map_or(&[][..], |s| s.deform.as_slice());
+    let world_pts = path.compute_deformed_vertices(skeleton, slot_bone, deform);
     let sampling = Sampling {
         spaces: &spaces,
         tangents,

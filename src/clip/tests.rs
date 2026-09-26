@@ -544,3 +544,20 @@ fn steady_state_hull_clips_allocate_nothing() {
         assert_eq!(allocation_count() - before, 0, "{convex} {inverse}");
     }
 }
+
+// Spine clips with the clipping polygon moved by its slot's deform. The
+// renderer used the bind-pose polygon.
+#[test]
+fn clipping_follows_its_deform() {
+    let mut sk = clipped_skeleton();
+    assert!(!crate::render::render(&sk).is_empty());
+    // Move the whole clip polygon far from the mesh.
+    let far: Vec<f32> = [
+        0.0, 0.0, 10.0, 0.0, 10.0, 4.0, 4.0, 4.0, 4.0, 10.0, 0.0, 10.0,
+    ]
+    .iter()
+    .map(|v| v + 1000.0)
+    .collect();
+    sk.slot_pose_and_setup(0).unwrap().0.deform = far;
+    assert!(crate::render::render(&sk).is_empty());
+}

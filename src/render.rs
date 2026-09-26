@@ -337,7 +337,7 @@ pub fn render_with<'a>(skeleton: &Skeleton, scratch: &'a mut RenderScratch) -> &
                 // pieces, or take its convex hull for a convex or inverse
                 // clip. A degenerate polygon leaves any active clip running.
                 clip_world.clear();
-                c.compute_world_vertices_into(skeleton, setup.bone, clip_world);
+                c.compute_deformed_vertices_into(skeleton, setup.bone, &slot.deform, clip_world);
                 let hull = c.convex || c.inverse;
                 if replace_clip_within(clip_world, hull, ear, poly_points, poly_ranges, &mut budget)
                 {

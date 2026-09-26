@@ -355,7 +355,7 @@ pub(super) fn parse_animation(
         }
     }
 
-    // Attachment timelines, keyed by skin, slot, and attachment: mesh deforms
+    // Attachment timelines, keyed by skin, slot, and attachment: vertex deforms
     // and sequence (flipbook) keys.
     if let Some(map) = anim.get("attachments") {
         for entry in attachment_entries(map, names) {
