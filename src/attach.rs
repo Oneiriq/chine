@@ -160,7 +160,7 @@ impl Sequence {
 /// A textured quad attached to a slot's bone.
 #[derive(Debug, Clone)]
 pub struct RegionAttachment {
-    /// Attachment name (the key within a skin).
+    /// Attachment name, which can differ from its key in the skin.
     pub name: String,
     /// Atlas region name this draws (`AtlasRegion::name`).
     pub path: String,
@@ -322,7 +322,7 @@ pub struct AttachmentKey {
 /// A textured mesh attachment.
 #[derive(Debug, Clone)]
 pub struct MeshAttachment {
-    /// Attachment name.
+    /// Attachment name, which can differ from its key in the skin.
     pub name: String,
     /// Atlas region name this draws.
     pub path: String,
@@ -574,7 +574,7 @@ fn compute_vertices_into(
 /// geometry.
 #[derive(Debug, Clone)]
 pub struct PathAttachment {
-    /// Attachment name (the key within a skin).
+    /// Attachment name, which can differ from its key in the skin.
     pub name: String,
     /// Whether the start and end knots connect.
     pub closed: bool,
@@ -626,7 +626,7 @@ impl PathAttachment {
 /// collision/hit queries. It is not rendered. The host transforms it to world space.
 #[derive(Debug, Clone)]
 pub struct BoundingBoxAttachment {
-    /// Attachment name (the key within a skin).
+    /// Attachment name, which can differ from its key in the skin.
     pub name: String,
     /// Polygon vertices (bind pose).
     vertices: MeshVertices,
@@ -662,7 +662,7 @@ impl BoundingBoxAttachment {
 /// effects, aiming, and similar). Not rendered.
 #[derive(Debug, Clone)]
 pub struct PointAttachment {
-    /// Attachment name (the key within a skin).
+    /// Attachment name, which can differ from its key in the skin.
     pub name: String,
     /// Local x offset from the bone.
     pub x: f32,
@@ -709,7 +709,7 @@ impl PointAttachment {
 /// parsed.
 #[derive(Debug, Clone)]
 pub struct LinkedMeshAttachment {
-    /// Attachment name.
+    /// Attachment name, which can differ from its key in the skin.
     pub name: String,
     /// Atlas region name this draws.
     pub path: String,
@@ -786,7 +786,7 @@ impl LinkedMeshAttachment {
 /// hull instead.
 #[derive(Debug, Clone)]
 pub struct ClippingAttachment {
-    /// Attachment name.
+    /// Attachment name, which can differ from its key in the skin.
     pub name: String,
     /// Name of the slot at which clipping ends (resolved at render time).
     pub end_slot: String,
