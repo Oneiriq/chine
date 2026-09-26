@@ -541,7 +541,7 @@ fn parses_a_physics_constraint() {
 
 #[test]
 fn parses_a_transform_constraint() {
-    // 1 bone, source 0, no property mappings, no offsets, default mixes.
+    // 1 bone, source 0, no property mappings, no offsets, no mixes (0).
     let b = vec![1_u8, 0, 0, 0, 0, 0];
     let mut r = BinaryReader::new(&b);
     let tc = parse_transform(&mut r, "tf".into(), 2);
@@ -549,7 +549,7 @@ fn parses_a_transform_constraint() {
     assert_eq!(tc.bones, vec![0]);
     assert_eq!(tc.source, 0);
     assert!(tc.properties.is_empty());
-    assert!((tc.mix_rotate - 1.0).abs() < 1e-6);
+    assert_eq!(tc.mix_rotate, 0.0);
     assert!(tc.offsets[0].abs() < 1e-6);
 }
 

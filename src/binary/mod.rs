@@ -431,6 +431,7 @@ fn parse_ik(r: &mut BinaryReader, name: String, order: usize) -> IkConstraintDat
     } else {
         ScaleYMode::None
     };
+    // Bit 32 marks a non-zero mix and bit 64 one that is not 1.
     let mix = if flags & 32 != 0 {
         if flags & 64 != 0 {
             r.float()
@@ -438,7 +439,7 @@ fn parse_ik(r: &mut BinaryReader, name: String, order: usize) -> IkConstraintDat
             1.0
         }
     } else {
-        1.0
+        0.0
     };
     let softness = if flags & 128 != 0 { r.float() } else { 0.0 };
     IkConstraintData {
@@ -482,9 +483,14 @@ fn parse_slider(
             data.time = value;
         }
     }
-    if flags & 16 != 0 {
-        data.mix = if flags & 32 != 0 { r.float() } else { 1.0 };
-    }
+    // Bit 16 marks a non-zero mix and bit 32 one that is not 1.
+    data.mix = if flags & 16 == 0 {
+        0.0
+    } else if flags & 32 != 0 {
+        r.float()
+    } else {
+        1.0
+    };
     if flags & 64 != 0 {
         data.local = flags & 128 != 0;
         data.bone = Some(r.var_usize());
@@ -640,7 +646,7 @@ fn to_prop_byte(b: u8) -> Option<ToProp> {
 
 /// Parse one transform constraint (Spine 4.3 property-mapping layout). The flags
 /// byte's high bits hold the source-property count. Offsets default to 0 and
-/// mixes to 1 when their flag is clear. chine loads at scale 1.
+/// mixes to 0 when their flag is clear. chine loads at scale 1.
 fn parse_transform(r: &mut BinaryReader, name: String, order: usize) -> TransformConstraintData {
     let bone_count = r.count();
     let bones = (0..bone_count).map(|_| r.var_usize()).collect();
@@ -699,12 +705,12 @@ fn parse_transform(r: &mut BinaryReader, name: String, order: usize) -> Transfor
         additive,
         clamp,
         properties,
-        mix_rotate: if mix_flags & 1 != 0 { r.float() } else { 1.0 },
-        mix_x: if mix_flags & 2 != 0 { r.float() } else { 1.0 },
-        mix_y: if mix_flags & 4 != 0 { r.float() } else { 1.0 },
-        mix_scale_x: if mix_flags & 8 != 0 { r.float() } else { 1.0 },
-        mix_scale_y: if mix_flags & 16 != 0 { r.float() } else { 1.0 },
-        mix_shear_y: if mix_flags & 32 != 0 { r.float() } else { 1.0 },
+        mix_rotate: if mix_flags & 1 != 0 { r.float() } else { 0.0 },
+        mix_x: if mix_flags & 2 != 0 { r.float() } else { 0.0 },
+        mix_y: if mix_flags & 4 != 0 { r.float() } else { 0.0 },
+        mix_scale_x: if mix_flags & 8 != 0 { r.float() } else { 0.0 },
+        mix_scale_y: if mix_flags & 16 != 0 { r.float() } else { 0.0 },
+        mix_shear_y: if mix_flags & 32 != 0 { r.float() } else { 0.0 },
     }
 }
 
@@ -758,6 +764,8 @@ use skins::read_skin;
 mod timelines;
 use timelines::{constraint_list, read_animation};
 
+#[cfg(test)]
+mod layout;
 #[cfg(test)]
 mod robustness;
 #[cfg(test)]
