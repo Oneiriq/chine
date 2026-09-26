@@ -322,12 +322,12 @@ impl Rig {
         o.f32(1.0);
         o.floats(&[0.25, 0.0, 0.75, 1.0, 0.25, 0.0, 0.75, 0.0]);
 
-        // Transform timeline (constraint 2).
+        // Transform timeline (constraint 2), keying a rotate mix of 0.5.
         o.var(1);
         o.var(2);
         o.var(1);
         o.var(0);
-        o.floats(&[0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
+        o.floats(&[0.0, 0.5, 1.0, 1.0, 1.0, 1.0, 1.0]);
 
         // Path position timeline (constraint 1).
         o.var(1);
@@ -338,7 +338,8 @@ impl Rig {
         o.var(0);
         o.floats(&[0.0, 0.5]);
 
-        // Physics timelines: a global reset, then inertia on constraint 3.
+        // Physics timelines: a global reset, then an inertia of 0.25 on
+        // constraint 3.
         o.var(2);
         o.var(0);
         o.var(1);
@@ -350,7 +351,7 @@ impl Rig {
         o.byte(0);
         o.var(1);
         o.var(0);
-        o.floats(&[0.0, 0.5]);
+        o.floats(&[0.0, 0.25]);
 
         // Slider time timeline (constraint 4).
         o.var(1);
@@ -452,6 +453,37 @@ fn valid_rig_loads_and_plays() {
     assert_eq!(sk.draw_order(), &[1, 0]);
     assert_eq!(sk.events().len(), 1);
     assert_eq!(sk.events()[0].name, "ev");
+}
+
+// Spine 4.3 constraint timelines index the one list that holds every
+// constraint type. The rig's path (1), transform (2), physics (3), and slider
+// (4) timelines were looked up by that index in their own type's list, where
+// each constraint is at index 0, so they drove nothing.
+#[test]
+fn constraint_timelines_index_the_single_constraint_list() {
+    let data = Rig::default().load().expect("the valid rig loads");
+    let anim = Arc::clone(&data.animations[0]);
+    let mut sk = crate::skel::Skeleton::new(Arc::new(data));
+    anim.apply(&mut sk, -1.0, 0.5, 1.0, crate::anim::MixFrom::Setup, false);
+    let (path, _) = sk.path_pose_and_setup(0).unwrap();
+    assert_eq!(path.position, 0.5);
+    let (transform, _) = sk.transform_pose_and_setup(0).unwrap();
+    assert_eq!(transform.mix_rotate, 0.5);
+    let (physics, _) = sk.physics_pose_and_setup(0).unwrap();
+    assert_eq!(physics.inertia, 0.25);
+    let (slider, _) = sk.slider_pose_and_setup(0).unwrap();
+    assert_eq!(slider.time, 0.5);
+}
+
+// A constraint timeline whose index names a constraint of another type
+// cannot be applied. Spine's reader rejects it too.
+#[test]
+fn constraint_timeline_of_the_wrong_type_is_rejected() {
+    // Index 1 is the path constraint.
+    assert_corrupt(&Rig {
+        ik_timeline_index: 1,
+        ..Rig::default()
+    });
 }
 
 // Bone 2's parent 0xFFFF_FFFF was stored raw and indexed out of bounds when

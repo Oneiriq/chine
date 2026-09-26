@@ -364,11 +364,12 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
         });
     }
 
-    // Animations.
+    // Animations. Their constraint timelines index the single constraint list.
+    let constraints = constraint_list(&data);
     let animation_count = r.count();
     for _ in 0..animation_count {
         let aname = r.string().unwrap_or_default();
-        let anim = read_animation(&mut r, aname, &data, &strings, nonessential);
+        let anim = read_animation(&mut r, aname, &data, &constraints, &strings, nonessential);
         data.animations.push(Arc::new(anim));
         status(&r)?;
     }
@@ -755,7 +756,7 @@ mod skins;
 use skins::read_skin;
 
 mod timelines;
-use timelines::read_animation;
+use timelines::{constraint_list, read_animation};
 
 #[cfg(test)]
 mod robustness;

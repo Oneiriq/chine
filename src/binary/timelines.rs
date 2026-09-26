@@ -78,21 +78,79 @@ fn next_bezier(r: &mut BinaryReader, bezier: &mut usize, capacity: usize) -> Opt
     }
 }
 
+/// A constraint type in Spine's single constraint list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ConstraintKind {
+    Ik,
+    Path,
+    Transform,
+    Physics,
+    Slider,
+}
+
+/// Spine's single constraint list: for each position, the constraint's type
+/// and its index in chine's list for that type. A constraint's `order` is its
+/// position in the single list.
+pub(super) fn constraint_list(data: &SkeletonData) -> Vec<Option<(ConstraintKind, usize)>> {
+    let mut list = vec![None; constraint_count(data)];
+    let mut put = |order: usize, kind: ConstraintKind, index: usize| {
+        if let Some(entry) = list.get_mut(order) {
+            *entry = Some((kind, index));
+        }
+    };
+    for (i, c) in data.ik_constraints.iter().enumerate() {
+        put(c.order, ConstraintKind::Ik, i);
+    }
+    for (i, c) in data.path_constraints.iter().enumerate() {
+        put(c.order, ConstraintKind::Path, i);
+    }
+    for (i, c) in data.transform_constraints.iter().enumerate() {
+        put(c.order, ConstraintKind::Transform, i);
+    }
+    for (i, c) in data.physics_constraints.iter().enumerate() {
+        put(c.order, ConstraintKind::Physics, i);
+    }
+    for (i, c) in data.sliders.iter().enumerate() {
+        put(c.order, ConstraintKind::Slider, i);
+    }
+    list
+}
+
+/// Resolve a constraint timeline's `index` into Spine's single constraint list
+/// to the constraint's index in chine's list for `kind`. An index past the
+/// list, or one that names a constraint of another type, is corrupt.
+fn constraint_index(
+    r: &mut BinaryReader,
+    constraints: &[Option<(ConstraintKind, usize)>],
+    index: usize,
+    kind: ConstraintKind,
+) -> usize {
+    match constraints.get(index) {
+        Some(&Some((found, i))) if found == kind => i,
+        _ => {
+            corrupt(r);
+            index
+        }
+    }
+}
+
 /// Parse one animation, group by group. A timeline's target index is checked
-/// against the table it points into. An unknown timeline type records an
+/// against the table it points into. Constraint timelines index Spine's
+/// single constraint list (see [`constraint_list`]) and are stored with the
+/// index in chine's list for their type. An unknown timeline type records an
 /// error and stops the parse early with the timelines read so far, and the
 /// load then fails.
 pub(super) fn read_animation(
     r: &mut BinaryReader,
     name: String,
     data: &SkeletonData,
+    constraints: &[Option<(ConstraintKind, usize)>],
     strings: &[String],
     nonessential: bool,
 ) -> Animation {
     let _timeline_count = r.var_usize();
     let mut timelines = Vec::new();
     let mut duration = 0.0_f32;
-    let constraints = constraint_count(data);
 
     // Slot timelines: per animated slot, one or more typed timelines (color,
     // two-color, attachment, alpha).
@@ -178,15 +236,13 @@ pub(super) fn read_animation(
 
     // Remaining timeline groups: IK, transform, path, physics, slider,
     // attachment / deform, draw order, and events. Constraint timelines index
-    // Spine's single constraint list, so each index is checked against the
-    // constraint count.
+    // Spine's single constraint list, and each index must name a constraint
+    // of the timeline's type.
     // IK constraint timelines (one per animated IK constraint).
     let ik_groups = r.count();
     for _ in 0..ik_groups {
-        let index = r.var_usize();
-        if index >= constraints {
-            corrupt(r);
-        }
+        let raw = r.var_usize();
+        let index = constraint_index(r, constraints, raw, ConstraintKind::Ik);
         let frames = frame_count(r);
         let (tl, d) = read_ik_constraint_timeline(r, index, frames);
         duration = duration.max(d);
@@ -196,10 +252,8 @@ pub(super) fn read_animation(
     // Transform constraint timelines (six mix channels).
     let transform_groups = r.count();
     for _ in 0..transform_groups {
-        let index = r.var_usize();
-        if index >= constraints {
-            corrupt(r);
-        }
+        let raw = r.var_usize();
+        let index = constraint_index(r, constraints, raw, ConstraintKind::Transform);
         let frames = frame_count(r);
         let (tl, d) = read_curve_timeline_n(r, index, frames, TRANSFORM_MIX.len());
         duration = duration.max(d);
@@ -209,10 +263,8 @@ pub(super) fn read_animation(
     // Path constraint timelines: position, spacing, or mix per inner entry.
     let path_groups = r.count();
     for _ in 0..path_groups {
-        let index = r.var_usize();
-        if index >= constraints {
-            corrupt(r);
-        }
+        let raw = r.var_usize();
+        let index = constraint_index(r, constraints, raw, ConstraintKind::Path);
         let count = r.count();
         for _ in 0..count {
             let kind = r.byte();
@@ -252,12 +304,7 @@ pub(super) fn read_animation(
         let raw = r.var_usize();
         let index = match raw.checked_sub(1) {
             None => GLOBAL_PHYSICS,
-            Some(index) => {
-                if index >= constraints {
-                    corrupt(r);
-                }
-                index
-            }
+            Some(index) => constraint_index(r, constraints, index, ConstraintKind::Physics),
         };
         let count = r.count();
         for _ in 0..count {
@@ -295,10 +342,8 @@ pub(super) fn read_animation(
     // one-value curve setting the slider's pose.
     let slider_groups = r.count();
     for _ in 0..slider_groups {
-        let index = r.var_usize();
-        if index >= constraints {
-            corrupt(r);
-        }
+        let raw = r.var_usize();
+        let index = constraint_index(r, constraints, raw, ConstraintKind::Slider);
         let count = r.count();
         for _ in 0..count {
             let kind = r.byte();
