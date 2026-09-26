@@ -13,6 +13,7 @@
 //! 1. Load a JSON or binary `.skel` export plus an atlas into a
 //!    `SkeletonData`: the immutable, shareable rig.
 //! 2. Instantiate a `Skeleton` from it: a posable instance.
+//!    `Skeleton::set_skin` shows a named skin.
 //! 3. Each frame, `AnimationState::update` and `apply` drive the skeleton's
 //!    local pose, `Skeleton::update_world_transform` computes the world pose
 //!    (forward kinematics plus IK, transform, path, physics, and slider

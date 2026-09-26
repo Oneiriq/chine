@@ -86,6 +86,10 @@ impl Animation {
     /// (seconds), mixing with weight `alpha` from `from`. `add` selects additive
     /// blending. `last_time` is used only by the physics reset and event
     /// timelines. Timeline indices out of range for `skeleton` are skipped.
+    ///
+    /// Fired events are added to [`Skeleton::events`]. A host that calls this
+    /// directly calls [`Skeleton::clear_events`] first, as
+    /// [`AnimationState::apply`] does, to keep only this call's events.
     pub fn apply(
         &self,
         skeleton: &mut Skeleton,

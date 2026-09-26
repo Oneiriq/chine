@@ -55,6 +55,9 @@ let atlas = Atlas::parse(&atlas_text);
 let mut data = chine::load::from_json(&skeleton_json)?;
 bind_atlas(&mut data, &atlas); // resolve attachment UVs + atlas pages
 let mut skeleton = Skeleton::new(Arc::new(data));
+// For a rig with named skins. A skin's skin-required bones and constraints,
+// and the deform and sequence keys that name it, apply only while it is set.
+skeleton.set_skin("goblin");
 
 let walk = skeleton.data().find_animation("walk").unwrap().clone();
 let mut state = AnimationState::new();

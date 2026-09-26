@@ -357,7 +357,9 @@ impl Skeleton {
     /// Set the active skin by name: it overrides the default skin for attachment
     /// lookups (so linked meshes and other variants in that skin are shown),
     /// and activates the skin-required bones and constraints it lists. An
-    /// unknown name (or `"default"`) clears the active skin.
+    /// unknown name (or `"default"`) clears the active skin. Deform and
+    /// sequence keys drive only the attachments of the skin they name. The
+    /// skin can change between frames: this rebuilds the update cache.
     pub fn set_skin(&mut self, name: &str) {
         self.skin = self.data.skins.iter().position(|s| s.name == name);
         self.rebuild_cache();
