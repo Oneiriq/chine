@@ -333,24 +333,38 @@ pub fn render_with<'a>(skeleton: &Skeleton, scratch: &'a mut RenderScratch) -> &
     for &slot_index in skeleton.draw_order() {
         if let Some((setup, slot, att)) = resolve_attachment(skeleton, slot_index) {
             if let Attachment::Clipping(c) = att {
-                // Start masking: decompose the clip polygon into convex
-                // pieces, or take its convex hull for a convex or inverse
-                // clip. A degenerate polygon leaves any active clip running.
-                clip_world.clear();
-                c.compute_deformed_vertices_into(skeleton, setup.bone, &slot.deform, clip_world);
-                let hull = c.convex || c.inverse;
-                if replace_clip_within(clip_world, hull, ear, poly_points, poly_ranges, &mut budget)
-                {
-                    // The end slot lookup scans the slot list, so it is paid
-                    // from the budget too. Unpaid, it counts as not found.
-                    let slots = &skeleton.data().slots;
-                    let end = if spend(&mut budget, slots.len()) {
-                        skeleton.data().find_slot(&c.end_slot)
-                    } else {
-                        None
-                    };
-                    clip_end = Some(end.unwrap_or(usize::MAX));
-                    inverse = c.inverse;
+                // Spine ignores a clip that starts while another is active.
+                if clip_end.is_none() {
+                    // Start masking: decompose the clip polygon into convex
+                    // pieces, or take its convex hull for a convex or inverse
+                    // clip. A degenerate polygon starts no clip.
+                    clip_world.clear();
+                    c.compute_deformed_vertices_into(
+                        skeleton,
+                        setup.bone,
+                        &slot.deform,
+                        clip_world,
+                    );
+                    let hull = c.convex || c.inverse;
+                    if replace_clip_within(
+                        clip_world,
+                        hull,
+                        ear,
+                        poly_points,
+                        poly_ranges,
+                        &mut budget,
+                    ) {
+                        // The end slot lookup scans the slot list, so it is paid
+                        // from the budget too. Unpaid, it counts as not found.
+                        let slots = &skeleton.data().slots;
+                        let end = if spend(&mut budget, slots.len()) {
+                            skeleton.data().find_slot(&c.end_slot)
+                        } else {
+                            None
+                        };
+                        clip_end = Some(end.unwrap_or(usize::MAX));
+                        inverse = c.inverse;
+                    }
                 }
             } else {
                 // Build a drawable slot into the next output command, or into

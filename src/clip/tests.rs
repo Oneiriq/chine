@@ -561,3 +561,34 @@ fn clipping_follows_its_deform() {
     sk.slot_pose_and_setup(0).unwrap().0.deform = far;
     assert!(crate::render::render(&sk).is_empty());
 }
+
+// Spine ignores a clipping attachment that starts while another clip is
+// active. The renderer replaced the active clip with it.
+#[test]
+fn a_clip_inside_an_active_clip_is_ignored() {
+    let sk = clipped_skeleton();
+    let mut data = sk.data().clone();
+    // A second clip, far from the mesh, on a new slot drawn between the
+    // first clip and the mesh.
+    let far = ClippingAttachment::new(
+        "far",
+        "m",
+        MeshVertices::Unweighted(vec![100.0, 100.0, 110.0, 100.0, 100.0, 110.0]),
+        3,
+    );
+    data.default_skin.set(2, "far", Attachment::Clipping(far));
+    data.slots.push(SlotData {
+        index: 2,
+        name: "farslot".into(),
+        bone: 0,
+        color: Color::WHITE,
+        dark_color: None,
+        attachment: Some("far".into()),
+        blend: BlendMode::Normal,
+    });
+    let mut sk = Skeleton::new(Arc::new(data));
+    sk.draw_order_mut().copy_from_slice(&[0, 2, 1]);
+    sk.update_world_transform();
+    let drawn = drawn_area(&crate::render::render(&sk));
+    assert!((drawn - 45.0).abs() < 1e-2, "{drawn}");
+}
