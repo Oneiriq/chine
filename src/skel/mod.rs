@@ -342,6 +342,11 @@ impl Skeleton {
         self.skin.and_then(|i| self.data.skins.get(i))
     }
 
+    /// The index (into `data().skins`) of the active named skin, if one is set.
+    pub(crate) fn active_skin_index(&self) -> Option<usize> {
+        self.skin
+    }
+
     /// All bones, in hierarchy order.
     #[must_use]
     pub fn bones(&self) -> &[Bone] {
