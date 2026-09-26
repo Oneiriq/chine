@@ -323,6 +323,26 @@ impl MeshVertices {
             MeshVertices::Weighted { .. } => None,
         }
     }
+
+    /// The bones weighted vertices are bound to, once per influence (none
+    /// when unweighted). A count past the layout ends the walk.
+    pub(crate) fn weighted_bones(&self) -> Vec<usize> {
+        let MeshVertices::Weighted { bones, .. } = self else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let mut i = 0;
+        while let Some(&count) = bones.get(i) {
+            let from = i + 1;
+            let Some(influences) = from.checked_add(count).and_then(|to| bones.get(from..to))
+            else {
+                break;
+            };
+            out.extend_from_slice(influences);
+            i = from + count;
+        }
+        out
+    }
 }
 
 impl Attachment {

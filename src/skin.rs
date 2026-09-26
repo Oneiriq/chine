@@ -68,6 +68,14 @@ impl Skin {
         self.attachments.get(&slot)?.get(name)
     }
 
+    /// Every attachment this skin defines for `slot`.
+    pub(crate) fn slot_attachments(&self, slot: usize) -> impl Iterator<Item = &Attachment> {
+        self.attachments
+            .get(&slot)
+            .into_iter()
+            .flat_map(|m| m.values())
+    }
+
     /// Mutable access to the attachment for `(slot, name)`, for loaders that
     /// finish an attachment once every skin is read.
     pub(crate) fn attachment_mut(&mut self, slot: usize, name: &str) -> Option<&mut Attachment> {

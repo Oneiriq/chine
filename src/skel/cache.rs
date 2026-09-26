@@ -12,6 +12,7 @@
 
 use std::collections::HashSet;
 
+use crate::attach::{Attachment, MeshVertices};
 use crate::constraint::ik::IkConstraintData;
 use crate::constraint::path::PathConstraintData;
 use crate::constraint::physics::PhysicsConstraintData;
@@ -149,7 +150,17 @@ pub(super) fn build_update_cache(
                             && is_active(slot_bone)
                             && applies(pc.skin_required, SkinConstraint::Path(i))
                         {
-                            walk.sort_path(pc, i, slot_bone);
+                            // The bones that weighted paths in the slot, in the
+                            // active skin and the default skin, are bound to.
+                            let path_bones: Vec<usize> = skin
+                                .into_iter()
+                                .chain(std::iter::once(&data.default_skin))
+                                .flat_map(|skin| skin.slot_attachments(pc.slot))
+                                .filter(|a| matches!(a, Attachment::Path(_)))
+                                .filter_map(Attachment::deform_vertices)
+                                .flat_map(MeshVertices::weighted_bones)
+                                .collect();
+                            walk.sort_path(pc, i, slot_bone, &path_bones);
                         }
                     }
                 }
@@ -285,11 +296,21 @@ impl Walk<'_> {
         }
     }
 
-    /// Sort a path constraint into the cache. The slot bone and constrained
-    /// bones are computed before it. The constrained bones keep their world
-    /// (the constraint's output) and their descendants are recomputed.
-    fn sort_path(&mut self, pc: &PathConstraintData, idx: usize, slot_bone: usize) {
+    /// Sort a path constraint into the cache. The slot bone, the `path_bones`
+    /// its weighted paths are bound to, and the constrained bones are
+    /// computed before it. The constrained bones keep their world (the
+    /// constraint's output) and their descendants are recomputed.
+    fn sort_path(
+        &mut self,
+        pc: &PathConstraintData,
+        idx: usize,
+        slot_bone: usize,
+        path_bones: &[usize],
+    ) {
         self.sort_bone(slot_bone);
+        for &b in path_bones {
+            self.sort_bone(b);
+        }
         for &b in &pc.bones {
             self.sort_bone(b);
         }

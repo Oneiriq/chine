@@ -446,3 +446,38 @@ fn constraint_follows_a_deformed_path() {
     assert!((f.world_x() - 15.0).abs() < 1e-3, "x={}", f.world_x());
     assert!((f.world_y() - 25.0).abs() < 1e-3, "y={}", f.world_y());
 }
+
+// Spine computes the bones a weighted path is bound to before the path
+// constraint. The update cache computed them after it, so the constraint read
+// their world transforms before this frame's pose.
+#[test]
+fn bones_of_a_weighted_path_are_computed_first() {
+    // Control points of a horizontal line from (0, 0) to (30, 0), each bound
+    // to bone 2 at full weight. Bone 2 sits 50 up, after the follower.
+    let mut layout = Vec::new();
+    let mut binds = Vec::new();
+    for x in [-10.0, 0.0, 10.0, 20.0, 30.0, 40.0] {
+        layout.extend([1, 2]);
+        binds.extend([x, 0.0, 1.0]);
+    }
+    let weighted = MeshVertices::Weighted {
+        bones: layout,
+        vertices: binds,
+    };
+    let mut data = rig(weighted, 6, false, 0);
+    data.bones.push(BoneData {
+        index: 2,
+        name: "path-bone".into(),
+        parent: Some(0),
+        position: glam::Vec2::new(0.0, 50.0),
+        ..Default::default()
+    });
+    let mut pc = follow(vec![1], RotateMode::Chain);
+    pc.mix_rotate = 0.0;
+    data.path_constraints.push(pc);
+    let mut sk = Skeleton::new(Arc::new(data));
+    sk.update_world_transform();
+    let f = sk.bone(1).unwrap();
+    assert!((f.world_x() - 15.0).abs() < 1e-3, "x={}", f.world_x());
+    assert!((f.world_y() - 50.0).abs() < 1e-3, "y={}", f.world_y());
+}
