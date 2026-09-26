@@ -377,3 +377,24 @@ fn skin_required_bones_and_constraints_load() {
     );
     assert!(matches!(from_json(&json), Err(LoadError::BadReference(_))));
 }
+
+// A sequence key without a "delay" keeps the previous key's delay, and the
+// editor leaves it out when it does not change. The loader read it as 0, so
+// the flipbook jumped by a saturated frame count.
+#[test]
+fn sequence_keys_without_a_delay_keep_the_previous_one() {
+    let json = r#"{
+        "bones": [ { "name": "root" } ],
+        "slots": [ { "name": "s", "bone": "root", "attachment": "flip" } ],
+        "skins": [ { "name": "default", "attachments": { "s": {
+            "flip": { "width": 10, "height": 10, "sequence": { "count": 10 } }
+        } } } ],
+        "animations": { "a": { "attachments": { "default": { "s": { "flip": {
+            "sequence": [
+                { "mode": "loop", "delay": 0.1 },
+                { "time": 1, "mode": "loop" }
+            ]
+        } } } } } }
+    }"#;
+    assert_eq!(posed(json, "a", 1.25).slot(0).unwrap().sequence_index, 2);
+}

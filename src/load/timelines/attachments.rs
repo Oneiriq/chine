@@ -165,7 +165,9 @@ pub(super) fn read_sequence(
         let mode = sequence_mode(k.get("mode").and_then(Value::as_str));
         times.push(f(k, "time"));
         mode_and_index.push((index << 4) | mode);
-        delays.push(f(k, "delay"));
+        // A key without a delay keeps the previous key's.
+        let delay = f_or(k, "delay", delays.last().copied().unwrap_or(0.0));
+        delays.push(delay);
     }
     let duration = times.last().copied().unwrap_or(0.0);
     let tl = SequenceTimeline::new(target, times, mode_and_index, delays);

@@ -180,3 +180,38 @@ fn skin_requirements_match_json() {
     // mix-and-match-pro's skins list skin-required bones and constraints.
     assert!(listed > 0);
 }
+
+// Every animation shows the same sequence frames from both exports.
+#[cfg_attr(
+    not(spine_examples),
+    ignore = "requires the official Spine examples in data/examples/"
+)]
+#[test]
+fn sequence_frames_match_json() {
+    use crate::anim::MixFrom;
+
+    for name in EXAMPLES {
+        let (json, skel) = load(name);
+        let (json, skel) = (Arc::new(json), Arc::new(skel));
+        for anim in &json.animations {
+            let other = skel.find_animation(anim.name()).expect("the animation");
+            for step in 0..=20 {
+                let time = anim.duration() * step as f32 / 20.0;
+                let frames = |data: &Arc<SkeletonData>, anim: &crate::anim::Animation| {
+                    let mut sk = Skeleton::new(Arc::clone(data));
+                    anim.apply(&mut sk, -1.0, time, 1.0, MixFrom::Setup, false);
+                    sk.slots()
+                        .iter()
+                        .map(|s| s.sequence_index)
+                        .collect::<Vec<_>>()
+                };
+                assert_eq!(
+                    frames(&json, anim),
+                    frames(&skel, other),
+                    "{name} {} at {time}",
+                    anim.name()
+                );
+            }
+        }
+    }
+}
