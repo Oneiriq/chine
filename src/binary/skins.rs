@@ -302,7 +302,10 @@ fn read_attachment(
                     String::new()
                 }
             };
-            Attachment::Clipping(ClippingAttachment::new(name, end_slot, vertices, count))
+            let mut clip = ClippingAttachment::new(name, end_slot, vertices, count);
+            clip.convex = flags & 32 != 0;
+            clip.inverse = flags & 64 != 0;
+            Attachment::Clipping(clip)
         }
         // Type 7 is not an attachment type, and its fields cannot be skipped.
         _ => {

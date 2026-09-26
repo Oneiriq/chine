@@ -428,3 +428,49 @@ fn malformed_draw_order_folders_are_corrupt() {
         assert_eq!(loaded.err(), Some(BinaryError::CorruptLength), "case {i}");
     }
 }
+
+/// A rig whose default skin holds a triangle clipping attachment "clip",
+/// with `flags` added to its attachment flags.
+fn clipping_rig(flags: u8) -> Vec<u8> {
+    let mut o = Out::default();
+    o.0.extend_from_slice(&[0; 8]);
+    o.str("4.3.00");
+    o.floats(&[0.0, 0.0, 100.0, 100.0, 1.0]);
+    o.byte(0); // essential
+    o.var(1);
+    o.str("clip");
+    o.var(1);
+    o.bone("root", None);
+    o.var(1);
+    o.str("s");
+    o.var(0); // bone
+    o.0.extend_from_slice(&[0xFF; 8]); // white, no dark color
+    o.var(0); // no attachment
+    o.var(0); // blend
+    o.var(0); // constraints
+    o.var(1); // default skin slots
+    o.var(0); // slot
+    o.var(1); // attachments
+    o.var(1); // "clip"
+    o.byte(6 | flags); // clipping
+    o.var(0); // end slot
+    o.var(3); // vertex count
+    o.floats(&[0.0, 0.0, 10.0, 0.0, 0.0, 10.0]);
+    o.var(0); // named skins
+    o.var(0); // events
+    o.var(0); // animations
+    o.0
+}
+
+// A clipping attachment's flags mark it convex (32) and inverse (64). The
+// loader read past both.
+#[test]
+fn clipping_convex_and_inverse_flags_load() {
+    for (flags, convex, inverse) in [(0, false, false), (32, true, false), (64, false, true)] {
+        let data = from_binary(&clipping_rig(flags)).expect("the rig loads");
+        let Some(Attachment::Clipping(clip)) = data.default_skin.attachment(0, "clip") else {
+            panic!("no clipping attachment");
+        };
+        assert_eq!((clip.convex, clip.inverse), (convex, inverse), "{flags}");
+    }
+}

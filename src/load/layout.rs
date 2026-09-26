@@ -324,3 +324,24 @@ fn malformed_draw_order_folders_are_rejected() {
         assert!(matches!(error, LoadError::Schema(_)), "{folder}: {error}");
     }
 }
+
+// A clipping attachment's "convex" and "inverse" flags were not read.
+#[test]
+fn clipping_convex_and_inverse_flags_load() {
+    let json = r#"{
+        "bones": [ { "name": "root" } ],
+        "slots": [ { "name": "s", "bone": "root" } ],
+        "skins": [ { "name": "default", "attachments": { "s": {
+            "plain": { "type": "clipping", "vertexCount": 3, "vertices": [0,0, 10,0, 0,10] },
+            "flagged": { "type": "clipping", "vertexCount": 3, "vertices": [0,0, 10,0, 0,10],
+                "convex": true, "inverse": true }
+        } } } ]
+    }"#;
+    let data = from_json(json).unwrap();
+    let flags = |key: &str| match data.default_skin.attachment(0, key) {
+        Some(Attachment::Clipping(clip)) => (clip.convex, clip.inverse),
+        other => panic!("{key} is not a clipping attachment: {other:?}"),
+    };
+    assert_eq!(flags("plain"), (false, false));
+    assert_eq!(flags("flagged"), (true, true));
+}

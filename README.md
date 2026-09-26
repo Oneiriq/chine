@@ -107,7 +107,7 @@ animating, and emitting draw data:
   - deform, events, and sequences
   - a multi-track `AnimationState` with crossfade mixing and an animation queue
 - **Rendering**: a renderer-agnostic `RenderCommand` stream, including two-color
-  (tint-black) tinting and polygon clipping.
+  (tint-black) tinting and polygon clipping, with convex and inverse clips.
 
 The loaders are validated against real exports (for example spineboy: 67 bones,
 52 slots, 11 animations, 7 IK + 7 transform constraints) and a binary rig that

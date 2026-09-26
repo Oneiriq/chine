@@ -17,7 +17,7 @@ use glam::Vec2;
 
 use crate::atlas::{Atlas, AtlasPage, AtlasRegion};
 use crate::attach::{Attachment, MeshAttachment, RegionAttachment, Sequence};
-use crate::clip::{clip_into, replace_clip_within, spend, CLIP_WORK_BUDGET};
+use crate::clip::{clip_into, clip_outside_into, replace_clip_within, spend, CLIP_WORK_BUDGET};
 use crate::data::{BlendMode, Color, SkeletonData, SlotData};
 use crate::skel::{Skeleton, Slot};
 use crate::skin::Skin;
@@ -320,6 +320,7 @@ pub fn render_with<'a>(skeleton: &Skeleton, scratch: &'a mut RenderScratch) -> &
         ear,
         subject,
         clipped,
+        outside,
     } = scratch;
     poly_points.clear();
     poly_ranges.clear();
@@ -327,14 +328,19 @@ pub fn render_with<'a>(skeleton: &Skeleton, scratch: &'a mut RenderScratch) -> &
     let mut budget = CLIP_WORK_BUDGET;
     // The active clip's end slot: clipping stops once that slot is drawn.
     let mut clip_end: Option<usize> = None;
+    // Whether the active clip keeps what lies outside its polygon.
+    let mut inverse = false;
     for &slot_index in skeleton.draw_order() {
         if let Some((setup, slot, att)) = resolve_attachment(skeleton, slot_index) {
             if let Attachment::Clipping(c) = att {
                 // Start masking: decompose the clip polygon into convex
-                // pieces. A degenerate polygon leaves any active clip running.
+                // pieces, or take its convex hull for a convex or inverse
+                // clip. A degenerate polygon leaves any active clip running.
                 clip_world.clear();
                 c.compute_world_vertices_into(skeleton, setup.bone, clip_world);
-                if replace_clip_within(clip_world, ear, poly_points, poly_ranges, &mut budget) {
+                let hull = c.convex || c.inverse;
+                if replace_clip_within(clip_world, hull, ear, poly_points, poly_ranges, &mut budget)
+                {
                     // The end slot lookup scans the slot list, so it is paid
                     // from the budget too. Unpaid, it counts as not found.
                     let slots = &skeleton.data().slots;
@@ -344,6 +350,7 @@ pub fn render_with<'a>(skeleton: &Skeleton, scratch: &'a mut RenderScratch) -> &
                         None
                     };
                     clip_end = Some(end.unwrap_or(usize::MAX));
+                    inverse = c.inverse;
                 }
             } else {
                 // Build a drawable slot into the next output command, or into
@@ -356,15 +363,34 @@ pub fn render_with<'a>(skeleton: &Skeleton, scratch: &'a mut RenderScratch) -> &
                 if fill_command(skeleton, setup, slot, att, dst) {
                     if clip_end.is_some() {
                         let dst = command_slot(commands, emitted);
-                        if clip_into(
-                            staging,
-                            poly_points,
-                            poly_ranges,
-                            subject,
-                            clipped,
-                            dst,
-                            &mut budget,
-                        ) {
+                        // An inverse clip has one piece, the polygon's hull.
+                        let drawn = if inverse {
+                            clip_outside_into(
+                                staging,
+                                poly_ranges
+                                    .first()
+                                    .and_then(|&(start, len)| {
+                                        poly_points.get(start..start.checked_add(len)?)
+                                    })
+                                    .unwrap_or_default(),
+                                subject,
+                                clipped,
+                                outside,
+                                dst,
+                                &mut budget,
+                            )
+                        } else {
+                            clip_into(
+                                staging,
+                                poly_points,
+                                poly_ranges,
+                                subject,
+                                clipped,
+                                dst,
+                                &mut budget,
+                            )
+                        };
+                        if drawn {
                             emitted += 1;
                         }
                     } else {

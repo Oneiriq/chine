@@ -781,14 +781,20 @@ impl LinkedMeshAttachment {
 }
 
 /// A clipping attachment: a polygon that masks the slots from its own slot up to
-/// and including `end_slot` (in draw order). Convex polygons clip exactly.
-/// Concave polygons clip against their convex span (a known simplification).
+/// and including `end_slot` (in draw order). A concave polygon is split into
+/// convex pieces, so it clips exactly, unless `convex` clips to its convex
+/// hull instead.
 #[derive(Debug, Clone)]
 pub struct ClippingAttachment {
-    /// Attachment name (the key within a skin).
+    /// Attachment name.
     pub name: String,
     /// Name of the slot at which clipping ends (resolved at render time).
     pub end_slot: String,
+    /// Whether to clip to the polygon's convex hull, even when it is concave.
+    pub convex: bool,
+    /// Whether to keep what lies outside the polygon instead of inside it. An
+    /// inverse clip always uses the convex hull.
+    pub inverse: bool,
     /// Clip polygon vertices (bind pose).
     vertices: MeshVertices,
     /// Number of polygon vertices.
@@ -807,6 +813,8 @@ impl ClippingAttachment {
         Self {
             name: name.into(),
             end_slot: end_slot.into(),
+            convex: false,
+            inverse: false,
             vertices,
             vertex_count,
         }

@@ -118,7 +118,10 @@ pub(super) fn read_attachment(
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
-            Attachment::Clipping(ClippingAttachment::new(name, end, vertices, count))
+            let mut clip = ClippingAttachment::new(name, end, vertices, count);
+            clip.convex = bool_or(v, "convex", false);
+            clip.inverse = bool_or(v, "inverse", false);
+            Attachment::Clipping(clip)
         }
         _ => return Ok(None),
     };
