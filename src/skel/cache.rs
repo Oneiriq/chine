@@ -47,6 +47,70 @@ pub(super) enum Updatable {
     Slider(usize),
 }
 
+/// Which constraints of each kind are active with the current skin, indexed
+/// like the rig's constraint lists. Timelines leave an inactive constraint's
+/// pose alone, as Spine's do.
+#[derive(Debug, Clone, Default)]
+pub(super) struct ConstraintActivity {
+    pub(super) ik: Vec<bool>,
+    pub(super) transform: Vec<bool>,
+    pub(super) path: Vec<bool>,
+    pub(super) physics: Vec<bool>,
+    pub(super) sliders: Vec<bool>,
+}
+
+impl ConstraintActivity {
+    /// Which constraints are active with `skin`, given which bones are.
+    ///
+    /// This is Spine's rule: a constraint is active when the bone it reads
+    /// from is active (the IK target, the transform source, the path slot's
+    /// bone, the physics bone) and, if it is skin-required, the skin lists it.
+    /// A slider reads no source bone, so only the skin decides. A reference
+    /// outside the rig reads as an inactive bone.
+    pub(super) fn new(data: &SkeletonData, skin: Option<&Skin>, bones: &[bool]) -> Self {
+        let is_active = |bone: usize| bones.get(bone).copied().unwrap_or(false);
+        let listed: HashSet<SkinConstraint> = skin
+            .map(|skin| skin.constraints.iter().copied().collect())
+            .unwrap_or_default();
+        let applies =
+            |required: bool, constraint: SkinConstraint| !required || listed.contains(&constraint);
+        Self {
+            ik: (data.ik_constraints.iter().enumerate())
+                .map(|(i, c)| {
+                    is_active(c.target) && applies(c.skin_required, SkinConstraint::Ik(i))
+                })
+                .collect(),
+            transform: (data.transform_constraints.iter().enumerate())
+                .map(|(i, c)| {
+                    is_active(c.source) && applies(c.skin_required, SkinConstraint::Transform(i))
+                })
+                .collect(),
+            path: (data.path_constraints.iter().enumerate())
+                .map(|(i, c)| {
+                    data.slots
+                        .get(c.slot)
+                        .is_some_and(|slot| is_active(slot.bone))
+                        && applies(c.skin_required, SkinConstraint::Path(i))
+                })
+                .collect(),
+            physics: (data.physics_constraints.iter().enumerate())
+                .map(|(i, c)| {
+                    is_active(c.bone) && applies(c.skin_required, SkinConstraint::Physics(i))
+                })
+                .collect(),
+            sliders: (data.sliders.iter().enumerate())
+                .map(|(i, c)| applies(c.skin_required, SkinConstraint::Slider(i)))
+                .collect(),
+        }
+    }
+}
+
+/// Whether entry `i` of an activity list is set. An index past the list reads
+/// as inactive.
+pub(super) fn is_set(flags: &[bool], i: usize) -> bool {
+    flags.get(i).copied().unwrap_or(false)
+}
+
 /// Build the ordered update cache: a topological interleaving of bone
 /// world-transform updates and constraint applications, mirroring Spine's
 /// `Skeleton.updateCache`. Bones a constraint reads are computed before it,
@@ -58,22 +122,17 @@ pub(super) enum Updatable {
 /// only see valid indices. A slider is kept either way: it reads its bone
 /// through a checked lookup and does nothing when the bone is missing.
 ///
-/// Only the bones and constraints that apply with `skin` active are sorted
-/// in (see [`active_bones`]). A constraint applies when the bone or slot it
-/// reads from is active and, if it is skin-required, the skin lists it.
-/// Returns the cache and which bones are active.
+/// Only the bones and constraints that are active with `skin` are sorted in
+/// (see [`active_bones`] and [`ConstraintActivity::new`]). A slider whose bone
+/// is inactive is left out too. Returns the cache, which bones are active,
+/// and which constraints are.
 pub(super) fn build_update_cache(
     data: &SkeletonData,
     skin: Option<&Skin>,
-) -> (Vec<Updatable>, Vec<bool>) {
+) -> (Vec<Updatable>, Vec<bool>, ConstraintActivity) {
     let n = data.bones.len();
     let active = active_bones(data, skin);
-    let is_active = |bone: usize| active.get(bone).copied().unwrap_or(false);
-    let listed: HashSet<SkinConstraint> = skin
-        .map(|skin| skin.constraints.iter().copied().collect())
-        .unwrap_or_default();
-    let applies =
-        |required: bool, constraint: SkinConstraint| !required || listed.contains(&constraint);
+    let constraints = ConstraintActivity::new(data, skin, &active);
     let parents: Vec<Option<usize>> = data
         .bones
         .iter()
@@ -122,21 +181,16 @@ pub(super) fn build_update_cache(
         match kind {
             Updatable::Ik(i) => {
                 if let Some(ik) = data.ik_constraints.get(i) {
-                    if ik.target < n
-                        && all_in_range(&ik.bones, n)
-                        && is_active(ik.target)
-                        && applies(ik.skin_required, SkinConstraint::Ik(i))
-                    {
+                    if is_set(&constraints.ik, i) && ik.target < n && all_in_range(&ik.bones, n) {
                         walk.sort_ik(ik, i);
                     }
                 }
             }
             Updatable::Transform(i) => {
                 if let Some(tc) = data.transform_constraints.get(i) {
-                    if tc.source < n
+                    if is_set(&constraints.transform, i)
+                        && tc.source < n
                         && all_in_range(&tc.bones, n)
-                        && is_active(tc.source)
-                        && applies(tc.skin_required, SkinConstraint::Transform(i))
                     {
                         walk.sort_transform(tc, i);
                     }
@@ -146,10 +200,7 @@ pub(super) fn build_update_cache(
                 if let Some(pc) = data.path_constraints.get(i) {
                     let slot_bone = data.slots.get(pc.slot).map(|s| s.bone);
                     if let Some(slot_bone) = slot_bone.filter(|&b| b < n) {
-                        if all_in_range(&pc.bones, n)
-                            && is_active(slot_bone)
-                            && applies(pc.skin_required, SkinConstraint::Path(i))
-                        {
+                        if is_set(&constraints.path, i) && all_in_range(&pc.bones, n) {
                             // The bones that weighted paths in the slot, in the
                             // active skin and the default skin, are bound to.
                             let path_bones: Vec<usize> = skin
@@ -167,10 +218,7 @@ pub(super) fn build_update_cache(
             }
             Updatable::Physics(i) => {
                 if let Some(pd) = data.physics_constraints.get(i) {
-                    if pd.bone < n
-                        && is_active(pd.bone)
-                        && applies(pd.skin_required, SkinConstraint::Physics(i))
-                    {
+                    if is_set(&constraints.physics, i) && pd.bone < n {
                         walk.sort_physics(pd, i);
                     }
                 }
@@ -182,7 +230,7 @@ pub(super) fn build_update_cache(
                         Some(b) => active.get(b).copied().unwrap_or(true),
                         None => true,
                     };
-                    if bone_active && applies(slider.skin_required, SkinConstraint::Slider(i)) {
+                    if bone_active && is_set(&constraints.sliders, i) {
                         let animated = slider
                             .animation_index
                             .and_then(|a| data.animations.get(a))
@@ -198,7 +246,7 @@ pub(super) fn build_update_cache(
     for i in 0..n {
         walk.sort_bone(i);
     }
-    (cache, active)
+    (cache, active, constraints)
 }
 
 /// Which bones apply with `skin` active: every bone that is not

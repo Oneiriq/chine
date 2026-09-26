@@ -547,8 +547,8 @@ pub(super) fn apply_path_mix(
 }
 
 /// Physics constraint timeline: drives one tunable on one constraint, or on
-/// every constraint whose matching global flag is set when the target is
-/// [`GLOBAL_PHYSICS`].
+/// every active constraint whose matching global flag is set when the target
+/// is [`GLOBAL_PHYSICS`]. An inactive constraint is left alone.
 pub(super) fn apply_physics(
     t: &ConstraintTimeline,
     property: PhysicsProperty,
@@ -559,12 +559,7 @@ pub(super) fn apply_physics(
     add: bool,
 ) {
     if t.constraint == GLOBAL_PHYSICS {
-        let data = skel.data_arc();
-        for (pose, setup) in skel
-            .physics_constraints_mut()
-            .iter_mut()
-            .zip(&data.physics_constraints)
-        {
+        for (pose, setup) in skel.active_physics_poses_and_setup() {
             if property_global(setup, property) {
                 apply_physics_one(pose, setup, property, &t.curve, time, alpha, from, add);
             }
@@ -634,7 +629,8 @@ pub(super) fn apply_physics_one(
 
 /// Physics reset timeline: if a keyframe time falls in the window
 /// `(last_time, time]` (handling a loop wrap where `time < last_time`), reset
-/// the target constraint, or every physics constraint when global.
+/// the target constraint, or every active physics constraint when global. An
+/// inactive constraint is not reset.
 pub(super) fn apply_physics_reset(
     t: &PhysicsResetTimeline,
     skel: &mut Skeleton,

@@ -22,7 +22,7 @@ use crate::skin::Skin;
 
 mod cache;
 
-use cache::{build_update_cache, valid_parent, Updatable};
+use cache::{build_update_cache, is_set, valid_parent, ConstraintActivity, Updatable};
 
 /// Degrees-to-radians factor.
 const DEG_RAD: f32 = core::f32::consts::PI / 180.0;
@@ -257,6 +257,9 @@ pub struct Skeleton {
     skin: Option<usize>,
     events: Vec<Event>,
     update_cache: Vec<Updatable>,
+    // Which constraints are active with the current skin. Timelines leave an
+    // inactive constraint's pose alone.
+    constraint_activity: ConstraintActivity,
     // Accumulated simulation time, advanced by `update`, read by physics.
     time: f32,
     /// World-space x offset applied to the whole skeleton.
@@ -315,6 +318,7 @@ impl Skeleton {
             skin: None,
             events: Vec::new(),
             update_cache: Vec::new(),
+            constraint_activity: ConstraintActivity::default(),
             time: 0.0,
             x: 0.0,
             y: 0.0,
@@ -325,13 +329,14 @@ impl Skeleton {
         skeleton
     }
 
-    /// Rebuild the update cache for the active skin, and mark which bones are
-    /// active: a skin-required bone or constraint applies only while the
-    /// active skin lists it.
+    /// Rebuild the update cache for the active skin, and mark which bones and
+    /// constraints are active: a skin-required bone or constraint applies only
+    /// while the active skin lists it.
     fn rebuild_cache(&mut self) {
         let skin = self.skin.and_then(|i| self.data.skins.get(i));
-        let (cache, active) = build_update_cache(&self.data, skin);
+        let (cache, active, constraints) = build_update_cache(&self.data, skin);
         self.update_cache = cache;
+        self.constraint_activity = constraints;
         for (bone, active) in self.bones.iter_mut().zip(active) {
             bone.active = active;
         }
@@ -446,23 +451,39 @@ impl Skeleton {
         self.physics_constraints.get(index)
     }
 
-    /// Every physics constraint's mutable runtime pose, for global physics
-    /// timelines. Pair with [`Self::data_arc`] to read the matching setup data.
-    pub(crate) fn physics_constraints_mut(&mut self) -> &mut [PhysicsConstraint] {
-        &mut self.physics_constraints
+    /// Every active physics constraint's mutable pose paired with its setup
+    /// data, for global physics timelines. Inactive ones are skipped.
+    pub(crate) fn active_physics_poses_and_setup(
+        &mut self,
+    ) -> impl Iterator<Item = (&mut PhysicsConstraint, &PhysicsConstraintData)> {
+        let active = &self.constraint_activity.physics;
+        self.physics_constraints
+            .iter_mut()
+            .zip(&self.data.physics_constraints)
+            .enumerate()
+            .filter(move |&(i, _)| is_set(active, i))
+            .map(|(_, pair)| pair)
     }
 
-    /// Mark physics constraint `i` to reset on the next world-transform update.
+    /// Mark physics constraint `i` to reset on the next world-transform
+    /// update, unless it is inactive.
     pub(crate) fn request_physics_reset(&mut self, i: usize) {
+        if !is_set(&self.constraint_activity.physics, i) {
+            return;
+        }
         if let Some(c) = self.physics_constraints.get_mut(i) {
             c.set_pending_reset();
         }
     }
 
-    /// Mark every physics constraint to reset on the next world-transform update.
+    /// Mark every active physics constraint to reset on the next
+    /// world-transform update.
     pub(crate) fn request_all_physics_reset(&mut self) {
-        for c in &mut self.physics_constraints {
-            c.set_pending_reset();
+        let active = &self.constraint_activity.physics;
+        for (i, c) in self.physics_constraints.iter_mut().enumerate() {
+            if is_set(active, i) {
+                c.set_pending_reset();
+            }
         }
     }
 
@@ -502,52 +523,72 @@ impl Skeleton {
     }
 
     /// A slider's mutable pose paired with its setup data, for the animation
-    /// system (the SLIDER_TIME / SLIDER_MIX timelines).
+    /// system (the SLIDER_TIME / SLIDER_MIX timelines). `None` if `i` is out
+    /// of range or the slider is inactive, which timelines leave alone.
     pub(crate) fn slider_pose_and_setup(
         &mut self,
         i: usize,
     ) -> Option<(&mut SliderPose, &SliderData)> {
+        if !is_set(&self.constraint_activity.sliders, i) {
+            return None;
+        }
         let setup = self.data.sliders.get(i)?;
         let pose = self.sliders.get_mut(i)?;
         Some((pose, setup))
     }
 
     /// An IK constraint's mutable pose paired with its setup data, for the
-    /// animation system.
+    /// animation system. `None` if `i` is out of range or the constraint is
+    /// inactive, which timelines leave alone.
     pub(crate) fn ik_pose_and_setup(
         &mut self,
         i: usize,
     ) -> Option<(&mut IkConstraint, &IkConstraintData)> {
+        if !is_set(&self.constraint_activity.ik, i) {
+            return None;
+        }
         let setup = self.data.ik_constraints.get(i)?;
         let pose = self.ik_constraints.get_mut(i)?;
         Some((pose, setup))
     }
 
     /// A transform constraint's mutable pose paired with its setup data.
+    /// `None` if `i` is out of range or the constraint is inactive.
     pub(crate) fn transform_pose_and_setup(
         &mut self,
         i: usize,
     ) -> Option<(&mut TransformConstraint, &TransformConstraintData)> {
+        if !is_set(&self.constraint_activity.transform, i) {
+            return None;
+        }
         let setup = self.data.transform_constraints.get(i)?;
         let pose = self.transform_constraints.get_mut(i)?;
         Some((pose, setup))
     }
 
-    /// A path constraint's mutable pose paired with its setup data.
+    /// A path constraint's mutable pose paired with its setup data. `None` if
+    /// `i` is out of range or the constraint is inactive.
     pub(crate) fn path_pose_and_setup(
         &mut self,
         i: usize,
     ) -> Option<(&mut PathConstraint, &PathConstraintData)> {
+        if !is_set(&self.constraint_activity.path, i) {
+            return None;
+        }
         let setup = self.data.path_constraints.get(i)?;
         let pose = self.path_constraints.get_mut(i)?;
         Some((pose, setup))
     }
 
-    /// A physics constraint's mutable pose paired with its setup data.
+    /// A physics constraint's mutable pose paired with its setup data. `None`
+    /// if `i` is out of range or the constraint is inactive.
     pub(crate) fn physics_pose_and_setup(
         &mut self,
         i: usize,
     ) -> Option<(&mut PhysicsConstraint, &PhysicsConstraintData)> {
+        if !is_set(&self.constraint_activity.physics, i) {
+            return None;
+        }
         let setup = self.data.physics_constraints.get(i)?;
         let pose = self.physics_constraints.get_mut(i)?;
         Some((pose, setup))

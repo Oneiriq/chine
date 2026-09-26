@@ -575,3 +575,147 @@ fn skin_required_constraints_apply_only_with_their_skin() {
     sk.set_skin("s");
     assert!(moved(&mut sk));
 }
+
+// Spine's constraint timelines return early for an inactive constraint, so its
+// pose keeps the values it had. chine's timelines keyed the pose anyway. It
+// had no visible effect, since an inactive constraint is not applied, but the
+// pose was wrong the moment the constraint became active again.
+#[test]
+fn timelines_leave_inactive_constraints_alone() {
+    use crate::anim::{
+        ConstraintTimeline, MixFrom, PhysicsProperty, PhysicsResetTimeline, Timeline,
+        GLOBAL_PHYSICS,
+    };
+    use crate::constraint::slider::SliderData;
+
+    // One skin-required constraint of each kind, all listed by skin "s", plus
+    // an IK constraint that is not skin-required but whose target, bone 2, is
+    // active only with the skin.
+    let mut sk = skin_required_rig(|data, skin| {
+        let required = true;
+        data.ik_constraints.push(IkConstraintData {
+            skin_required: required,
+            ..ik(0, vec![3], 0)
+        });
+        data.ik_constraints.push(ik(1, vec![3], 2));
+        data.transform_constraints.push(TransformConstraintData {
+            skin_required: required,
+            ..transform(2, 0, vec![3], false)
+        });
+        data.path_constraints.push(PathConstraintData {
+            skin_required: required,
+            ..path(3, 0, vec![3])
+        });
+        data.physics_constraints.push(PhysicsConstraintData {
+            skin_required: required,
+            mix_global: true,
+            ..physics(4, 3)
+        });
+        data.sliders.push(SliderData {
+            skin_required: required,
+            order: 5,
+            ..Default::default()
+        });
+        skin.constraints.extend([
+            SkinConstraint::Ik(0),
+            SkinConstraint::Transform(0),
+            SkinConstraint::Path(0),
+            SkinConstraint::Physics(0),
+            SkinConstraint::Slider(0),
+        ]);
+    });
+
+    // One key at time 0 for every constraint timeline kind. `entries` counts
+    // the time plus the channels.
+    let keyed = |constraint: usize, entries: usize, value: f32| {
+        let mut timeline = ConstraintTimeline::new(constraint, 1, 0, entries);
+        timeline.set_frame(0, 0.0, &vec![value; entries - 1]);
+        timeline
+    };
+    let timelines = [
+        Timeline::Ik(keyed(0, 6, 0.25)),
+        Timeline::Ik(keyed(1, 6, 0.25)),
+        Timeline::TransformMix(keyed(0, 7, 0.25)),
+        Timeline::PathPosition(keyed(0, 2, 7.0)),
+        Timeline::PathSpacing(keyed(0, 2, 3.0)),
+        Timeline::PathMix(keyed(0, 4, 0.25)),
+        Timeline::Physics(keyed(0, 2, 0.25), PhysicsProperty::Strength),
+        Timeline::Physics(keyed(GLOBAL_PHYSICS, 2, 0.25), PhysicsProperty::Mix),
+        Timeline::PhysicsReset(PhysicsResetTimeline::new(0, vec![0.0])),
+        Timeline::SliderTime(keyed(0, 2, 0.5)),
+        Timeline::SliderMix(keyed(0, 2, 0.25)),
+    ];
+    let apply_all = |sk: &mut Skeleton| {
+        for timeline in &timelines {
+            timeline.apply(sk, -1.0, 0.0, 1.0, MixFrom::Setup, false, false);
+        }
+    };
+    let poses = |sk: &Skeleton| {
+        let (ik, tc, pc) = (
+            &sk.ik_constraints,
+            &sk.transform_constraints[0],
+            &sk.path_constraints[0],
+        );
+        let (phys, slider) = (&sk.physics_constraints[0], &sk.sliders[0]);
+        vec![
+            ik[0].mix,
+            ik[1].mix,
+            tc.mix_rotate,
+            tc.mix_x,
+            pc.position,
+            pc.spacing,
+            pc.mix_rotate,
+            phys.strength,
+            phys.mix,
+            slider.time,
+            slider.mix,
+        ]
+    };
+
+    let activity = |sk: &Skeleton| {
+        let a = &sk.constraint_activity;
+        [
+            a.ik.clone(),
+            a.transform.clone(),
+            a.path.clone(),
+            a.physics.clone(),
+            a.sliders.clone(),
+        ]
+    };
+    let none = [
+        vec![false, false],
+        vec![false],
+        vec![false],
+        vec![false],
+        vec![false],
+    ];
+    assert_eq!(activity(&sk), none);
+
+    let setup = poses(&sk);
+    apply_all(&mut sk);
+    assert_eq!(poses(&sk), setup);
+    assert!(!sk.physics_constraints[0].take_pending_reset());
+
+    sk.set_skin("s");
+    let all = [
+        vec![true, true],
+        vec![true],
+        vec![true],
+        vec![true],
+        vec![true],
+    ];
+    assert_eq!(activity(&sk), all);
+    apply_all(&mut sk);
+    assert_eq!(
+        poses(&sk),
+        [0.25, 0.25, 0.25, 0.25, 7.0, 3.0, 0.25, 0.25, 0.25, 0.5, 0.25]
+    );
+    assert!(sk.physics_constraints[0].take_pending_reset());
+
+    // Clearing the skin makes them inactive again, and the keyed poses stay.
+    sk.clear_skin();
+    assert_eq!(activity(&sk), none);
+    let keyed_poses = poses(&sk);
+    apply_all(&mut sk);
+    assert_eq!(poses(&sk), keyed_poses);
+}
