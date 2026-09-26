@@ -8,6 +8,8 @@ use crate::anim::{
 };
 use crate::event::Event;
 
+mod attachments;
+use attachments::{attachment_entries, read_deform, read_sequence};
 mod curves;
 use curves::{
     read_curve, read_curve_timeline, read_ik_timeline, read_slot_rgb_timeline,
@@ -297,84 +299,13 @@ pub(super) fn parse_animation(
         }
     }
 
-    if let Some(deforms) = anim.get("deform").and_then(Value::as_object) {
-        for (skin_name, slots) in deforms {
-            let skin = if skin_name == "default" {
-                None
-            } else {
-                names.skin(data, skin_name)
-            };
-            let Some(slots) = slots.as_object() else {
-                continue;
-            };
-            for (slot_name, attachments) in slots {
-                let Some(&slot_idx) = names.slots.get(slot_name.as_str()) else {
-                    continue;
-                };
-                let Some(attachments) = attachments.as_object() else {
-                    continue;
-                };
-                for (att_name, keys) in attachments {
-                    let Some(keys) = keys.as_array() else {
-                        continue;
-                    };
-                    if keys.is_empty() {
-                        continue;
-                    }
-                    let Some(Attachment::Mesh(mesh)) = data.attachment(slot_idx, att_name, skin)
-                    else {
-                        continue;
-                    };
-                    let frame_len = mesh.deform_len();
-                    let n = keys.len();
-                    // The setup vertices plus one full frame per key.
-                    budget.charge(
-                        n.saturating_add(1)
-                            .saturating_mul(frame_len)
-                            .saturating_mul(size_of::<f32>()),
-                        "a deform timeline",
-                    )?;
-                    // Unweighted: setup = the bind vertices (offsets add to them).
-                    // Weighted: setup = zeros (offsets are added per-influence to
-                    // the bind positions in compute_vertices).
-                    let setup = match mesh.setup_vertices() {
-                        Some(v) => v.to_vec(),
-                        None => vec![0.0; frame_len],
-                    };
-                    let mut times = Vec::with_capacity(n);
-                    let mut frames = Vec::with_capacity(n);
-                    for k in keys {
-                        times.push(f(k, "time"));
-                        frames.push(read_deform_frame(k, frame_len));
-                    }
-                    duration = duration.max(times.last().copied().unwrap_or(0.0));
-                    let tl_skin = if skin_name == "default" {
-                        None
-                    } else {
-                        Some(skin_name.clone())
-                    };
-                    let mut tl = DeformTimeline::new(
-                        slot_idx,
-                        att_name.clone(),
-                        tl_skin,
-                        setup,
-                        times,
-                        frames,
-                        n,
-                    );
-                    let mut bezier = 0;
-                    let mut frame = 0;
-                    while frame + 1 < n {
-                        if let Some(curve) = keys[frame].get("curve") {
-                            let time = f(&keys[frame], "time");
-                            let time2 = f(&keys[frame + 1], "time");
-                            bezier =
-                                read_curve(curve, &mut tl, bezier, frame, 0, time, time2, 0.0, 1.0);
-                        }
-                        frame += 1;
-                    }
-                    timelines.push(Timeline::Deform(tl));
-                }
+    // Spine 4.0 exports keep deform timelines in their own "deform" map. Later
+    // exports nest them under "attachments", read below.
+    if let Some(map) = anim.get("deform") {
+        for entry in attachment_entries(map, names) {
+            if let Some((tl, d)) = read_deform(&entry, entry.value, data, names, budget)? {
+                duration = duration.max(d);
+                timelines.push(tl);
             }
         }
     }
@@ -416,80 +347,26 @@ pub(super) fn parse_animation(
         }
     }
 
-    // Attachment sequence (flipbook) timelines: skin -> slot -> attachment ->
-    // "sequence", each keyframe a packed mode/index plus a hold delay.
-    if let Some(attachments) = anim.get("attachments").and_then(Value::as_object) {
-        for (skin_name, slots) in attachments {
-            let skin = if skin_name == "default" {
-                None
-            } else {
-                names.skin(data, skin_name)
-            };
-            let Some(slots) = slots.as_object() else {
-                continue;
-            };
-            for (slot_name, atts) in slots {
-                let Some(&slot_idx) = names.slots.get(slot_name.as_str()) else {
-                    continue;
-                };
-                let Some(atts) = atts.as_object() else {
-                    continue;
-                };
-                for (att_name, channels) in atts {
-                    let Some(seq_keys) = channels.get("sequence").and_then(Value::as_array) else {
-                        continue;
-                    };
-                    if seq_keys.is_empty() {
-                        continue;
-                    }
-                    let count = match data.attachment(slot_idx, att_name, skin) {
-                        Some(Attachment::Region(r)) => r.sequence.as_ref().map_or(0, |s| s.count),
-                        Some(Attachment::Mesh(m)) => m.sequence.as_ref().map_or(0, |s| s.count),
-                        _ => 0,
-                    };
-                    let n = seq_keys.len();
-                    let mut times = Vec::with_capacity(n);
-                    let mut mode_and_index = Vec::with_capacity(n);
-                    let mut delays = Vec::with_capacity(n);
-                    for k in seq_keys {
-                        // The index shares a `u32` with the 4-bit mode, so a
-                        // larger index saturates instead of losing its high bits.
-                        let index = k.get("index").and_then(Value::as_u64).map_or(0, |i| {
-                            u32::try_from(i).unwrap_or(u32::MAX).min(u32::MAX >> 4)
-                        });
-                        let mode = sequence_mode(k.get("mode").and_then(Value::as_str));
-                        times.push(f(k, "time"));
-                        mode_and_index.push((index << 4) | mode);
-                        delays.push(f(k, "delay"));
-                    }
-                    duration = duration.max(times.last().copied().unwrap_or(0.0));
-                    timelines.push(Timeline::Sequence(SequenceTimeline::new(
-                        slot_idx,
-                        att_name.clone(),
-                        count,
-                        times,
-                        mode_and_index,
-                        delays,
-                    )));
+    // Attachment timelines, keyed by skin, slot, and attachment: mesh deforms
+    // and sequence (flipbook) keys.
+    if let Some(map) = anim.get("attachments") {
+        for entry in attachment_entries(map, names) {
+            if let Some(keys) = entry.value.get("deform") {
+                if let Some((tl, d)) = read_deform(&entry, keys, data, names, budget)? {
+                    duration = duration.max(d);
+                    timelines.push(tl);
+                }
+            }
+            if let Some(keys) = entry.value.get("sequence") {
+                if let Some((tl, d)) = read_sequence(&entry, keys, data, names) {
+                    duration = duration.max(d);
+                    timelines.push(tl);
                 }
             }
         }
     }
 
     Ok(Animation::new(name, duration, timelines))
-}
-
-/// Map a Spine sequence mode name to its ordinal (`hold` = 0 by default).
-fn sequence_mode(name: Option<&str>) -> u32 {
-    match name {
-        Some("once") => 1,
-        Some("loop") => 2,
-        Some("pingpong") => 3,
-        Some("onceReverse") => 4,
-        Some("loopReverse") => 5,
-        Some("pingpongReverse") => 6,
-        _ => 0, // hold
-    }
 }
 
 /// Read one draw-order keyframe's `offsets` into a full slot ordering (the setup
@@ -589,20 +466,4 @@ fn read_event_timeline(
         duration = duration.max(time);
     }
     Ok((EventTimeline::new(times, events), duration))
-}
-
-/// Read one deform keyframe's sparse `offset`/`vertices` into a full `len`-long
-/// offset array (zero where unspecified). Values past the end are dropped.
-fn read_deform_frame(k: &Value, len: usize) -> Vec<f32> {
-    let mut frame = vec![0.0; len];
-    let offset = k.get("offset").and_then(Value::as_u64).unwrap_or(0);
-    let window = usize::try_from(offset)
-        .ok()
-        .and_then(|offset| frame.get_mut(offset..));
-    if let Some(window) = window {
-        for (slot, v) in window.iter_mut().zip(f_array(k, "vertices")) {
-            *slot = v;
-        }
-    }
-    frame
 }

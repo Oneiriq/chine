@@ -83,3 +83,31 @@ fn bone_inherit_timelines_apply() {
     let sk = posed(json, "a", 1.0);
     assert_eq!(sk.bone(1).unwrap().inherit(), Inherit::NoScaleOrReflection);
 }
+
+// Since Spine 4.1, JSON exports nest deform timelines under "attachments",
+// beside sequence timelines. The loader read only the Spine 4.0 "deform" map,
+// so mesh deforms from current exports did not play.
+#[test]
+fn deform_timelines_under_attachments_apply() {
+    let json = r#"{
+        "bones": [ { "name": "root" } ],
+        "slots": [ { "name": "s", "bone": "root", "attachment": "m" } ],
+        "skins": [ { "name": "default", "attachments": { "s": { "m": {
+            "type": "mesh", "uvs": [0,0, 1,0, 0,1], "triangles": [0,1,2], "vertices": [0,0, 10,0, 0,10]
+        } } } } ],
+        "animations": {
+            "wobble": { "attachments": { "default": { "s": { "m": { "deform": [
+                { "vertices": [0,0, 0,0, 0,0], "curve": "stepped" },
+                { "time": 1, "offset": 2, "vertices": [5, 0] }
+            ] } } } } }
+        }
+    }"#;
+    let data = from_json(json).unwrap();
+    assert_eq!(data.find_animation("wobble").unwrap().duration(), 1.0);
+    let sk = posed(json, "wobble", 1.0);
+    // Vertex 1's x (index 2) gets +5: setup 10 -> 15.
+    assert_eq!(sk.slot(0).unwrap().deform, [0.0, 0.0, 15.0, 0.0, 0.0, 10.0]);
+    // The first key is stepped, so it holds until the second.
+    let sk = posed(json, "wobble", 0.5);
+    assert_eq!(sk.slot(0).unwrap().deform, [0.0, 0.0, 10.0, 0.0, 0.0, 10.0]);
+}
