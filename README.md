@@ -164,6 +164,8 @@ has the cargo-fuzz targets that check this.
 - performance passes on the per-frame pose and draw paths
 - publishing to crates.io once the API has settled
 
+[`CHANGELOG.md`](CHANGELOG.md) lists the changes in each version.
+
 ## Attribution
 
 [Spine](https://esotericsoftware.com/) is a 2D skeletal animation tool and
