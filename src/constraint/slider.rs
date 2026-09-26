@@ -167,7 +167,9 @@ pub(crate) fn solve(skel: &mut Skeleton, c: usize) {
         pose.time
     };
     if slider.looping && duration > 0.0 {
-        time = duration + (time % duration);
+        // Spine maps the time into `[0, 2 * duration)`, then applies the
+        // animation looped, which wraps it into `[0, duration)`.
+        time = (duration + time % duration) % duration;
     } else {
         time = time.max(0.0);
     }
@@ -288,6 +290,54 @@ mod tests {
         // Scrub time 0.5 rotated bone 1 to ~45 degrees.
         let target = sk.bone(1).unwrap().rotation;
         assert!((target - 45.0).abs() < 1.0, "target rotation = {target}");
+    }
+
+    // A looping slider mapped its time into `[0, 2 * duration)` and applied
+    // the animation there, so every time past the first loop held the last
+    // frame. Spine applies the animation looped, which wraps the time.
+    #[test]
+    fn looping_slider_wraps_past_the_animation_end() {
+        let mut rot = BoneTimeline::one_value(1, 2, 0);
+        rot.set_frame1(0, 0.0, 0.0);
+        rot.set_frame1(1, 1.0, 90.0);
+        let scrub = Animation::new("scrub", 1.0, vec![Timeline::Rotate(rot)]);
+        let slider = SliderData {
+            name: "s".into(),
+            bone: Some(0),
+            property: Some(SliderProperty::Rotate),
+            animation_index: Some(0),
+            looping: true,
+            ..Default::default()
+        };
+        let data = SkeletonData {
+            bones: vec![
+                BoneData {
+                    index: 0,
+                    name: "driver".into(),
+                    ..Default::default()
+                },
+                BoneData {
+                    index: 1,
+                    name: "target".into(),
+                    parent: Some(0),
+                    ..Default::default()
+                },
+            ],
+            sliders: vec![slider],
+            animations: vec![Arc::new(scrub)],
+            ..Default::default()
+        };
+        let mut sk = Skeleton::new(Arc::new(data));
+        for (driver, expected) in [(0.25, 22.5), (1.5, 45.0), (2.75, 67.5), (-0.25, 67.5)] {
+            sk.set_bones_to_setup_pose();
+            sk.bone_mut(0).unwrap().rotation = driver;
+            sk.update_world_transform();
+            let target = sk.bone(1).unwrap().rotation;
+            assert!(
+                (target - expected).abs() < 0.5,
+                "driver {driver}: target rotation {target}, expected {expected}"
+            );
+        }
     }
 
     #[test]
