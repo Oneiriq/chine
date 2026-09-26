@@ -6,7 +6,7 @@
 //!
 //! | Bytes | Meaning |
 //! |---|---|
-//! | 0 | flags: bit 0 JSON instead of binary, bit 1 pick a skin, bit 7 raw floats |
+//! | 0 | flags: bit 0 JSON instead of binary, bit 1 pick a skin, bit 2 switch skins mid-play, bit 7 raw floats |
 //! | 1..3 | payload length, little-endian `u16` |
 //! | 3..35 | control bytes: animation picks, loop flags, times, mix |
 //! | 35.. | the skeleton payload, then atlas text in whatever follows it |
@@ -125,6 +125,15 @@ fuzz_target!(|input: &[u8]| {
             // Replace track 0 mid-play so the crossfade path runs.
             let next = Arc::clone(&animations[usize::from(ctrl[30]) % animations.len()]);
             state.set_animation_on(0, next, ctrl[31] & 1 == 1);
+        }
+        if frame == 1 && flags & 4 != 0 {
+            // Switch to the next skin, or back to the default skin after the
+            // last one, as a host does between frames.
+            let next = (usize::from(ctrl[0]) + 1) % (data.skins.len() + 1);
+            match data.skins.get(next) {
+                Some(skin) => skeleton.set_skin(&skin.name),
+                None => skeleton.clear_skin(),
+            }
         }
         state.update(dt);
         skeleton.set_bones_to_setup_pose();
