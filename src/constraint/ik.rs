@@ -145,7 +145,8 @@ fn apply1(
     let Some(bone_data) = data.bones.get(bone_idx) else {
         return;
     };
-    let inherit = bone_data.inherit;
+    // The bone's current mode, which an inherit timeline may have changed.
+    let inherit = b.inherit;
     let length = bone_data.length;
     let (bx, by, brot, bshear_x, bscale_x, bscale_y, bwx, bwy) = (
         b.x,
@@ -241,19 +242,15 @@ fn apply2(
     let [parent_idx, child_idx] = *ik.bones.as_slice() else {
         return;
     };
-    let (Some(parent_data), Some(child_data)) =
-        (data.bones.get(parent_idx), data.bones.get(child_idx))
-    else {
+    let Some(child_data) = data.bones.get(child_idx) else {
         return;
     };
-    if !matches!(parent_data.inherit, Inherit::Normal)
-        || !matches!(child_data.inherit, Inherit::Normal)
-    {
-        return;
-    }
     let (Some(parent), Some(child)) = (bones.get(parent_idx), bones.get(child_idx)) else {
         return;
     };
+    if !matches!(parent.inherit, Inherit::Normal) || !matches!(child.inherit, Inherit::Normal) {
+        return;
+    }
     let bend_dir = pose.bend_direction as f32;
     let mix = pose.mix;
     let stretch = pose.stretch;

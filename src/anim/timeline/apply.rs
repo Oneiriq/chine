@@ -244,6 +244,36 @@ pub(super) fn apply_bone_axis(
     }
 }
 
+/// Bone inherit timeline: set the bone's inherit mode to the key at or before
+/// `time`. The mode steps, so `alpha` does not apply. Before the first key,
+/// and when mixing out, the bone returns to its setup mode unless blending
+/// from the current pose.
+pub(super) fn apply_inherit(
+    t: &InheritTimeline,
+    skel: &mut Skeleton,
+    time: f32,
+    from: MixFrom,
+    out: bool,
+) {
+    let Some((bone, setup)) = skel.bone_and_setup(t.bone) else {
+        return;
+    };
+    let Some(&first) = t.times.first() else {
+        return;
+    };
+    if out || time < first {
+        if !matches!(from, MixFrom::Current) {
+            bone.inherit = setup.inherit;
+        }
+        return;
+    }
+    // The last key at or before `time`. `time >= first`, so there is one.
+    let key = t.times.partition_point(|&k| k <= time).saturating_sub(1);
+    if let Some(&mode) = t.modes.get(key) {
+        bone.inherit = mode;
+    }
+}
+
 /// Reset one scale channel toward its setup value (the before-first-frame case).
 pub(super) fn apply_scale_setup(scale: &mut f32, setup: f32, alpha: f32, from: MixFrom) {
     match from {

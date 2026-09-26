@@ -17,8 +17,9 @@ use glam::Vec2;
 
 use crate::anim::{
     compute_draw_order, Animation, AttachmentTimeline, BoneAxis, BoneTimeline, ConstraintTimeline,
-    DeformTimeline, DrawOrderTimeline, EventTimeline, PhysicsProperty, PhysicsResetTimeline,
-    SequenceTimeline, Timeline, PATH_MIX, PATH_POSITION, PATH_SPACING, TRANSFORM_MIX,
+    DeformTimeline, DrawOrderTimeline, EventTimeline, InheritTimeline, PhysicsProperty,
+    PhysicsResetTimeline, SequenceTimeline, Timeline, PATH_MIX, PATH_POSITION, PATH_SPACING,
+    TRANSFORM_MIX,
 };
 use crate::attach::{
     Attachment, BoundingBoxAttachment, ClippingAttachment, LinkedMeshAttachment, MeshAttachment,
@@ -154,12 +155,10 @@ fn inherit_from(ordinal: usize) -> Inherit {
 /// The full section sequence is read: header, bones, slots, the IK / transform
 /// / path / physics / slider constraints, skins (including sequence
 /// attachments), events, and animations. The timeline groups decoded are bone
-/// (rotate / translate / scale / shear), slot (attachment, color, two-color,
-/// alpha), deform, draw order, event, the IK / transform / path / physics
-/// constraint timelines, and the slider and sequence timelines. Bone inherit
-/// timelines are not decoded and report
-/// [`BinaryError::UnknownTimelineType`], and draw order folder timelines are
-/// read past without being kept.
+/// (rotate / translate / scale / shear / inherit), slot (attachment, color,
+/// two-color, alpha), deform, draw order, event, the IK / transform / path /
+/// physics constraint timelines, and the slider and sequence timelines. Draw
+/// order folder timelines are read past without being kept.
 ///
 /// Every index the file stores (bone parents, slot bones, constraint bones and
 /// targets, timeline targets, skin slots, weighted vertex bones, mesh

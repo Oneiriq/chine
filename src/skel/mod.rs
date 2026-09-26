@@ -39,7 +39,9 @@ const EPSILON_SQ: f32 = 0.0001 * 0.0001;
 #[derive(Debug, Clone)]
 pub struct Bone {
     parent: Option<usize>,
-    inherit: Inherit,
+    // How the bone inherits its parent's transform. Starts at the setup
+    // mode, and a bone inherit timeline can change it.
+    pub(crate) inherit: Inherit,
     /// Local x relative to the parent.
     pub x: f32,
     /// Local y relative to the parent.
@@ -87,8 +89,10 @@ impl Bone {
         bone
     }
 
-    /// Reset the local pose to the setup pose described by `data`.
+    /// Reset the local pose, and the inherit mode, to the setup pose described
+    /// by `data`.
     pub fn set_to_setup_pose(&mut self, data: &BoneData) {
+        self.inherit = data.inherit;
         self.x = data.position.x;
         self.y = data.position.y;
         self.rotation = data.rotation;
@@ -102,6 +106,13 @@ impl Bone {
     #[must_use]
     pub fn parent(&self) -> Option<usize> {
         self.parent
+    }
+
+    /// How this bone currently inherits its parent's transform: the setup
+    /// mode, unless a bone inherit timeline has changed it.
+    #[must_use]
+    pub fn inherit(&self) -> Inherit {
+        self.inherit
     }
 
     /// World matrix component `a` (world x-axis x).

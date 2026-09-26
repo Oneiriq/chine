@@ -202,7 +202,8 @@ pub(super) fn read_animation(
     }
 
     // Bone timelines: one group per animated bone, each with one or more typed
-    // timelines (rotate / translate / scale / shear and their single axes).
+    // timelines (rotate / translate / scale / shear, their single axes, and
+    // inherit).
     let bone_groups = r.count();
     for _ in 0..bone_groups {
         let bone = r.var_usize();
@@ -224,6 +225,10 @@ pub(super) fn read_animation(
                 7 => wrap(read_bone_timeline2(r, bone, frames), Timeline::Shear),
                 8 => axis(read_bone_timeline1(r, bone, frames), BoneAxis::ShearX),
                 9 => axis(read_bone_timeline1(r, bone, frames), BoneAxis::ShearY),
+                10 => {
+                    let (tl, d) = read_inherit_timeline(r, bone, frames);
+                    (Timeline::Inherit(tl), d)
+                }
                 _ => {
                     r.fail(BinaryError::UnknownTimelineType(kind));
                     return Animation::new(name, duration, timelines);
@@ -492,6 +497,31 @@ pub(super) fn read_bone_timeline1(
         value = value2;
     }
     (tl, duration)
+}
+
+/// Read a bone inherit timeline: per frame a time and an inherit-mode byte.
+/// Stepped, so there is no curve data. A mode past the five Spine defines is
+/// corrupt.
+pub(super) fn read_inherit_timeline(
+    r: &mut BinaryReader,
+    bone: usize,
+    frames: usize,
+) -> (InheritTimeline, f32) {
+    let frames = fitting_frames(r, frames, 5);
+    let mut times = Vec::with_capacity(frames);
+    let mut modes = Vec::with_capacity(frames);
+    let mut duration = 0.0_f32;
+    for _ in 0..frames {
+        let time = r.float();
+        let mode = r.byte();
+        if mode > 4 {
+            corrupt(r);
+        }
+        times.push(time);
+        modes.push(inherit_from(usize::from(mode)));
+        duration = duration.max(time);
+    }
+    (InheritTimeline::new(bone, times, modes), duration)
 }
 
 /// Read a two-value bone timeline (translate / scale / shear). The stream gives

@@ -12,7 +12,7 @@ use super::curve::{absolute_value_with, Curve};
 use super::MixFrom;
 use crate::attach::Attachment;
 use crate::constraint::physics::{PhysicsConstraint, PhysicsConstraintData};
-use crate::data::Color;
+use crate::data::{Color, Inherit};
 use crate::event::Event;
 use crate::skel::Skeleton;
 
@@ -146,6 +146,22 @@ impl PhysicsResetTimeline {
     /// A reset timeline for `constraint` firing at each time in `times`.
     pub(crate) fn new(constraint: usize, times: Vec<f32>) -> Self {
         Self { constraint, times }
+    }
+}
+
+/// A bone inherit timeline: stepped `(time, mode)` pairs setting how a bone
+/// inherits its parent's transform.
+#[derive(Debug, Clone)]
+pub(crate) struct InheritTimeline {
+    bone: usize,
+    times: Vec<f32>,
+    modes: Vec<Inherit>,
+}
+
+impl InheritTimeline {
+    /// An inherit timeline for `bone`, one mode per keyframe time.
+    pub(crate) fn new(bone: usize, times: Vec<f32>, modes: Vec<Inherit>) -> Self {
+        Self { bone, times, modes }
     }
 }
 
@@ -394,6 +410,8 @@ pub(crate) enum Timeline {
     Shear(BoneTimeline),
     /// A single bone axis (translateX/Y, scaleX/Y, shearX/Y).
     BoneAxis(BoneTimeline, BoneAxis),
+    /// How a bone inherits its parent's transform (stepped).
+    Inherit(InheritTimeline),
     /// IK constraint mix / softness / bend / compress / stretch.
     Ik(ConstraintTimeline),
     /// Transform constraint mixes (rotate / x / y / scaleX / scaleY / shearY).
@@ -435,7 +453,7 @@ pub(crate) enum Timeline {
 impl Timeline {
     /// Apply this timeline to `skeleton` over the window `(last_time, time]`.
     /// `from`, `add`, and `out` follow Spine's mix semantics. `out` only affects
-    /// scale and IK. `last_time` is used only by the physics reset and event
+    /// scale, IK, and inherit. `last_time` is used only by the physics reset and event
     /// timelines.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn apply(
@@ -456,6 +474,7 @@ impl Timeline {
             Timeline::BoneAxis(t, axis) => {
                 apply_bone_axis(t, *axis, skeleton, time, alpha, from, add, out);
             }
+            Timeline::Inherit(t) => apply_inherit(t, skeleton, time, from, out),
             Timeline::Ik(t) => apply_ik(t, skeleton, time, alpha, from, out),
             Timeline::TransformMix(t) => apply_transform_mix(t, skeleton, time, alpha, from, add),
             Timeline::PathPosition(t) => apply_path_position(t, skeleton, time, alpha, from, add),
@@ -493,7 +512,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::data::{BoneData, SkeletonData};
+    use crate::data::{BoneData, Inherit, SkeletonData};
 
     fn skeleton(setup_rotation: f32) -> Skeleton {
         let data = SkeletonData {
@@ -565,5 +584,59 @@ mod tests {
         Timeline::Scale(t).apply(&mut sk, -1.0, 0.5, 1.0, MixFrom::Setup, false, false);
         let b = sk.bone(0).unwrap();
         assert!((b.scale_x - 1.5).abs() < 1e-4 && (b.scale_y - 1.5).abs() < 1e-4);
+    }
+
+    /// A root rotated 90 degrees and a child that inherits normally.
+    fn rotated_parent() -> Skeleton {
+        let data = SkeletonData {
+            bones: vec![
+                BoneData {
+                    index: 0,
+                    name: "root".into(),
+                    rotation: 90.0,
+                    ..Default::default()
+                },
+                BoneData {
+                    index: 1,
+                    name: "child".into(),
+                    parent: Some(0),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        Skeleton::new(Arc::new(data))
+    }
+
+    #[test]
+    fn inherit_timeline_steps_the_bone_inherit_mode() {
+        let mut sk = rotated_parent();
+        let t = Timeline::Inherit(InheritTimeline::new(
+            1,
+            vec![0.5, 1.0],
+            vec![Inherit::OnlyTranslation, Inherit::NoScale],
+        ));
+        let inherit = |sk: &Skeleton| sk.bone(1).unwrap().inherit();
+
+        // Keys hold until the next one.
+        t.apply(&mut sk, -1.0, 0.75, 1.0, MixFrom::Setup, false, false);
+        assert_eq!(inherit(&sk), Inherit::OnlyTranslation);
+        // The child no longer takes the parent's rotation.
+        sk.update_world_transform();
+        assert!((sk.bone(1).unwrap().a() - 1.0).abs() < 1e-4);
+        t.apply(&mut sk, -1.0, 2.0, 1.0, MixFrom::Setup, false, false);
+        assert_eq!(inherit(&sk), Inherit::NoScale);
+
+        // Before the first key, blending from the current pose keeps the mode,
+        // and blending from the setup pose restores it.
+        t.apply(&mut sk, -1.0, 0.0, 1.0, MixFrom::Current, false, false);
+        assert_eq!(inherit(&sk), Inherit::NoScale);
+        t.apply(&mut sk, -1.0, 0.0, 1.0, MixFrom::Setup, false, false);
+        assert_eq!(inherit(&sk), Inherit::Normal);
+
+        // Resetting the bones restores the setup mode too.
+        t.apply(&mut sk, -1.0, 0.75, 1.0, MixFrom::Setup, false, false);
+        sk.set_bones_to_setup_pose();
+        assert_eq!(inherit(&sk), Inherit::Normal);
     }
 }

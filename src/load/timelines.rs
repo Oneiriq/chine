@@ -2,7 +2,7 @@ use super::*;
 
 use crate::anim::{
     compute_draw_order, Animation, AttachmentTimeline, BoneAxis, BoneTimeline, ConstraintTimeline,
-    DeformTimeline, DrawOrderTimeline, EventTimeline, Fallback, PhysicsProperty,
+    DeformTimeline, DrawOrderTimeline, EventTimeline, Fallback, InheritTimeline, PhysicsProperty,
     PhysicsResetTimeline, SequenceTimeline, Timeline, GLOBAL_PHYSICS, PATH_MIX, PATH_POSITION,
     PATH_SPACING, TRANSFORM_MIX,
 };
@@ -73,6 +73,18 @@ pub(super) fn parse_animation(
                     "sheary" => {
                         let (tl, d) = read_timeline1(keys, bone, 0.0);
                         (Timeline::BoneAxis(tl, BoneAxis::ShearY), d)
+                    }
+                    "inherit" => {
+                        let times: Vec<f32> = keys.iter().map(|k| f(k, "time")).collect();
+                        let modes = keys
+                            .iter()
+                            .map(|k| parse_inherit(k.get("inherit")))
+                            .collect();
+                        let d = times.iter().copied().fold(0.0, f32::max);
+                        (
+                            Timeline::Inherit(InheritTimeline::new(bone, times, modes)),
+                            d,
+                        )
                     }
                     _ => continue, // unknown bone channels are skipped
                 };

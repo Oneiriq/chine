@@ -98,7 +98,8 @@ animating, and emitting draw data:
   - **Physics**: the 4.3 spring-damper simulation, with skeleton wind / gravity.
   - **Slider**: the 4.3 slider constraint.
 - **Animation**: every timeline kind, with stepped / linear / Bezier curves:
-  - bone rotate / translate / scale / shear, plus single-axis variants
+  - bone rotate / translate / scale / shear, plus single-axis variants and
+    inherit-mode keys
   - IK / transform / path / physics / slider mix timelines
   - slot color / alpha / two-color / attachment-swap / draw-order
   - deform, events, and sequences

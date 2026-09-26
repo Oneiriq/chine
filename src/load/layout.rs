@@ -63,3 +63,23 @@ fn omitted_mix_y_keys_take_mix_x() {
     let (path, _) = sk.path_pose_and_setup(0).unwrap();
     assert_eq!((path.mix_x, path.mix_y), (0.75, 0.75));
 }
+
+// Bone "inherit" timelines were skipped as an unknown bone channel.
+#[test]
+fn bone_inherit_timelines_apply() {
+    let json = r#"{
+        "bones": [ { "name": "root" }, { "name": "b", "parent": "root" } ],
+        "animations": {
+            "a": { "bones": { "b": { "inherit": [
+                { "inherit": "onlyTranslation" },
+                { "time": 1, "inherit": "noScaleOrReflection" }
+            ] } } }
+        }
+    }"#;
+    let data = from_json(json).unwrap();
+    assert_eq!(data.find_animation("a").unwrap().duration(), 1.0);
+    let sk = posed(json, "a", 0.5);
+    assert_eq!(sk.bone(1).unwrap().inherit(), Inherit::OnlyTranslation);
+    let sk = posed(json, "a", 1.0);
+    assert_eq!(sk.bone(1).unwrap().inherit(), Inherit::NoScaleOrReflection);
+}
