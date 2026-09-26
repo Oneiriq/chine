@@ -17,13 +17,12 @@ resolver = "2"
 [features]
 default = ["json", "binary"]
 # Load `.json` skeleton exports.
-json = ["dep:serde", "dep:serde_json"]
+json = ["dep:serde_json"]
 # Load `.skel` binary skeleton exports (no extra dependencies).
 binary = []
 
 [dependencies]
 glam = "0.33"
-serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 
 [lints.rust]

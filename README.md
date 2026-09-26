@@ -17,10 +17,10 @@ Spine skeleton data requires a valid
 
 The established Rust runtime, `rusty_spine`, is transpiled from `spine-c` and
 tops out at Spine 4.2. Esoteric discontinued `spine-c` at 4.3. `chine` is a
-from-scratch, dependency-light (`glam` plus optional `serde`) implementation of
-the 4.3 runtime, so projects can target current Spine in pure Rust (native and
-WebAssembly). It reproduces the official runtime's behavior. It does not port
-or copy the official code.
+from-scratch, dependency-light (`glam` plus optional `serde_json`)
+implementation of the 4.3 runtime, so projects can target current Spine in pure
+Rust (native and WebAssembly). It reproduces the official runtime's behavior. It
+does not port or copy the official code.
 
 (The name is the *chine*, the backbone.)
 
@@ -115,7 +115,7 @@ exercises sequences and clipping.
 Both loaders are on by default. Disable either to trim dependencies or binary
 size.
 
-- `json` *(default)*: the `.json` skeleton loader (pulls `serde` / `serde_json`).
+- `json` *(default)*: the `.json` skeleton loader (pulls in `serde_json`).
 - `binary` *(default)*: the binary `.skel` loader (no extra dependencies).
 
 With neither feature, `chine` is a manual pose / render runtime over a
