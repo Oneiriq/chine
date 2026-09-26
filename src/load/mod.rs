@@ -315,8 +315,8 @@ pub fn from_json(text: &str) -> Result<SkeletonData, LoadError> {
         }
     }
 
-    // Resolve linked meshes before animations so deform timelines bind to the
-    // resolved (source-shared) geometry rather than unresolved links.
+    // Resolve linked meshes before animations, so deform timelines bind to
+    // the geometry each link shares with its source.
     charge_linked_meshes(&data, &mut budget)?;
     crate::link::resolve_linked_meshes(&mut data);
 

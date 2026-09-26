@@ -363,8 +363,8 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
     name_link_skins(&mut r, &mut data, skins, links);
     status(&r)?;
 
-    // Resolve linked meshes before animations so deform timelines bind to the
-    // resolved (source-shared) geometry rather than unresolved links.
+    // Resolve linked meshes before animations, so deform timelines bind to
+    // the geometry each link shares with its source.
     crate::link::resolve_linked_meshes(&mut data);
 
     // Events: setup-pose values for named animation events.
