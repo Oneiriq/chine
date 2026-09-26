@@ -21,6 +21,7 @@ use crate::attach::Attachment;
 use crate::constraint::ik::IkConstraintData;
 use crate::constraint::path::{PathConstraintData, PositionMode, RotateMode, SpacingMode};
 use crate::constraint::physics::PhysicsConstraintData;
+use crate::constraint::slider::{SliderData, SliderProperty};
 use crate::constraint::transform::{
     FromMapping, FromProp, ToMapping, ToProp, TransformConstraintData,
 };
@@ -82,6 +83,7 @@ struct Names<'a> {
     transform: HashMap<&'a str, usize>,
     path: HashMap<&'a str, usize>,
     physics: HashMap<&'a str, usize>,
+    sliders: HashMap<&'a str, usize>,
     /// Indices into `SkeletonData::skins`, which excludes the default skin.
     skins: HashMap<&'a str, usize>,
     events: HashMap<&'a str, usize>,
@@ -280,6 +282,11 @@ pub fn from_json(text: &str) -> Result<SkeletonData, LoadError> {
                     add_named(&mut names.physics, cm, data.physics_constraints.len());
                     data.physics_constraints.push(c);
                 }
+                Some("slider") => {
+                    let c = parse_slider(cm, order, &names)?;
+                    add_named(&mut names.sliders, cm, data.sliders.len());
+                    data.sliders.push(c);
+                }
                 _ => {}
             }
         }
@@ -315,7 +322,28 @@ pub fn from_json(text: &str) -> Result<SkeletonData, LoadError> {
             data.animations.push(Arc::new(animation));
         }
     }
+    resolve_slider_animations(&root, &mut data)?;
     Ok(data)
+}
+
+/// Resolve the animation each slider scrubs, named in its `animation` field,
+/// once every animation is loaded. Sliders are in the order of the
+/// `constraints` entries.
+fn resolve_slider_animations(root: &Value, data: &mut SkeletonData) -> Result<(), LoadError> {
+    let Some(constraints) = root.get("constraints").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    let sliders = constraints
+        .iter()
+        .filter(|cm| cm.get("type").and_then(Value::as_str) == Some("slider"));
+    for (slider, cm) in data.sliders.iter_mut().zip(sliders) {
+        if let Some(name) = cm.get("animation").and_then(Value::as_str) {
+            let index = data.animations.iter().position(|a| a.name() == name);
+            slider.animation_index =
+                Some(index.ok_or_else(|| LoadError::BadReference(name.to_string()))?);
+        }
+    }
+    Ok(())
 }
 
 /// Charge the copies linked-mesh resolution makes: each linked mesh becomes a
@@ -490,6 +518,49 @@ fn parse_path(cm: &Value, order: usize, names: &Names) -> Result<PathConstraintD
         mix_rotate: f_or(cm, "mixRotate", 1.0),
         mix_x,
         mix_y: f_or(cm, "mixY", mix_x),
+    })
+}
+
+/// Parse a `slider` constraint entry. A slider driven by a bone maps the
+/// bone's `property` to a scrub time, and one without a bone keeps a setup
+/// `time`. Its animation is resolved once the animations are loaded.
+fn parse_slider(cm: &Value, order: usize, names: &Names) -> Result<SliderData, LoadError> {
+    let mut slider = SliderData {
+        name: str_field(cm, "name")?,
+        order,
+        skin_required: bool_or(cm, "skin", false),
+        looping: bool_or(cm, "loop", false),
+        additive: bool_or(cm, "additive", false),
+        mix: f_or(cm, "mix", 1.0),
+        ..SliderData::default()
+    };
+    match cm.get("bone").and_then(Value::as_str) {
+        Some(bone) => {
+            slider.bone = Some(names.bone(bone)?);
+            let property = str_ref(cm, "property")?;
+            slider.property = Some(slider_property(property).ok_or_else(|| {
+                LoadError::Schema(format!("unknown slider property '{property}'"))
+            })?);
+            slider.property_offset = f(cm, "from");
+            slider.offset = f(cm, "to");
+            slider.scale = f_or(cm, "scale", 1.0);
+            slider.max = f(cm, "max");
+            slider.local = bool_or(cm, "local", false);
+        }
+        None => slider.time = f(cm, "time"),
+    }
+    Ok(slider)
+}
+
+fn slider_property(name: &str) -> Option<SliderProperty> {
+    Some(match name {
+        "rotate" => SliderProperty::Rotate,
+        "x" => SliderProperty::X,
+        "y" => SliderProperty::Y,
+        "scaleX" => SliderProperty::ScaleX,
+        "scaleY" => SliderProperty::ScaleY,
+        "shearY" => SliderProperty::ShearY,
+        _ => return None,
     })
 }
 

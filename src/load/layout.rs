@@ -111,3 +111,60 @@ fn deform_timelines_under_attachments_apply() {
     let sk = posed(json, "wobble", 0.5);
     assert_eq!(sk.slot(0).unwrap().deform, [0.0, 0.0, 10.0, 0.0, 0.0, 10.0]);
 }
+
+// Slider constraints in JSON were dropped: the loader parsed only the other
+// constraint types, and skipped slider timelines for lack of a constraint.
+#[test]
+fn slider_constraints_load_and_scrub_their_animation() {
+    let json = r#"{
+        "bones": [ { "name": "root" }, { "name": "b", "parent": "root" } ],
+        "constraints": [
+            { "type": "slider", "name": "clock", "time": 0.5, "animation": "spin" },
+            { "type": "slider", "name": "dial", "bone": "root", "property": "x",
+              "from": 1, "to": 2, "scale": 3, "max": 4, "local": true, "additive": true,
+              "mix": 0.5, "animation": "spin" }
+        ],
+        "animations": {
+            "spin": { "bones": { "b": { "rotate": [ {}, { "time": 1, "value": 90 } ] } } },
+            "still": { "slider": { "clock": { "mix": [ { "value": 0.25 } ] } } }
+        }
+    }"#;
+    let data = from_json(json).unwrap();
+    let spin = data.animations.iter().position(|a| a.name() == "spin");
+    let clock = &data.sliders[0];
+    assert_eq!(clock.time, 0.5);
+    assert!(!clock.looping && clock.bone.is_none());
+    assert_eq!(clock.animation_index, spin);
+    let dial = &data.sliders[1];
+    assert_eq!(dial.bone, Some(0));
+    assert_eq!(dial.property, Some(SliderProperty::X));
+    let values = [
+        dial.property_offset,
+        dial.offset,
+        dial.scale,
+        dial.max,
+        dial.mix,
+    ];
+    assert_eq!(values, [1.0, 2.0, 3.0, 4.0, 0.5]);
+    assert!(dial.local && dial.additive);
+
+    // The bone-less slider scrubs "spin" to its setup time: 45 degrees.
+    let mut sk = Skeleton::new(Arc::new(data));
+    sk.update_world_transform();
+    assert!((sk.bone(1).unwrap().rotation - 45.0).abs() < 1e-4);
+
+    // Slider timelines now find their constraint.
+    let mut sk = posed(json, "still", 0.0);
+    let (pose, _) = sk.slider_pose_and_setup(0).unwrap();
+    assert_eq!(pose.mix, 0.25);
+}
+
+// A slider must name an animation the export defines.
+#[test]
+fn slider_with_an_unknown_animation_is_rejected() {
+    let json = r#"{
+        "bones": [ { "name": "root" } ],
+        "constraints": [ { "type": "slider", "name": "s", "animation": "missing" } ]
+    }"#;
+    assert!(matches!(from_json(json), Err(LoadError::BadReference(name)) if name == "missing"));
+}

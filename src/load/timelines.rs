@@ -314,12 +314,7 @@ pub(super) fn parse_animation(
     // one-value curve keyed by slider name.
     if let Some(sliders) = anim.get("slider").and_then(Value::as_object) {
         for (slider_name, channels) in sliders {
-            // The JSON loader does not parse slider constraints (only the binary
-            // loader does), so a slider timeline with no matching constraint is
-            // skipped, not an error.
-            let Some(idx) = data.sliders.iter().position(|s| s.name == *slider_name) else {
-                continue;
-            };
+            let idx = lookup(&names.sliders, slider_name)?;
             let Some(channels) = channels.as_object() else {
                 continue;
             };
