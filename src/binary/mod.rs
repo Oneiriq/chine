@@ -195,9 +195,10 @@ pub fn from_binary(bytes: &[u8]) -> Result<SkeletonData, BinaryError> {
     }
     let x = r.float();
     let y = r.float();
-    let _width = r.float();
-    let _height = r.float();
+    let width = r.float();
+    let height = r.float();
     data.position = Vec2::new(x, y);
+    data.size = Vec2::new(width, height);
     data.reference_scale = r.float();
     let nonessential = r.bool();
     if nonessential {

@@ -65,6 +65,7 @@ fn parses_header_and_bones() {
     let data = from_binary(&b).unwrap();
     assert_eq!(data.spine_version.as_deref(), Some("4.3.00"));
     assert!((data.reference_scale - 1.0).abs() < 1e-6);
+    assert_eq!(data.size, Vec2::new(200.0, 300.0));
     assert_eq!(data.bones.len(), 1);
     let root = &data.bones[0];
     assert_eq!(root.name, "root");
