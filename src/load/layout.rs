@@ -246,3 +246,24 @@ fn a_link_without_timelines_keeps_its_own() {
     assert_eq!(deforms[0], [0.0, 0.0, 15.0, 0.0, 0.0, 10.0]);
     assert!(deforms[1].is_empty());
 }
+
+// An attachment's "name" is the name its path defaults to. The loader used
+// the attachment's key in the skin, so it drew the wrong atlas region.
+#[test]
+fn attachment_name_sets_the_default_path() {
+    let json = r#"{
+        "bones": [ { "name": "root" } ],
+        "slots": [ { "name": "s", "bone": "root", "attachment": "head" } ],
+        "skins": [ { "name": "default", "attachments": { "s": {
+            "head": { "name": "boy/head", "width": 10, "height": 10 },
+            "hat": { "name": "boy/hat", "path": "hats/red", "width": 10, "height": 10 }
+        } } } ]
+    }"#;
+    let data = from_json(json).unwrap();
+    let path = |key: &str| match data.default_skin.attachment(0, key) {
+        Some(Attachment::Region(region)) => region.path.clone(),
+        other => panic!("{key} is not a region: {other:?}"),
+    };
+    assert_eq!(path("head"), "boy/head");
+    assert_eq!(path("hat"), "hats/red");
+}

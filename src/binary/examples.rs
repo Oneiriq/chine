@@ -7,10 +7,12 @@
 use std::sync::Arc;
 
 use super::from_binary;
+use crate::attach::Attachment;
 use crate::data::SkeletonData;
 use crate::load::from_json;
 use crate::render::render;
 use crate::skel::Skeleton;
+use crate::skin::Skin;
 
 /// The official example rigs, each exported as `.json` and `.skel`.
 const EXAMPLES: [&str; 8] = [
@@ -57,6 +59,53 @@ fn bone_lengths_and_inherit_modes_match_json() {
                 b.length
             );
             assert_eq!(j.inherit, b.inherit, "{name} {}", j.name);
+        }
+    }
+}
+
+/// A short description of an attachment: its kind, and its atlas path for
+/// the kinds that draw.
+fn describe(attachment: &Attachment) -> String {
+    match attachment {
+        Attachment::Region(region) => format!("region {}", region.path),
+        Attachment::Mesh(mesh) => format!("mesh {} {}", mesh.path, mesh.vertex_count()),
+        Attachment::LinkedMesh(link) => format!("unresolved link {}", link.path),
+        Attachment::Path(_) => "path".into(),
+        Attachment::BoundingBox(_) => "bounding box".into(),
+        Attachment::Point(_) => "point".into(),
+        Attachment::Clipping(_) => "clipping".into(),
+    }
+}
+
+// The JSON loader took an attachment's path from its key in the skin rather
+// than its "name", so it drew other atlas regions than the .skel export.
+// Every attachment now loads the same from both exports, and every linked
+// mesh resolves.
+#[cfg_attr(
+    not(spine_examples),
+    ignore = "requires the official Spine examples in data/examples/"
+)]
+#[test]
+fn attachments_match_json() {
+    for name in EXAMPLES {
+        let (json, skel) = load(name);
+        let skins = |data: &SkeletonData| -> Vec<Skin> {
+            std::iter::once(&data.default_skin)
+                .chain(&data.skins)
+                .cloned()
+                .collect()
+        };
+        for (j, b) in skins(&json).iter().zip(&skins(&skel)) {
+            assert_eq!(j.name, b.name, "{name}");
+            let mut attachments = 0;
+            for (slot, key, attachment) in j.iter() {
+                let other = b.attachment(slot, key).map(describe);
+                let described = describe(attachment);
+                assert!(!described.starts_with("unresolved"), "{name}: {described}");
+                assert_eq!(Some(described), other, "{name} {} {slot} {key}", j.name);
+                attachments += 1;
+            }
+            assert_eq!(attachments, b.iter().count(), "{name} {}", j.name);
         }
     }
 }

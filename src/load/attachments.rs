@@ -29,7 +29,8 @@ pub(super) fn read_attachment(
     v: &Value,
     bone_count: usize,
 ) -> Result<Option<Attachment>, LoadError> {
-    let name = placeholder;
+    // An attachment's name defaults to its key, and its path to its name.
+    let name = v.get("name").and_then(Value::as_str).unwrap_or(placeholder);
     let path = v
         .get("path")
         .and_then(Value::as_str)
