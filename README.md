@@ -114,6 +114,13 @@ The loaders are validated against real exports (for example spineboy: 67 bones,
 52 slots, 11 animations, 7 IK + 7 transform constraints) and a binary rig that
 exercises sequences and clipping.
 
+To check both loaders against the official Spine 4.3 example rigs, put their
+`.json` and `.skel` exports in `data/examples/` (coin-pro, diamond-pro,
+mix-and-match-pro, raptor-pro, spineboy-pro, stretchyman-pro, tank-pro, and
+vine-pro). `cargo test` then loads each rig from both formats and requires the
+same bones and the same pose for every animation and skin. The directory is
+gitignored.
+
 ## Cargo features
 
 Both loaders are on by default. Disable either to trim dependencies or binary
