@@ -651,6 +651,8 @@ fn parse_attachment(name: &str, v: &Value) -> Option<Attachment> {
 }
 
 #[cfg(test)]
+mod layout;
+#[cfg(test)]
 mod robustness;
 #[cfg(test)]
 mod tests;

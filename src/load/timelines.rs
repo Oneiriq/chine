@@ -2,9 +2,9 @@ use super::*;
 
 use crate::anim::{
     compute_draw_order, Animation, AttachmentTimeline, BoneAxis, BoneTimeline, ConstraintTimeline,
-    DeformTimeline, DrawOrderTimeline, EventTimeline, PhysicsProperty, PhysicsResetTimeline,
-    SequenceTimeline, Timeline, GLOBAL_PHYSICS, PATH_MIX, PATH_POSITION, PATH_SPACING,
-    TRANSFORM_MIX,
+    DeformTimeline, DrawOrderTimeline, EventTimeline, Fallback, PhysicsProperty,
+    PhysicsResetTimeline, SequenceTimeline, Timeline, GLOBAL_PHYSICS, PATH_MIX, PATH_POSITION,
+    PATH_SPACING, TRANSFORM_MIX,
 };
 use crate::event::Event;
 
@@ -182,7 +182,7 @@ pub(super) fn parse_animation(
                     "mix" => (PhysicsProperty::Mix, 1.0),
                     _ => continue, // Unknown channels are skipped.
                 };
-                let (tl, dur) = read_curve_timeline(keys, idx, &[("value", default)]);
+                let (tl, dur) = read_curve_timeline(keys, idx, &value_channel(default));
                 duration = duration.max(dur);
                 timelines.push(Timeline::Physics(tl, property));
             }
@@ -237,7 +237,7 @@ pub(super) fn parse_animation(
                     }
                     "alpha" => {
                         // A one-channel value curve over the slot tint's alpha.
-                        let (tl, dur) = read_curve_timeline(keys, idx, &[("value", 0.0)]);
+                        let (tl, dur) = read_curve_timeline(keys, idx, &value_channel(0.0));
                         duration = duration.max(dur);
                         timelines.push(Timeline::SlotAlpha(tl));
                     }
@@ -382,12 +382,12 @@ pub(super) fn parse_animation(
                 }
                 match channel.as_str() {
                     "time" => {
-                        let (tl, dur) = read_curve_timeline(keys, idx, &[("value", 1.0)]);
+                        let (tl, dur) = read_curve_timeline(keys, idx, &value_channel(1.0));
                         duration = duration.max(dur);
                         timelines.push(Timeline::SliderTime(tl));
                     }
                     "mix" => {
-                        let (tl, dur) = read_curve_timeline(keys, idx, &[("value", 1.0)]);
+                        let (tl, dur) = read_curve_timeline(keys, idx, &value_channel(1.0));
                         duration = duration.max(dur);
                         timelines.push(Timeline::SliderMix(tl));
                     }
@@ -672,12 +672,26 @@ fn read_curve(
     bezier + 1
 }
 
+/// One keyframe's channel values: each channel's key, or its fallback when
+/// the key is absent.
+fn channel_values(k: &Value, channels: &[(&str, Fallback)]) -> Vec<f32> {
+    let mut values: Vec<f32> = Vec::with_capacity(channels.len());
+    for &(field, fallback) in channels {
+        let default = match fallback {
+            Fallback::Value(v) => v,
+            Fallback::Channel(i) => values.get(i).copied().unwrap_or(0.0),
+        };
+        values.push(f_or(k, field, default));
+    }
+    values
+}
+
 /// Read a generic N-channel constraint timeline (all channels Bezier-curved).
-/// `channels` is `(json field, default)` per channel.
+/// `channels` is `(json field, fallback)` per channel.
 fn read_curve_timeline(
     keys: &[Value],
     constraint: usize,
-    channels: &[(&str, f32)],
+    channels: &[(&str, Fallback)],
 ) -> (ConstraintTimeline, f32) {
     let n = keys.len();
     let nc = channels.len();
@@ -688,27 +702,27 @@ fn read_curve_timeline(
     while frame < n {
         let k = &keys[frame];
         let time = f(k, "time");
-        let values: Vec<f32> = channels
-            .iter()
-            .map(|(field, def)| f_or(k, field, *def))
-            .collect();
+        let values = channel_values(k, channels);
         tl.set_frame(frame, time, &values);
         duration = duration.max(time);
         if frame + 1 < n {
             if let Some(curve) = k.get("curve") {
                 let next = &keys[frame + 1];
                 let time2 = f(next, "time");
-                for (ci, (field, def)) in channels.iter().enumerate() {
-                    let v2 = f_or(next, field, *def);
-                    bezier = read_curve(
-                        curve, &mut tl, bezier, frame, ci, time, time2, values[ci], v2,
-                    );
+                let next_values = channel_values(next, channels);
+                for (ci, (&v1, &v2)) in values.iter().zip(&next_values).enumerate() {
+                    bezier = read_curve(curve, &mut tl, bezier, frame, ci, time, time2, v1, v2);
                 }
             }
         }
         frame += 1;
     }
     (tl, duration)
+}
+
+/// A one-channel curve timeline layout whose key is `value`.
+fn value_channel(default: f32) -> [(&'static str, Fallback); 1] {
+    [("value", Fallback::Value(default))]
 }
 
 /// Read an IK constraint timeline: mix and softness are Bezier-curved. Bend

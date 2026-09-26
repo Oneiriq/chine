@@ -19,6 +19,8 @@ mod robustness;
 mod state;
 mod timeline;
 
+#[cfg(feature = "json")]
+pub(crate) use channels::Fallback;
 pub(crate) use channels::{PATH_MIX, PATH_POSITION, PATH_SPACING, TRANSFORM_MIX};
 pub use state::{AnimationState, TrackEntry};
 pub(crate) use timeline::{
