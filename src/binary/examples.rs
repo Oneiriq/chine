@@ -195,8 +195,9 @@ fn sequence_frames_match_json() {
         let (json, skel) = (Arc::new(json), Arc::new(skel));
         for anim in &json.animations {
             let other = skel.find_animation(anim.name()).expect("the animation");
-            for step in 0..=20 {
-                let time = anim.duration() * step as f32 / 20.0;
+            // Times off the keys, which the two exports round differently.
+            for step in 0..20 {
+                let time = anim.duration() * (step as f32 + 0.37) / 20.0;
                 let frames = |data: &Arc<SkeletonData>, anim: &crate::anim::Animation| {
                     let mut sk = Skeleton::new(Arc::clone(data));
                     anim.apply(&mut sk, -1.0, time, 1.0, MixFrom::Setup, false);
@@ -211,6 +212,70 @@ fn sequence_frames_match_json() {
                     "{name} {} at {time}",
                     anim.name()
                 );
+            }
+        }
+    }
+}
+
+/// Each bone's world transform and every drawn vertex, `time` into `anim`
+/// played from the setup pose with `skin` active.
+fn posed(
+    data: &Arc<SkeletonData>,
+    skin: Option<&str>,
+    anim: &crate::anim::Animation,
+    time: f32,
+) -> (Vec<[f32; 6]>, Vec<glam::Vec2>) {
+    let mut sk = Skeleton::new(Arc::clone(data));
+    if let Some(skin) = skin {
+        sk.set_skin(skin);
+    }
+    anim.apply(&mut sk, -1.0, time, 1.0, crate::anim::MixFrom::Setup, false);
+    sk.update_world_transform();
+    let bones = sk
+        .bones()
+        .iter()
+        .map(|b| [b.a(), b.b(), b.c(), b.d(), b.world_x(), b.world_y()])
+        .collect();
+    let vertices = render(&sk)
+        .iter()
+        .flat_map(|c| c.positions.iter().copied())
+        .collect();
+    (bones, vertices)
+}
+
+// Every animation poses the bones and draws the vertices of each skin within
+// float precision of each other from both exports. JSON stores decimals and
+// the binary stores floats, so the large rigs differ by up to about 0.3.
+#[cfg_attr(
+    not(spine_examples),
+    ignore = "requires the official Spine examples in data/examples/"
+)]
+#[test]
+fn animations_pose_the_same_from_both_exports() {
+    for name in EXAMPLES {
+        let (json, skel) = load(name);
+        let skins: Vec<String> = json.skins.iter().map(|s| s.name.clone()).collect();
+        let (json, skel) = (Arc::new(json), Arc::new(skel));
+        for skin in std::iter::once(None).chain(skins.iter().map(|s| Some(s.as_str()))) {
+            for anim in &json.animations {
+                let other = skel.find_animation(anim.name()).expect("the animation");
+                // Times off the keys: JSON and binary round a key time
+                // differently, so a sample right on a key can land on
+                // either side of it.
+                for step in 0..5 {
+                    let time = anim.duration() * (step as f32 + 0.37) / 5.0;
+                    let (bones, vertices) = posed(&json, skin, anim, time);
+                    let (other_bones, other_vertices) = posed(&skel, skin, other, time);
+                    let at = format!("{name} {skin:?} {} at {time}", anim.name());
+                    assert_eq!(vertices.len(), other_vertices.len(), "{at}");
+                    for (a, b) in bones.iter().zip(&other_bones) {
+                        let worst = (0..6).map(|k| (a[k] - b[k]).abs()).fold(0.0, f32::max);
+                        assert!(worst < 0.05, "{at}: bone off by {worst}");
+                    }
+                    for (a, b) in vertices.iter().zip(&other_vertices) {
+                        assert!((*a - *b).length() < 0.5, "{at}: {a} vs {b}");
+                    }
+                }
             }
         }
     }
