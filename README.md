@@ -94,7 +94,8 @@ animating, and emitting draw data:
 - **Constraints**, ordered by a topological update cache:
   - **IK**: 1- and 2-bone solvers with softness, stretch, compress, and scale.
   - **Transform**: the 4.3 source-to-target property-mapping system.
-  - **Path**: constant-speed Bezier arc-length sampling along a path attachment.
+  - **Path**: Bezier sampling along the path attachment a slot shows, by arc
+    length or, for a path without constant speed, by its exported curve lengths.
   - **Physics**: the 4.3 spring-damper simulation, with skeleton wind / gravity.
   - **Slider**: the 4.3 slider constraint.
 - **Animation**: every timeline kind, with stepped / linear / Bezier curves:
