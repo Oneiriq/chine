@@ -16,10 +16,10 @@ use std::sync::Arc;
 use glam::Vec2;
 
 use crate::anim::{
-    compute_draw_order, Animation, AttachmentTarget, AttachmentTimeline, BoneAxis, BoneTimeline,
-    ConstraintTimeline, DeformTimeline, DrawOrderTimeline, EventTimeline, InheritTimeline,
-    PhysicsProperty, PhysicsResetTimeline, SequenceTimeline, Timeline, PATH_MIX, PATH_POSITION,
-    PATH_SPACING, TRANSFORM_MIX,
+    compute_draw_order, sort_draw_order_moves, Animation, AttachmentTarget, AttachmentTimeline,
+    BoneAxis, BoneTimeline, ConstraintTimeline, DeformTimeline, DrawOrderFolderTimeline,
+    DrawOrderTimeline, EventTimeline, InheritTimeline, PhysicsProperty, PhysicsResetTimeline,
+    SequenceTimeline, Timeline, PATH_MIX, PATH_POSITION, PATH_SPACING, TRANSFORM_MIX,
 };
 use crate::attach::{
     Attachment, AttachmentKey, BoundingBoxAttachment, ClippingAttachment, LinkedMeshAttachment,
@@ -156,9 +156,9 @@ fn inherit_from(ordinal: usize) -> Inherit {
 /// / path / physics / slider constraints, skins (including sequence
 /// attachments), events, and animations. The timeline groups decoded are bone
 /// (rotate / translate / scale / shear / inherit), slot (attachment, color,
-/// two-color, alpha), deform, draw order, event, the IK / transform / path /
-/// physics constraint timelines, and the slider and sequence timelines. Draw
-/// order folder timelines are read past without being kept.
+/// two-color, alpha), deform, draw order, draw order folder, event, the IK /
+/// transform / path / physics constraint timelines, and the slider and
+/// sequence timelines.
 ///
 /// Every index the file stores (bone parents, slot bones, constraint bones and
 /// targets, timeline targets, skin slots, weighted vertex bones, mesh

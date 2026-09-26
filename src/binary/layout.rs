@@ -359,3 +359,76 @@ fn linked_mesh_skin_past_the_skin_list_is_corrupt() {
     o.flap(0);
     assert_eq!(from_binary(&o.0).err(), Some(BinaryError::CorruptLength));
 }
+
+/// A rig of four slots whose animation holds one draw order folder timeline
+/// over `folder`, with one key at time 0 that makes `moves`.
+fn folder_rig(folder: &[u32], moves: &[(u32, u32)]) -> Vec<u8> {
+    let mut o = Out::default();
+    o.header();
+    o.var(1);
+    o.bone("root", None);
+    o.var(4);
+    for name in ["a", "b", "c", "d"] {
+        o.str(name);
+        o.var(0); // bone
+        o.0.extend_from_slice(&[0xFF; 8]); // white, no dark color
+        o.var(0); // no attachment
+        o.var(0); // blend
+    }
+    o.var(0); // constraints
+    o.var(0); // default skin
+    o.var(0); // named skins
+    o.var(0); // events
+    o.var(1);
+    o.str("a");
+    o.var(0); // timeline count
+    for _ in 0..9 {
+        o.var(0); // slot to attachment timelines, and the draw order
+    }
+    o.var(1); // draw order folders
+    o.var(u32::try_from(folder.len()).unwrap());
+    for &slot in folder {
+        o.var(slot);
+    }
+    o.var(1); // keys
+    o.floats(&[0.0]);
+    o.var(u32::try_from(moves.len()).unwrap());
+    for &(position, offset) in moves {
+        o.var(position);
+        o.var(offset);
+    }
+    o.var(0); // events
+    o.0
+}
+
+// Draw order folder timelines reorder a folder of slots among the positions
+// those slots hold. The loader read past them, so the folder kept its setup
+// order.
+#[test]
+fn draw_order_folder_timelines_load_and_apply() {
+    let data = from_binary(&folder_rig(&[1, 3], &[(0, 1)])).expect("the rig loads");
+    let anim = Arc::clone(&data.animations[0]);
+    let mut sk = Skeleton::new(Arc::new(data));
+    anim.apply(&mut sk, -1.0, 0.0, 1.0, MixFrom::Setup, false);
+    assert_eq!(sk.draw_order(), [0, 3, 2, 1]);
+}
+
+// Spine never exports a folder slot past the slot table, a folder that lists
+// a slot twice, or a key whose moves do not order the folder.
+#[test]
+fn malformed_draw_order_folders_are_corrupt() {
+    let cases: [(&[u32], &[(u32, u32)]); 4] = [
+        (&[1, 9], &[]),
+        (&[1, 1], &[]),
+        (&[1, 3], &[(0, 2)]),
+        (&[1, 3], &[(0, 1), (0, 1)]),
+    ];
+    for (folder, moves) in cases {
+        let loaded = from_binary(&folder_rig(folder, moves));
+        assert_eq!(
+            loaded.err(),
+            Some(BinaryError::CorruptLength),
+            "{folder:?} {moves:?}"
+        );
+    }
+}

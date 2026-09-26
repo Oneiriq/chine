@@ -258,6 +258,50 @@ pub(super) fn apply_draw_order(t: &DrawOrderTimeline, skel: &mut Skeleton, time:
     }
 }
 
+/// Draw order folder timeline: a stepped switch of the order of the folder's
+/// slots among the draw order positions they hold. Before the first key, a
+/// mix from the setup pose or from the first application shows the folder in
+/// setup order.
+pub(super) fn apply_draw_order_folder(
+    t: &DrawOrderFolderTimeline,
+    skel: &mut Skeleton,
+    time: f32,
+    from: MixFrom,
+) {
+    let Some(&first) = t.times.first() else {
+        return;
+    };
+    // The folder position shown at each of the folder's draw order
+    // positions. `None` shows the folder in setup order.
+    let order = if time < first {
+        if matches!(from, MixFrom::Current) {
+            return;
+        }
+        None
+    } else {
+        let Some(moves) = t.moves.get(search_step(&t.times, time)) else {
+            return;
+        };
+        (!moves.is_empty()).then(|| draw_order_from_sorted(t.slots.len(), moves))
+    };
+    let mut found = 0;
+    for entry in skel.draw_order_mut() {
+        if found == t.slots.len() {
+            break;
+        }
+        if t.sorted.binary_search(entry).is_err() {
+            continue;
+        }
+        let position = order
+            .as_ref()
+            .map_or(Some(found), |order| order.get(found).copied());
+        if let Some(&slot) = position.and_then(|position| t.slots.get(position)) {
+            *entry = slot;
+        }
+        found += 1;
+    }
+}
+
 /// The attachment slot `slot` currently shows, when the timelines of the
 /// attachment at `key` drive it. The slot's attachment resolves through the
 /// active skin, then the default skin, as rendering resolves it. It is driven

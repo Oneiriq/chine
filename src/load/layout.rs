@@ -267,3 +267,60 @@ fn attachment_name_sets_the_default_path() {
     assert_eq!(path("head"), "boy/head");
     assert_eq!(path("hat"), "hats/red");
 }
+
+/// A rig of four slots, "a" to "d", whose animation "a" holds the draw
+/// order folder timeline `folder`.
+fn folder_rig(folder: &str) -> String {
+    format!(
+        r#"{{
+        "bones": [ {{ "name": "root" }} ],
+        "slots": [
+            {{ "name": "a", "bone": "root" }}, {{ "name": "b", "bone": "root" }},
+            {{ "name": "c", "bone": "root" }}, {{ "name": "d", "bone": "root" }}
+        ],
+        "animations": {{ "a": {{ "drawOrderFolder": [ {folder} ] }} }}
+    }}"#
+    )
+}
+
+// Draw order folder timelines reorder a folder of slots among the positions
+// those slots hold. The loader did not read them, so the folder kept its
+// setup order.
+#[test]
+fn draw_order_folder_timelines_reorder_their_slots() {
+    let json = folder_rig(
+        r#"{ "slots": [ "b", "d" ], "keys": [
+            { "time": 0.5, "offsets": [ { "slot": "b", "offset": 1 } ] },
+            { "time": 1 }
+        ] }"#,
+    );
+    assert_eq!(posed(&json, "a", 0.5).draw_order(), [0, 3, 2, 1]);
+    // A key with no offsets shows the folder in setup order.
+    assert_eq!(posed(&json, "a", 1.0).draw_order(), [0, 1, 2, 3]);
+
+    // Before the first key, a mix from the setup pose puts the folder back in
+    // setup order.
+    let data = from_json(&json).unwrap();
+    let anim = Arc::clone(data.find_animation("a").unwrap());
+    let mut sk = Skeleton::new(Arc::new(data));
+    anim.apply(&mut sk, -1.0, 0.5, 1.0, MixFrom::Setup, false);
+    anim.apply(&mut sk, -1.0, 0.25, 1.0, MixFrom::Current, false);
+    assert_eq!(sk.draw_order(), [0, 3, 2, 1]);
+    anim.apply(&mut sk, -1.0, 0.25, 1.0, MixFrom::Setup, false);
+    assert_eq!(sk.draw_order(), [0, 1, 2, 3]);
+}
+
+// Spine never exports a folder that lists a slot twice, or a key that moves a
+// slot outside its folder or out of its range.
+#[test]
+fn malformed_draw_order_folders_are_rejected() {
+    let folders = [
+        r#"{ "slots": [ "b", "b" ], "keys": [ { "time": 0 } ] }"#,
+        r#"{ "slots": [ "b", "d" ], "keys": [ { "offsets": [ { "slot": "c", "offset": 1 } ] } ] }"#,
+        r#"{ "slots": [ "b", "d" ], "keys": [ { "offsets": [ { "slot": "d", "offset": 1 } ] } ] }"#,
+    ];
+    for folder in folders {
+        let error = from_json(&folder_rig(folder)).unwrap_err();
+        assert!(matches!(error, LoadError::Schema(_)), "{folder}: {error}");
+    }
+}

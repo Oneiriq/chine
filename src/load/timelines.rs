@@ -1,10 +1,11 @@
 use super::*;
 
 use crate::anim::{
-    compute_draw_order, Animation, AttachmentTarget, AttachmentTimeline, BoneAxis, BoneTimeline,
-    ConstraintTimeline, DeformTimeline, DrawOrderTimeline, EventTimeline, Fallback,
-    InheritTimeline, PhysicsProperty, PhysicsResetTimeline, SequenceTimeline, Timeline,
-    GLOBAL_PHYSICS, PATH_MIX, PATH_POSITION, PATH_SPACING, TRANSFORM_MIX,
+    compute_draw_order, sort_draw_order_moves, Animation, AttachmentTarget, AttachmentTimeline,
+    BoneAxis, BoneTimeline, ConstraintTimeline, DeformTimeline, DrawOrderFolderTimeline,
+    DrawOrderTimeline, EventTimeline, Fallback, InheritTimeline, PhysicsProperty,
+    PhysicsResetTimeline, SequenceTimeline, Timeline, GLOBAL_PHYSICS, PATH_MIX, PATH_POSITION,
+    PATH_SPACING, TRANSFORM_MIX,
 };
 use crate::attach::AttachmentKey;
 use crate::event::Event;
@@ -292,6 +293,17 @@ pub(super) fn parse_animation(
         }
     }
 
+    // Draw order folder timelines (Spine 4.3): the draw order of a folder of
+    // slots, each keyed like the draw order over the folder's slots.
+    if let Some(folders) = anim.get("drawOrderFolder").and_then(Value::as_array) {
+        for folder in folders {
+            if let Some((tl, dur)) = read_draw_order_folder(folder, names)? {
+                duration = duration.max(dur);
+                timelines.push(tl);
+            }
+        }
+    }
+
     if let Some(events) = anim.get("events").and_then(Value::as_array) {
         if !events.is_empty() {
             let (tl, dur) = read_event_timeline(events, data, names, budget)?;
@@ -363,6 +375,70 @@ pub(super) fn parse_animation(
     }
 
     Ok(Animation::new(name, duration, timelines))
+}
+
+/// Read one draw order folder timeline: its `slots` (in setup order), then
+/// per key a time and `offsets` that move folder slots by an offset within
+/// the folder. `None` when the folder has no slots or no keys.
+///
+/// # Errors
+/// Returns [`LoadError::BadReference`] for an unknown slot, and
+/// [`LoadError::Schema`] for a slot listed twice in the folder, or for key
+/// offsets that name a slot outside the folder or do not order it.
+fn read_draw_order_folder(
+    folder: &Value,
+    names: &Names,
+) -> Result<Option<(Timeline, f32)>, LoadError> {
+    let corrupt = |problem: &str| LoadError::Schema(format!("draw order folder {problem}"));
+    let mut slots = Vec::new();
+    for slot in folder
+        .get("slots")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        slots.push(names.slot(slot.as_str().unwrap_or_default())?);
+    }
+    let mut sorted = slots.clone();
+    sorted.sort_unstable();
+    if sorted.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(corrupt("lists a slot twice"));
+    }
+    // A slot's position in the folder.
+    let positions: HashMap<usize, usize> = slots.iter().enumerate().map(|(i, &s)| (s, i)).collect();
+    let keys = folder.get("keys").and_then(Value::as_array);
+    let mut times = Vec::new();
+    let mut moves = Vec::new();
+    for k in keys.into_iter().flatten() {
+        let mut key = Vec::new();
+        for offset in k
+            .get("offsets")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let slot = names.slot(str_ref(offset, "slot")?)?;
+            let position = *positions
+                .get(&slot)
+                .ok_or_else(|| corrupt("moves a slot outside the folder"))?;
+            let by = offset.get("offset").and_then(Value::as_i64).unwrap_or(0);
+            let by = i32::try_from(by).map_err(|_| corrupt("moves a slot out of range"))?;
+            key.push((position, by));
+        }
+        if !sort_draw_order_moves(slots.len(), &mut key) {
+            return Err(corrupt("offsets do not form an order"));
+        }
+        times.push(f(k, "time"));
+        moves.push(key);
+    }
+    let Some(&duration) = times.last() else {
+        return Ok(None);
+    };
+    if slots.is_empty() {
+        return Ok(None);
+    }
+    let timeline = DrawOrderFolderTimeline::new(slots, times, moves);
+    Ok(Some((Timeline::DrawOrderFolder(timeline), duration)))
 }
 
 /// Read one draw-order keyframe's `offsets` into a full slot ordering (the setup

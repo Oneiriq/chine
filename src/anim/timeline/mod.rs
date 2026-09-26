@@ -198,6 +198,60 @@ impl DrawOrderTimeline {
     }
 }
 
+/// A draw order folder timeline (Spine 4.3): stepped keys that reorder a
+/// subset of the slots, the folder, among the draw order positions those
+/// slots hold. The other slots keep their positions.
+///
+/// Each key stores its moves, as a draw order key does, over positions in
+/// the folder: `(position, offset)` pairs sorted by position. A key with no
+/// moves shows the folder in setup order. The ordering is built when a key
+/// applies, so a file cannot make the loader hold one full ordering per key.
+#[derive(Debug, Clone)]
+pub(crate) struct DrawOrderFolderTimeline {
+    /// The folder's slots, in setup order.
+    slots: Vec<usize>,
+    /// The folder's slots, sorted, to test membership.
+    sorted: Vec<usize>,
+    times: Vec<f32>,
+    moves: Vec<Vec<(usize, i32)>>,
+}
+
+impl DrawOrderFolderTimeline {
+    /// A folder timeline over `slots` (distinct, in setup order), with
+    /// per-key moves that [`sort_draw_order_moves`] accepted.
+    pub(crate) fn new(slots: Vec<usize>, times: Vec<f32>, moves: Vec<Vec<(usize, i32)>>) -> Self {
+        let mut sorted = slots.clone();
+        sorted.sort_unstable();
+        Self {
+            slots,
+            sorted,
+            times,
+            moves,
+        }
+    }
+}
+
+/// Sort a draw order key's moves by position, and check that they form an
+/// ordering of `count` positions: each moves a distinct position in range to
+/// a distinct position in range. Spine never exports other moves.
+pub(crate) fn sort_draw_order_moves(count: usize, moves: &mut [(usize, i32)]) -> bool {
+    moves.sort_unstable_by_key(|&(position, _)| position);
+    let mut targets = Vec::with_capacity(moves.len());
+    for &(position, offset) in moves.iter() {
+        let target = isize::try_from(offset)
+            .ok()
+            .and_then(|offset| position.checked_add_signed(offset))
+            .filter(|&target| target < count && position < count);
+        match target {
+            Some(target) => targets.push(target),
+            None => return false,
+        }
+    }
+    targets.sort_unstable();
+    let distinct = |sorted: &[usize]| sorted.windows(2).all(|pair| pair[0] < pair[1]);
+    distinct(&targets) && moves.windows(2).all(|pair| pair[0].0 < pair[1].0)
+}
+
 /// Compute a draw order from slot offsets, mirroring Spine: each listed slot
 /// moves by its offset, and the rest keep their relative order. Shared by the JSON
 /// and binary loaders.
@@ -207,6 +261,11 @@ impl DrawOrderTimeline {
 /// slot fills keeps `usize::MAX`, which the renderer skips.
 pub(crate) fn compute_draw_order(slot_count: usize, offsets: &mut [(usize, i32)]) -> Vec<usize> {
     offsets.sort_by_key(|(slot, _)| *slot);
+    draw_order_from_sorted(slot_count, offsets)
+}
+
+/// [`compute_draw_order`] for offsets already sorted by slot.
+fn draw_order_from_sorted(slot_count: usize, offsets: &[(usize, i32)]) -> Vec<usize> {
     let mut draw_order = vec![usize::MAX; slot_count];
     let mut unchanged = Vec::with_capacity(slot_count.saturating_sub(offsets.len()));
     let mut original_index = 0;
@@ -462,6 +521,8 @@ pub(crate) enum Timeline {
     Attachment(AttachmentTimeline),
     /// Slot draw order (stepped permutations).
     DrawOrder(DrawOrderTimeline),
+    /// The draw order of a folder of slots (stepped).
+    DrawOrderFolder(DrawOrderFolderTimeline),
     /// Animation events fired on keyframe crossings.
     Event(EventTimeline),
     /// Mesh deform (per-vertex offsets).
@@ -515,6 +576,7 @@ impl Timeline {
             }
             Timeline::Attachment(t) => apply_attachment(t, skeleton, time, from),
             Timeline::DrawOrder(t) => apply_draw_order(t, skeleton, time),
+            Timeline::DrawOrderFolder(t) => apply_draw_order_folder(t, skeleton, time, from),
             Timeline::Event(t) => apply_event(t, skeleton, last_time, time),
             Timeline::Deform(t) => apply_deform(t, skeleton, time, alpha, from),
             Timeline::Sequence(t) => apply_sequence(t, skeleton, time),

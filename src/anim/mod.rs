@@ -10,7 +10,7 @@
 //! mixing and a queue. The timelines are bone rotate / translate / scale / shear
 //! and single-axis variants, bone inherit, IK / transform / path / physics /
 //! slider mixes, slot color / alpha / two-color / attachment / draw-order,
-//! deform, events, and sequences.
+//! draw order folders, deform, events, and sequences.
 
 mod channels;
 mod curve;
@@ -24,9 +24,10 @@ pub(crate) use channels::Fallback;
 pub(crate) use channels::{PATH_MIX, PATH_POSITION, PATH_SPACING, TRANSFORM_MIX};
 pub use state::{AnimationState, TrackEntry};
 pub(crate) use timeline::{
-    compute_draw_order, AttachmentTarget, AttachmentTimeline, BoneAxis, BoneTimeline,
-    ConstraintTimeline, DeformTimeline, DrawOrderTimeline, EventTimeline, InheritTimeline,
-    PhysicsProperty, PhysicsResetTimeline, SequenceTimeline, Timeline, GLOBAL_PHYSICS,
+    compute_draw_order, sort_draw_order_moves, AttachmentTarget, AttachmentTimeline, BoneAxis,
+    BoneTimeline, ConstraintTimeline, DeformTimeline, DrawOrderFolderTimeline, DrawOrderTimeline,
+    EventTimeline, InheritTimeline, PhysicsProperty, PhysicsResetTimeline, SequenceTimeline,
+    Timeline, GLOBAL_PHYSICS,
 };
 
 use crate::skel::Skeleton;

@@ -384,6 +384,12 @@ impl Skeleton {
         self.draw_order.extend_from_slice(order);
     }
 
+    /// The current draw order, to reorder in place (for the draw order folder
+    /// timeline).
+    pub(crate) fn draw_order_mut(&mut self) -> &mut [usize] {
+        &mut self.draw_order
+    }
+
     /// The events fired by the animation since the last apply (footsteps, hit
     /// frames, audio cues).
     #[must_use]

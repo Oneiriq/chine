@@ -101,7 +101,8 @@ animating, and emitting draw data:
   - bone rotate / translate / scale / shear, plus single-axis variants and
     inherit-mode keys
   - IK / transform / path / physics / slider mix timelines
-  - slot color / alpha / two-color / attachment-swap / draw-order
+  - slot color / alpha / two-color / attachment-swap / draw-order, and the
+    draw order of slot folders
   - deform, events, and sequences
   - a multi-track `AnimationState` with crossfade mixing and an animation queue
 - **Rendering**: a renderer-agnostic `RenderCommand` stream, including two-color

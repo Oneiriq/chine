@@ -8,6 +8,10 @@ use deform::{
     timeline_target,
 };
 
+mod draw_order;
+use draw_order::read_draw_order_folders;
+pub(super) use draw_order::read_draw_order_timeline;
+
 /// Wrap a parsed bone timeline in its [`Timeline`] variant.
 fn wrap((tl, d): (BoneTimeline, f32), make: fn(BoneTimeline) -> Timeline) -> (Timeline, f32) {
     (make(tl), d)
@@ -429,25 +433,10 @@ pub(super) fn read_animation(
         timelines.push(Timeline::DrawOrder(tl));
     }
 
-    // Draw-order folder timelines (new in Spine 4.3): folder-scoped slot
-    // reorders. chine has no folder timeline, so these are consumed to keep the
-    // stream aligned.
-    let folder_count = r.count();
-    for _ in 0..folder_count {
-        let folder_slot_count = r.count();
-        for _ in 0..folder_slot_count {
-            r.var_usize();
-        }
-        let key_count = r.count();
-        for _ in 0..key_count {
-            r.float();
-            let change_count = r.count();
-            for _ in 0..change_count {
-                r.var_usize();
-                r.var_usize();
-            }
-        }
-    }
+    // Draw order folder timelines (new in Spine 4.3): the draw order of a
+    // folder of slots.
+    let d = read_draw_order_folders(r, data.slots.len(), &mut timelines);
+    duration = duration.max(d);
 
     // Event timeline: keyframes that fire named events with per-key overrides.
     let event_count = r.count();
@@ -772,77 +761,6 @@ fn read_slot_attachment_timeline(
         duration = duration.max(time);
     }
     (AttachmentTimeline::new(slot, times, names), duration)
-}
-
-/// Read a draw-order timeline: per frame a time and a set of slot moves (each a
-/// slot index and an offset), resolved into a full slot permutation. A frame
-/// with no moves keeps the setup order.
-pub(super) fn read_draw_order_timeline(
-    r: &mut BinaryReader,
-    frames: usize,
-    slot_count: usize,
-) -> (DrawOrderTimeline, f32) {
-    let frames = fitting_frames(r, frames, 5);
-    let mut times = Vec::with_capacity(frames);
-    let mut orders = Vec::with_capacity(frames);
-    let mut duration = 0.0_f32;
-    for _ in 0..frames {
-        let time = r.float();
-        let change_count = r.count();
-        let mut offsets: Vec<(usize, i32)> = Vec::with_capacity(change_count);
-        for _ in 0..change_count {
-            let slot = r.var_usize();
-            // The offset is a signed 32-bit value stored as a var_uint, so
-            // this cast reinterprets its bits.
-            let offset = r.var_uint() as i32;
-            offsets.push((slot, offset));
-        }
-        let order = if offsets.is_empty() {
-            (0..slot_count).collect()
-        } else {
-            resolve_draw_order(r, slot_count, &mut offsets)
-        };
-        times.push(time);
-        orders.push(order);
-        duration = duration.max(time);
-    }
-    (DrawOrderTimeline::new(times, orders), duration)
-}
-
-/// Resolve one draw-order key's slot moves into a full slot permutation.
-///
-/// Spine moves each slot at most once and keeps it inside the slot list, so
-/// the key must name distinct slots in range, move each to a position in
-/// range, and move no two slots to the same position. Any other key is
-/// corrupt: this records the error and keeps the setup order.
-fn resolve_draw_order(
-    r: &mut BinaryReader,
-    slot_count: usize,
-    offsets: &mut [(usize, i32)],
-) -> Vec<usize> {
-    let in_range = |&(slot, offset): &(usize, i32)| {
-        i32::try_from(slot_count).is_ok()
-            && slot < slot_count
-            && isize::try_from(offset)
-                .ok()
-                .and_then(|offset| slot.checked_add_signed(offset))
-                .is_some_and(|position| position < slot_count)
-    };
-    offsets.sort_by_key(|&(slot, _)| slot);
-    let distinct = offsets
-        .iter()
-        .zip(offsets.iter().skip(1))
-        .all(|(a, b)| a.0 < b.0);
-    if distinct && offsets.iter().all(in_range) {
-        let order = compute_draw_order(slot_count, offsets);
-        // Two slots moved to one position leave a gap the permutation
-        // cannot fill, marked by `usize::MAX`.
-        if !order.contains(&usize::MAX) {
-            return order;
-        }
-    }
-    corrupt(r);
-    (0..slot_count).collect()
 }
 
 /// Read an event timeline: per frame a time and the fired event. Each event's
