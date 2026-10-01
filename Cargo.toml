@@ -8,6 +8,7 @@ description = "A pure-Rust Spine 4.3 skeletal animation runtime (renderer-agnost
 repository = "https://github.com/Oneiriq/chine"
 keywords = ["spine", "animation", "skeletal", "2d", "gamedev"]
 categories = ["game-development", "graphics"]
+exclude = ["/assets"]
 
 [workspace]
 members = ["chine-web"]

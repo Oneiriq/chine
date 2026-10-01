@@ -1,4 +1,6 @@
-# chine
+<p align="center">
+  <img src="assets/banner.png" alt="Chine, a pure-Rust Spine 4.3 skeletal animation runtime" width="100%">
+</p>
 
 A pure-Rust [Spine](https://esotericsoftware.com/) 4.3 skeletal animation runtime, renderer-agnostic.
 
