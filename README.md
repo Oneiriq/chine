@@ -45,6 +45,11 @@ flowchart TD
 
 ## Usage
 
+```toml
+[dependencies]
+chine = "0.2"
+```
+
 ```rust
 use std::sync::Arc;
 use chine::anim::AnimationState;
@@ -164,7 +169,6 @@ has the cargo-fuzz targets that check this.
 
 - broader validation against more production exports
 - performance passes on the per-frame pose and draw paths
-- publishing to crates.io once the API has settled
 
 [`CHANGELOG.md`](CHANGELOG.md) lists the changes in each version.
 
