@@ -6,6 +6,8 @@ authors = ["Shon Thomas <shon@oneiriq.com>"]
 license = "MIT"
 description = "WebAssembly + WebGL2 web-component runtime for the chine Spine 4.3 runtime."
 repository = "https://github.com/Oneiriq/chine"
+# Ships as a WebAssembly bundle, not a crate: only `chine` goes to crates.io.
+publish = false
 
 [lib]
 crate-type = ["cdylib", "rlib"]

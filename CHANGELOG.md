@@ -1,6 +1,9 @@
 # Changelog
 
-## 0.2.0 (unreleased)
+## 0.2.0 (2026-10-01)
+
+The first release published to crates.io. `chine-web` is not published; it
+ships as a WebAssembly bundle.
 
 ### Added
 
